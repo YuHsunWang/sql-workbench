@@ -180,6 +180,46 @@ test('round trip: supported node shapes', () => {
   return `${inputs.length} shapes equivalent`;
 });
 
+test('H3: OFFSET parses, executes and generates in all dialects', () => {
+  const inputs = {
+    mysql:'SELECT * FROM t ORDER BY id ASC LIMIT 2,2',
+    postgres:'SELECT * FROM t ORDER BY id ASC LIMIT 2 OFFSET 2',
+    mssql:'SELECT * FROM t ORDER BY id ASC OFFSET 2 ROWS FETCH NEXT 2 ROWS ONLY',
+    oracle:'SELECT * FROM t ORDER BY id ASC OFFSET 2 ROWS FETCH NEXT 2 ROWS ONLY',
+  };
+  for (const [dialect, sql] of Object.entries(inputs)) {
+    api.state.dialect = dialect;
+    const graph = graphFromSQL(api, sql);
+    const sort = graph.nodes.find(n => n.type === 'sort');
+    assert.deepEqual(json([sort.limit, sort.offset]), [2,2]);
+    installGraph(api, graph, {t:{cols:[{name:'id'}],rows:[[1],[2],[3],[4]]}});
+    assert.deepEqual(json(api.evalNode(graph.nodes.find(n=>n.type === 'output')).rows), [[3],[4]]);
+    const generated = api.buildSQL();
+    if(dialect === 'mysql' || dialect === 'postgres') assert.match(generated, /LIMIT 2 OFFSET 2/);
+    else assert.match(generated, /OFFSET 2 ROWS\nFETCH NEXT 2 ROWS ONLY/);
+    assert.equal(signature(api.astToGraph(api.parseSQLText(generated))), signature(graph));
+  }
+  return 'LIMIT/OFFSET and OFFSET/FETCH all return rows 3,4';
+});
+
+test('M11: limit without ORDER BY round-trips in all dialects', () => {
+  const inputs = {
+    mysql:'SELECT * FROM t LIMIT 2', postgres:'SELECT * FROM t LIMIT 2',
+    mssql:'SELECT TOP 2 * FROM t', oracle:'SELECT * FROM t FETCH FIRST 2 ROWS ONLY',
+  };
+  for (const [dialect, sql] of Object.entries(inputs)) {
+    const generated = roundTrip(sql, dialect);
+    assert.doesNotMatch(generated, /ORDER BY\s+(?:``|""|\[\])/);
+    assert.doesNotMatch(generated, /ORDER BY\s+(?:ASC|DESC)/);
+  }
+  for (const [dialect, name] of [['mssql','SQL Server'],['oracle','Oracle']]) {
+    api.state.dialect = dialect;
+    graphFromSQL(api, 'SELECT * FROM t OFFSET 2 ROWS FETCH NEXT 2 ROWS ONLY');
+    assert.match(api.buildSQL(), new RegExp('-- 無法套用 OFFSET 2：'+name+' 需要先指定 ORDER BY，這次未限制列數。'));
+  }
+  return 'four dialects omit empty ORDER BY; SQL Server and Oracle warn on unordered OFFSET';
+});
+
 test('generator: ordinary special literals and identifiers', () => {
   const value = "O'Reilly\\path\n`\"[]";
   api.state.dialect = 'postgres';

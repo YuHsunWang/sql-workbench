@@ -806,7 +806,9 @@ function evalNode(node, ctx){
     const s = S(), i = s.cols.indexOf(node.by);
     let rows = s.rows.slice();
     if(i >= 0) rows.sort((a,b)=>cmpVal(a[i], b[i]) * (node.dir === 'DESC' ? -1 : 1));
-    if(Number(node.limit) > 0) rows = rows.slice(0, Number(node.limit));
+    const offset = Math.max(0, Number(node.offset) || 0);
+    if(Number(node.limit) > 0) rows = rows.slice(offset, offset + Number(node.limit));
+    else if(offset > 0) rows = rows.slice(offset);
     return {cols:s.cols, rows:rows};
   }
 
@@ -1014,15 +1016,25 @@ function schemaOf(n){
   return state.schema[(n.ns ? n.ns + '.' : '') + n.table] || state.schema[n.table] || null;
 }
 
-/* SQL Server 的 TOP 長在 SELECT 上，其他家長在尾巴 */
-function limHead(lim){ return (lim > 0 && D().lim === 'top') ? 'SELECT TOP '+lim+' *' : 'SELECT *'; }
-function limTail(lim, ind){
+/* SQL Server 的 TOP 長在 SELECT 上，其他家長長在尾巴；有位移時改用 OFFSET */
+function limHead(lim, offset){ return (lim > 0 && !offset && D().lim === 'top') ? 'SELECT TOP '+lim+' *' : 'SELECT *'; }
+function limTail(lim, offset, ind, hasOrder){
+  offset = Math.max(0, Number(offset) || 0);
+  if(D().lim === 'limit'){
+    if(lim <= 0) return offset > 0 ? '\n'+ind+'OFFSET '+offset : '';
+    return '\n'+ind+'LIMIT '+lim+(offset > 0 ? ' OFFSET '+offset : '');
+  }
+  if(offset > 0){
+    if(!hasOrder) return '\n'+ind+'-- 無法套用 OFFSET '+offset+'：'+D().name+' 需要先指定 ORDER BY，這次未限制列數。';
+    return '\n'+ind+'OFFSET '+offset+' ROWS'+(lim > 0 ? '\n'+ind+'FETCH NEXT '+lim+' ROWS ONLY' : '');
+  }
   if(lim <= 0) return '';
-  if(D().lim === 'limit') return '\n'+ind+'LIMIT '+lim;
   if(D().lim === 'fetch') return '\n'+ind+'FETCH FIRST '+lim+' ROWS ONLY';
   return '';
 }
-function limPhrase(lim){
+function limPhrase(lim, offset){
+  offset = Math.max(0, Number(offset) || 0);
+  if(offset > 0) return D().lim === 'limit' ? 'LIMIT '+lim+' OFFSET '+offset : 'OFFSET '+offset+' ROWS FETCH NEXT '+lim+' ROWS ONLY';
   return {limit:'LIMIT '+lim, top:'TOP '+lim, fetch:'FETCH FIRST '+lim+' ROWS ONLY'}[D().lim];
 }
 
@@ -1207,10 +1219,11 @@ function buildSQL(){
 
     } else if(n.type === 'sort'){
       const lim = Number(n.limit) || 0;
+      const offset = Math.max(0, Number(n.offset) || 0);
       const inh = inheritedCols(n), from = inh ? realSource(n) : s0;
-      sql = lim > 0
-        ? '  '+(inh ? limHead(lim).replace(/\*$/, list(inh.map(q), 9)) : limHead(lim))+
-          '\n  FROM '+ref(from)+'\n  ORDER BY '+q(n.by)+' '+n.dir+limTail(lim, '  ')
+      sql = lim > 0 || offset > 0
+        ? '  '+(inh ? limHead(lim, offset).replace(/\*$/, list(inh.map(q), 9)) : limHead(lim, offset))+
+          '\n  FROM '+ref(from)+(n.by ? '\n  ORDER BY '+q(n.by)+' '+n.dir : '')+limTail(lim, offset, '  ', !!n.by)
         : '  -- 夾在中間的 ORDER BY 資料庫可以不理你，已省略\n'+
           '  -- （排序請放最後一塊，或填「取前幾筆」）\n'+
           '  SELECT *\n  FROM '+ref(s0);
@@ -1226,8 +1239,10 @@ function buildSQL(){
   if(parts.length) out_sql += 'WITH ' + parts.join(',\n') + '\n';
   if(tailSort){
     const lim = Number(tailSort.limit) || 0;
-    out_sql += limHead(lim)+'\nFROM '+ref(srcOf(tailSort.id,0))+
-               '\nORDER BY '+q(tailSort.by)+' '+tailSort.dir+limTail(lim, '')+';';
+    const offset = Math.max(0, Number(tailSort.offset) || 0);
+    out_sql += limHead(lim, offset)+'\nFROM '+ref(srcOf(tailSort.id,0))+
+               (tailSort.by ? '\nORDER BY '+q(tailSort.by)+' '+tailSort.dir : '')+
+               limTail(lim, offset, '', !!tailSort.by)+';';
   } else {
     out_sql += 'SELECT *\nFROM ' + ref(last) + ';';
   }
@@ -1582,9 +1597,10 @@ function renderInspector(){
     h += '<div class="rowf"><label>方向</label><select data-f="dir">'+
       opt('DESC', n.dir, 'DESC 大 → 小')+opt('ASC', n.dir, 'ASC 小 → 大')+'</select></div>';
     h += '<div class="rowf"><label>取前幾筆</label><input type="number" min="0" data-f="limit" value="'+esc(n.limit)+'"></div>';
+    h += '<div class="rowf"><label>略過前幾筆</label><input type="number" min="0" data-f="offset" value="'+esc(n.offset || 0)+'"></div>';
     const lim = Number(n.limit) || 0;
     h += '<p class="note">填 <code>0</code> 就是全部都要。<br>排序要放<b>最後一塊</b>才有效 —— 夾在中間的 <code>ORDER BY</code> 資料庫可以不理你。'+
-         (lim > 0 ? '<br>現在會產生 <code>'+limPhrase(lim)+'</code>（'+D().name+' 的寫法）。' : '')+'</p>';
+         (lim > 0 ? '<br>現在會產生 <code>'+limPhrase(lim, n.offset)+'</code>（'+D().name+' 的寫法）。' : '')+'</p>';
   }
 
   if(n.type === 'case'){
@@ -1806,7 +1822,7 @@ function defaultsFor(t){
     case 'select':   return {cols:cols.slice()};
     case 'filter':   return {col:cols[0]||'', op:'>=', val:0};
     case 'distinct': return {};
-    case 'sort':     return {by:pick(nums), dir:'DESC', limit:0};
+    case 'sort':     return {by:pick(nums), dir:'DESC', limit:0, offset:0};
     case 'groupby':  return {keys:[], aggs:[{fn:'COUNT', col:'*', as:'order_count'}]};
   }
   return {};
@@ -2411,7 +2427,7 @@ function parseSQLText(text){
   }
 
   function parseTail(){
-    const t = {orderBy:null, dir:'ASC', limit:0};
+    const t = {orderBy:null, dir:'ASC', limit:0, offset:0};
     if(isKw('ORDER') && isKw('BY',1)){
       p += 2;
       t.orderBy = exprName(parseExpr());
@@ -2419,8 +2435,18 @@ function parseSQLText(text){
       if(isOp(',')){ while(eatOp(',')){ parseExpr(); if(!eatKw('DESC')) eatKw('ASC'); }
         warn.push('ORDER BY 只畫第一個欄位，其他的忽略了'); }
     }
-    if(eatKw('LIMIT')){ t.limit = Number(take().v) || 0; if(eatKw('OFFSET')) take(); }
-    else if(eatKw('FETCH')){ eatKw('FIRST'); eatKw('NEXT'); t.limit = Number(take().v) || 0; eatKw('ROWS'); eatKw('ROW'); eatKw('ONLY'); }
+    if(eatKw('LIMIT')){
+      const first = Number(take().v) || 0;
+      if(eatOp(',')){ t.offset = first; t.limit = Number(take().v) || 0; }
+      else { t.limit = first; if(eatKw('OFFSET')) t.offset = Number(take().v) || 0; }
+    }
+    else {
+      if(eatKw('OFFSET')){ t.offset = Number(take().v) || 0; eatKw('ROWS'); eatKw('ROW'); }
+      if(eatKw('FETCH')){
+        if(!eatKw('FIRST')) eatKw('NEXT');
+        t.limit = Number(take().v) || 0; eatKw('ROWS'); eatKw('ROW'); eatKw('ONLY');
+      }
+    }
     return t;
   }
 
@@ -2829,7 +2855,7 @@ function astToGraph(parsed){
     }
 
     if(c.distinct){ const d = add('distinct', {}); conn(cur, d); cur = d; }
-    if(c.top){ const s = add('sort', {by:'', dir:'DESC', limit:c.top}); conn(cur, s); cur = s; }
+    if(c.top){ const s = add('sort', {by:'', dir:'DESC', limit:c.top, offset:0}); conn(cur, s); cur = s; }
     return cur;
   }
 
@@ -2842,8 +2868,8 @@ function astToGraph(parsed){
       conn(cur, un, 0); conn(other, un, 1);
       cur = un;
     });
-    if(st.tail.orderBy || st.tail.limit){
-      const s = add('sort', {by:st.tail.orderBy || '', dir:st.tail.dir, limit:st.tail.limit});
+    if(st.tail.orderBy || st.tail.limit || st.tail.offset){
+      const s = add('sort', {by:st.tail.orderBy || '', dir:st.tail.dir, limit:st.tail.limit, offset:st.tail.offset});
       conn(cur, s); cur = s;
     }
     return cur;
