@@ -52,6 +52,7 @@ export function loadApp() {
     'state', 'tokenize', 'parseSQLText', 'splitStatements', 'astToGraph',
     'evalNode', 'cmp', 'aggregate', 'numish', 'buildSQL', 'condSQL', 'lit',
     'q', 'tableRef', 'limHead', 'limTail', 'chainOrder',
+    'demoSchema', 'sampleValue', 'joinLayout',
   ];
   const marker = '})();';
   const at = match[1].lastIndexOf(marker);

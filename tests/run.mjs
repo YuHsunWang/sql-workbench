@@ -567,6 +567,88 @@ function globalAggregateGraph() {
   };
 }
 
+/* M13 — sample data must satisfy the cross-table contract that makes JOINs
+   visible in the animation: the same column name, in any two tables, must
+   produce the same values. A single hand-picked pair is not enough; the
+   previous suite had one and still missed 57 clashing names. */
+test('M13: every repeated column name has one sample sequence across all tables', () => {
+  const schema = api.demoSchema();
+  const seen = new Map();
+  const clashes = [];
+  let repeats = 0;
+  for (const table of Object.keys(schema)) {
+    const entry = schema[table];
+    entry.cols.forEach((col, i) => {
+      const key = String(col.name).toLowerCase();
+      const values = JSON.stringify(entry.rows.map(row => row[i]));
+      const prev = seen.get(key);
+      if (!prev) { seen.set(key, {table, values}); return; }
+      repeats++;
+      if (prev.values !== values) {
+        clashes.push(`${col.name}: ${prev.table}=${prev.values} vs ${table}=${values}`);
+      }
+    });
+  }
+  assert.equal(clashes.length, 0, clashes.slice(0, 3).join(' | '));
+  assert.equal(repeats > 100, true, `expected many repeated names, saw ${repeats}`);
+  return `${seen.size} names, ${repeats} cross-table repeats, 0 clashes`;
+});
+
+/* The clash came from the Chinese name and the guessed type steering the rule
+   per table. A table that supplies neither (an inferred table from pasted SQL)
+   must still get the sequence the schema already chose for that column name. */
+test('M13: a later table cannot re-classify an already-seen column name', () => {
+  api.demoSchema();
+  const rows = c => [0, 1, 2, 3, 4, 5].map(r => api.sampleValue(c, r));
+  /* tx_seq is the real case: trans_detail labels it 交易序號 (a code), while
+     promo_dtl supplies no Chinese name and guesses INT. They must not diverge,
+     or the JOIN in the animation matches nothing. */
+  const rich = rows({name:'tx_seq', ch:'交易序號', type:'VARCHAR'});
+  const bare = rows({name:'tx_seq', ch:'', type:'INT'});
+  assert.deepEqual(json(bare), json(rich));
+  return `tx_seq stays ${JSON.stringify(rich.slice(0, 2))} with or without the Chinese name`;
+});
+
+/* M9 — a JOIN whose two sides share a non-key column name used to emit two
+   columns called `status` in one CTE. SQL Server rejects that outright, and a
+   downstream WHERE could not say which side it meant. The right side is now
+   aliased, and the evaluator must use the same name or the animation and the
+   SQL would filter different columns. */
+test('M9: a colliding right-side column is aliased in both SQL and animation', () => {
+  const col = name => ({name, ch:'', type:'VARCHAR'});
+  const schema = {
+    l:{label:'', cols:[col('id'), col('status')], rows:[[1, 'active'], [2, 'closed']]},
+    r:{label:'', cols:[col('id'), col('status')], rows:[[1, 'shipped'], [2, 'held']]},
+  };
+  installGraph(api, {
+    nodes:[
+      {id:'a', type:'table', table:'l'},
+      {id:'b', type:'table', table:'r'},
+      {id:'j', type:'join', joinType:'INNER', keys:[{left:'id', right:'id', lfn:'', rfn:''}]},
+      {id:'f', type:'filter', col:'status', op:'=', val:'active'},
+      {id:'o', type:'output'}],
+    edges:[
+      {from:'a', to:'j', port:0}, {from:'b', to:'j', port:1},
+      {from:'j', to:'f', port:0}, {from:'f', to:'o', port:0}],
+  }, schema);
+  const joined = api.evalNode(api.state.nodes.find(n => n.id === 'j'));
+  assert.deepEqual(json(joined.cols), ['id', 'status', 'status_2']);
+  assert.deepEqual(json(joined.rows), [[1, 'active', 'shipped'], [2, 'closed', 'held']]);
+
+  api.state.dialect = 'mssql';
+  const sql = api.buildSQL();
+  assert.match(sql, /b\.status AS status_2/);
+  /* the CTE must not declare the same output name twice — SQL Server rejects it */
+  const cte = sql.slice(sql.indexOf('WITH joined AS ('), sql.indexOf('FROM l AS a'));
+  const declared = cte.match(/(?:a|b)\.\w+(?: AS (\w+))?/g).map(m => m.split(' AS ').pop().split('.').pop());
+  assert.equal(new Set(declared).size, declared.length, `duplicate output names: ${declared}`);
+
+  /* the WHERE still means the left side, in both engines */
+  const out = api.evalNode(api.state.nodes.find(n => n.id === 'f'));
+  assert.deepEqual(json(out.rows), [[1, 'active', 'shipped']]);
+  return 'cols=id,status,status_2; b.status AS status_2; filter keeps the left side';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {

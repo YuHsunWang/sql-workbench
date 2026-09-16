@@ -631,6 +631,7 @@ function guessType(name, ch){
 }
 
 function demoSchema(){
+  SAMPLE_GEN.clear();            /* 換一整套 schema 就重新分類 */
   const out = {};
   Object.keys(SCHEMA_RAW).forEach(full=>{
     const cut = SCHEMA_RAW[full].indexOf('|');
@@ -719,6 +720,21 @@ function joinKeys(n){
   if(n.keys && n.keys.length) return n.keys;
   return (n.leftCol || n.rightCol) ? [{left:n.leftCol || '', right:n.rightCol || '', lfn:'', rfn:''}] : [];
 }
+/* 右邊如果有跟左邊撞名的非 key 欄位，改名成 x_2、x_3。不改名的話 SQL Server
+   的 CTE 會因為欄名重複直接報錯，而且下游的 WHERE 也分不出指的是哪一邊。
+   動畫和 SQL 共用這一份，才不會兩邊各算各的。 */
+function joinLayout(Lcols, Rcols, dropNames){
+  const used = new Set(Lcols);
+  const keep = [];
+  Rcols.forEach((c, i)=>{
+    if(dropNames.has(c)) return;                /* key 欄位左右一樣，只留左邊那份 */
+    let name = c, n = 2;
+    while(used.has(name)) name = c + '_' + (n++);
+    used.add(name);
+    keep.push({i:i, src:c, name:name});
+  });
+  return {cols:Lcols.concat(keep.map(k=>k.name)), keep:keep};
+}
 function inEdges(id){ return state.edges.filter(e=>e.to===id).sort((a,b)=>a.port-b.port); }
 function nodeById(id){ return state.nodes.find(n=>n.id===id) || null; }
 function srcOf(id, port){ const e = state.edges.find(e=>e.to===id && e.port===(port||0)); return e ? nodeById(e.from) : null; }
@@ -761,9 +777,8 @@ function evalNode(node, ctx){
       .map(k=>({l:L.cols.indexOf(k.left), r:R.cols.indexOf(k.right), right:k.right, lfn:k.lfn || '', rfn:k.rfn || ''}))
       .filter(p=>p.l >= 0 && p.r >= 0);
     if(!pairs.length) return EMPTY;
-    const drop = new Set(pairs.map(p=>p.r));              /* 右邊重複的 key 欄不留 */
-    const keep = R.cols.map((c,i)=>i).filter(i=>!drop.has(i));
-    const cols = L.cols.concat(keep.map(i=>R.cols[i]));
+    const lay = joinLayout(L.cols, R.cols, new Set(pairs.map(p=>p.right)));
+    const cols = lay.cols, keep = lay.keep;
     const key = (row, side) => pairs.map(p=>{
       const raw = row[side === 'l' ? p.l : p.r];
       return String(castRun(side === 'l' ? p.lfn : p.rfn)(raw));
@@ -772,7 +787,7 @@ function evalNode(node, ctx){
     L.rows.forEach(l=>{
       const k = key(l, 'l');
       const hits = R.rows.filter(r=>key(r, 'r') === k);
-      if(hits.length) hits.forEach(r=>rows.push(l.concat(keep.map(i=>r[i]))));
+      if(hits.length) hits.forEach(r=>rows.push(l.concat(keep.map(k=>r[k.i]))));
       else if(node.joinType === 'LEFT') rows.push(l.concat(keep.map(()=>null)));
     });
     return {cols:cols, rows:rows};
@@ -1177,8 +1192,9 @@ function buildSQL(){
       const L = srcOf(n.id,0), R = srcOf(n.id,1);
       const Lc = evalNode(L).cols, Rc = evalNode(R).cols;
       const ks = joinKeys(n).filter(k=>k.left && k.right);
-      const dropped = new Set(ks.map(k=>k.right));
-      const sel = Lc.map(c=>'a.'+q(c)).concat(Rc.filter(c=>!dropped.has(c)).map(c=>'b.'+q(c)));
+      const lay = joinLayout(Lc, Rc, new Set(ks.map(k=>k.right)));
+      const sel = Lc.map(c=>'a.'+q(c)).concat(lay.keep.map(k=>
+        'b.'+q(k.src) + (k.name !== k.src ? ' AS '+q(k.name) : '')));
       const on = ks.length
         ? ks.map(k=>castSQL(k.lfn, 'a.'+q(k.left))+' = '+castSQL(k.rfn, 'b.'+q(k.right))).join('\n   AND ')
         : '1 = 1 /* 還沒選 JOIN 條件 */';
@@ -1882,6 +1898,7 @@ document.getElementById('btn-parse').addEventListener('click', ()=>{
   refresh();
 });
 function parseDDL(txt){
+  SAMPLE_GEN.clear();            /* 換一整套 schema 就重新分類 */
   const out = {};
   const re = /create\s+table\s+(?:if\s+not\s+exists\s+)?[`"\[]?([A-Za-z_][\w$]*)[`"\]]?\s*\(([\s\S]*?)\)\s*;/gi;
   let m;
@@ -1960,12 +1977,33 @@ const SAMPLE_RULES = [
   [c => /代號|編號|代碼|ID$/i.test(c.ch) || /_code$|_no$|_id$|^id$/i.test(c.name), (c,r) => CODES[r % CODES.length]],
 ];
 
+/* 型別猜不準時的墊底規則 */
+function fallbackGen(c){
+  if(/INT/.test(c.type))           return (x, r) => r + 1;
+  if(/DEC|FLOAT|NUM/.test(c.type)) return (x, r) => [1290, 45, 250, 89, 610, 38][r % 6];
+  if(/DATE|TIME/.test(c.type))     return (x, r) => '2024-' + pad2(r%12+1) + '-' + pad2(r*3+2);
+  return (x, r) => POOL.cat[r % POOL.cat.length];
+}
+
+/* 一個英文欄名只挑一次產生器，之後別張表都得照用 —— 中文名和猜出來的型別
+   只有第一次分類時算數。不鎖的話 trans_detail 的 tx_seq 是 '067'、
+   promo_dtl 的是 1，JOIN 動畫一列都配不到。 */
+const SAMPLE_GEN = new Map();
+function sampleGen(c){
+  const key = String(c.name).toLowerCase();
+  let g = SAMPLE_GEN.get(key);
+  if(!g){
+    const hit = SAMPLE_RULES.find(pair=>pair[0](c));
+    g = {make:hit ? hit[1] : fallbackGen(c),
+         c:{name:c.name, ch:c.ch || '', type:c.type || 'VARCHAR'}};
+    SAMPLE_GEN.set(key, g);
+  }
+  return g;
+}
+
 function sampleValue(c, r){
-  for(const [test, make] of SAMPLE_RULES) if(test(c)) return make(c, r);
-  if(/INT/.test(c.type))     return r + 1;
-  if(/DEC|FLOAT|NUM/.test(c.type)) return [1290, 45, 250, 89, 610, 38][r % 6];
-  if(/DATE|TIME/.test(c.type))     return '2024-' + pad2(r%12+1) + '-' + pad2(r*3+2);
-  return POOL.cat[r % POOL.cat.length];
+  const g = sampleGen(c);
+  return g.make(g.c, r);
 }
 
 /* hints：這段 SQL 裡出現過的值。優先拿來當資料，篩選才篩得到東西 */
