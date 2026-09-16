@@ -1023,7 +1023,21 @@ const DIALECTS = {
   oracle:   {name:'Oracle',     open:'"', close:'"', lim:'fetch'}
 };
 const D = () => DIALECTS[state.dialect] || DIALECTS.mysql;
-const q = s => (!state.quoteAll && /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(s))) ? String(s) :
+
+/* 這些字不加引號就是語法錯誤（各家湊起來的常見集合，故意不求完整）。 */
+const RESERVED = new Set(('SELECT FROM WHERE GROUP ORDER BY HAVING JOIN INNER LEFT RIGHT FULL OUTER '+
+  'CROSS ON USING AS AND OR NOT IN IS NULL LIKE BETWEEN EXISTS CASE WHEN THEN ELSE END UNION ALL '+
+  'DISTINCT LIMIT OFFSET FETCH TOP WITH VALUES TABLE INDEX VIEW USER SESSION LEVEL SIZE ROWS ROW '+
+  'DESC ASC DEFAULT PRIMARY KEY CHECK COLUMN CREATE DROP ALTER INSERT UPDATE DELETE INTO SET '+
+  'COMMENT ACCESS AUDIT DATE NUMBER CHAR VARCHAR').split(' '));
+
+/* 來源寫成 "Camel" 的名字要一直帶著引號 —— PostgreSQL 會把沒引號的名字折成小寫，
+   指到完全不同的欄位甚至直接報錯。只鎖「拿掉引號真的會變樣」的：有大寫字母的。
+   全小寫的名字四家拆掉引號都一樣，硬加反而害 Oracle 對不上（它沒引號時存成大寫）。 */
+const QUOTED_SRC = new Set();
+const bareOK = s => !state.quoteAll && !QUOTED_SRC.has(s) && !RESERVED.has(s.toUpperCase())
+  && /^[A-Za-z_][A-Za-z0-9_]*$/.test(s);
+const q = s => bareOK(String(s)) ? String(s) :
   D().open + String(s).split(D().close).join(D().close + D().close) + D().close;
 /* 表名可能帶 schema：[analytic].[trans_detail] */
 const tableRef = n => n.ns
@@ -2422,6 +2436,7 @@ function tokenize(sql){
 }
 
 function parseSQLText(text){
+  QUOTED_SRC.clear();              /* 每段查詢重新認一次哪些名字本來有引號 */
   const T = tokenize(text);
   let p = 0;
   const warn = [];
@@ -2435,13 +2450,15 @@ function parseSQLText(text){
   function fail(msg){ const t = at(); throw {sqlErr:true, msg:msg, pos:t.p, got:t.v}; }
   function needKw(w){ if(!eatKw(w)) fail('這裡應該要有 '+w); }
   function needOp(v){ if(!eatOp(v)) fail('這裡應該要有 '+v); }
-  function nameTok(){ const t = at(); if(t.t !== 'word') fail('這裡需要一個名稱'); p++; return t.v; }
+  /* 來源有引號、而且拿掉引號會變樣的名字要記下來，產生 SQL 時才還得回去 */
+  const keepQuoted = t => { if(t.quoted && t.v !== t.v.toLowerCase()) QUOTED_SRC.add(t.v); return t.v; };
+  function nameTok(){ const t = at(); if(t.t !== 'word') fail('這裡需要一個名稱'); p++; return keepQuoted(t); }
   const isStop = k => { const u = up(at(k)); return u !== null && KEYWORDS.has(u); };
 
   function maybeAlias(){
     if(eatKw('AS')) return nameTok();
     const t = at();
-    if(t.t === 'word' && (t.quoted || !isStop())) { p++; return t.v; }
+    if(t.t === 'word' && (t.quoted || !isStop())) { p++; return keepQuoted(t); }
     return null;
   }
   function skipToClause(){
@@ -2615,7 +2632,7 @@ function parseSQLText(text){
         }
         return {kind:'call', fn:fn, args:args, castType:castType};
       }
-      let tbl = null, col = take().v;
+      let tbl = null, col = keepQuoted(take());
       if(isOp('.')){ p++; tbl = col; col = nameTok(); }
       return {kind:'col', tbl:tbl, col:col};
     }

@@ -649,6 +649,35 @@ test('M9: a colliding right-side column is aliased in both SQL and animation', (
   return 'cols=id,status,status_2; b.status AS status_2; filter keeps the left side';
 });
 
+/* M12 — quoting is not cosmetic. PostgreSQL folds an unquoted name to lower
+   case, so dropping the quotes around "Camel" points at a different column.
+   But quoting is not free either: Oracle folds an UNQUOTED name to upper case,
+   so force-quoting a lowercase name that never needed it breaks the other
+   direction. Only quoting that carries meaning is preserved. */
+test('M12: meaningful quoting survives, redundant quoting is dropped', () => {
+  api.state.quoteAll = false;
+  api.state.dialect = 'postgres';
+  graphFromSQL(api, 'SELECT "Camel" FROM "MyTable"');
+  const mixed = api.buildSQL();
+  assert.match(mixed, /"MyTable"/);
+  assert.match(mixed, /"Camel"/);
+  assert.doesNotMatch(mixed, /(^|[^"])\bCamel\b(?!")/);
+  /* and it stays quoted when the generated SQL is fed back in */
+  graphFromSQL(api, mixed);
+  assert.match(api.buildSQL(), /"MyTable"/);
+
+  graphFromSQL(api, 'SELECT * FROM "analytic"."trans_detail"');
+  const lower = api.buildSQL();
+  assert.match(lower, /analytic\.trans_detail/);
+  assert.doesNotMatch(lower, /"analytic"/);
+
+  /* a reserved word can never be emitted bare, whatever the source did */
+  graphFromSQL(api, 'SELECT * FROM t WHERE "user" = 1');
+  const reserved = api.buildSQL();
+  assert.match(reserved, /"user" = 1/);
+  return 'Camel/MyTable stay quoted; analytic.trans_detail goes bare; user stays quoted';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {
