@@ -281,6 +281,7 @@ table.grid tr.r{animation:rowIn .34s cubic-bezier(.2,.7,.3,1) both}
 table.grid tr.drop{animation:rowIn .34s both,rowDrop .5s .5s ease forwards}
 table.grid tr.drop td{text-decoration:line-through;text-decoration-color:var(--drop)}
 table.grid tr.tinted td:first-child{box-shadow:inset 3px 0 0 var(--tc)}
+table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;text-decoration-color:var(--drop)}
 .pill{
   display:inline-block;border-radius:20px;padding:1px 9px;font-size:11px;
   background:color-mix(in srgb,var(--tc) 17%,transparent);
@@ -372,7 +373,7 @@ table.grid tr.tinted td:first-child{box-shadow:inset 3px 0 0 var(--tc)}
       </section>
 
       <section class="panel">
-        <div class="phead"><h2>積木</h2><span class="sub">9 種</span></div>
+        <div class="phead"><h2>積木</h2><span class="sub">10 種</span></div>
         <div class="pbody">
           <div id="palette"></div>
           <p class="hint">顏色代表這塊積木<b>對表格做什麼</b>。點一下加進畫布，會自動接在選中的那塊後面。</p>
@@ -459,13 +460,14 @@ const ICONS = {
   case:     SVG('<path d="M3.5 12H8"/><path d="M8 12c3.2 0 3.2-5.5 6.4-5.5h3.6"/><path d="M8 12c3.2 0 3.2 5.5 6.4 5.5h3.6"/><path d="m16.6 4 2.4 2.5-2.4 2.5"/><path d="m16.6 15 2.4 2.5-2.4 2.5"/>'),
   derive:   SVG('<rect x="3" y="3" width="18" height="18" rx="3.5"/><path d="M6.5 9h4M8.5 7v4"/><path d="M13.5 8.2h4M13.5 10.8h4"/><path d="M6.5 16h11"/>'),
   window:   SVG('<rect x="3" y="4" width="18" height="16" rx="2.5"/><rect x="7" y="7.5" width="10" height="9" rx="1.5" stroke-dasharray="3 2.4"/>'),
+  select:   SVG('<rect x="2.5" y="4" width="5" height="16" rx="1.5"/><rect x="9.5" y="4" width="5" height="16" rx="1.5" stroke-dasharray="3 2.4"/><rect x="16.5" y="4" width="5" height="16" rx="1.5"/>'),
   filter:   SVG('<path d="M4 5h16l-6.2 7.4V19l-3.6-2v-4.6z"/>'),
   distinct: SVG('<path d="M3.5 6.5h9M3.5 12h9M3.5 17.5h9"/><path d="m16.5 9.5 5 5M21.5 9.5l-5 5"/>'),
   sort:     SVG('<path d="M3 7h10M3 12h7M3 17h4"/><path d="M18 5v13.2"/><path d="m15.3 15.6 2.7 2.8 2.7-2.8"/>'),
   output:   SVG('<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="m8 12.4 2.6 2.6 5.4-5.4"/>')
 };
 const FAM = {
-  table:'src', join:'comb', union:'comb', case:'wide', derive:'wide', window:'wide',
+  table:'src', join:'comb', union:'comb', case:'wide', derive:'wide', window:'wide', select:'wide',
   filter:'narrow', distinct:'narrow', sort:'narrow', groupby:'coll', output:'out'
 };
 const META = {
@@ -475,6 +477,7 @@ const META = {
   case:     {label:'CASE',    ins:1},
   derive:   {label:'算欄位',  ins:1},
   window:   {label:'視窗',    ins:1},
+  select:   {label:'選欄位',  ins:1},
   filter:   {label:'WHERE',   ins:1},
   distinct: {label:'DISTINCT',ins:1},
   sort:     {label:'ORDER BY',ins:1},
@@ -486,13 +489,14 @@ ICONS.groupby = SVG('<circle cx="5.5" cy="6.5" r="2"/><circle cx="5.5" cy="12" r
 
 const GROUPS = [
   {f:'comb',   label:'接起來', note:'兩張 → 一張', types:['join','union']},
-  {f:'wide',   label:'加欄位', note:'列數不變，欄變多', types:['case','derive','window']},
+  {f:'wide',   label:'改欄位', note:'列數不變，欄位變動', types:['case','derive','window','select']},
   {f:'narrow', label:'挑列',   note:'欄不變，列變少或換順序', types:['filter','distinct','sort']},
   {f:'coll',   label:'壓扁',   note:'很多列 → 幾列', types:['groupby']}
 ];
 const PAL_LABEL = {
   join:'JOIN<br>左右合併', union:'UNION<br>上下疊', case:'CASE<br>分類貼標',
-  derive:'算欄位<br>加減乘除', window:'視窗函數<br>組內排名', filter:'WHERE<br>篩選',
+  derive:'算欄位<br>加減乘除', window:'視窗函數<br>組內排名', select:'選欄位<br>只抓要的',
+  filter:'WHERE<br>篩選',
   distinct:'DISTINCT<br>去重複', sort:'ORDER BY<br>排序取前 N', groupby:'GROUP BY<br>分組彙總'
 };
 
@@ -625,6 +629,13 @@ function evalNode(node, ctx){
     const s = S(), i = s.cols.indexOf(node.col);
     if(i < 0) return s;
     return {cols:s.cols, rows:s.rows.filter(r=>cmp(r[i], node.op, node.val))};
+  }
+
+  case 'select': {
+    const s = S();
+    const idx = (node.cols || []).map(c=>s.cols.indexOf(c)).filter(i=>i >= 0);
+    if(!idx.length) return s;                      /* 一個都沒選 = 全部要，等同 SELECT * */
+    return {cols:idx.map(i=>s.cols[i]), rows:s.rows.map(r=>idx.map(i=>r[i]))};
   }
 
   case 'distinct': {
@@ -911,7 +922,8 @@ function graphIssue(last){
 }
 
 const CTE_BASE = {join:'joined', union:'unioned', case:'tagged', derive:'derived',
-                  window:'windowed', filter:'filtered', distinct:'deduped', sort:'sorted', groupby:'grouped'};
+                  window:'windowed', select:'picked', filter:'filtered', distinct:'deduped',
+                  sort:'sorted', groupby:'grouped'};
 
 function buildSQL(){
   const out = state.nodes.find(n=>n.type === 'output');
@@ -986,6 +998,12 @@ function buildSQL(){
         else { base = up; break; }
       }
       sql = '  SELECT *\n  FROM '+ref(base)+'\n  WHERE '+conds.join('\n    AND ');
+
+    } else if(n.type === 'select'){
+      /* 照使用者選的欄位原樣寫出來。就算執行引擎認不得某個欄名也不要退回
+         SELECT * —— 那會把整張表抓回來，正好是這塊積木要避免的事。 */
+      const keep = n.cols || [];
+      sql = '  SELECT '+(keep.length ? list(keep.map(q), 9) : '*')+'\n  FROM '+ref(s0);
 
     } else if(n.type === 'distinct'){
       sql = '  SELECT DISTINCT *\n  FROM '+ref(s0);
@@ -1072,6 +1090,11 @@ function nodeSummary(n){
     case 'case':   return '看 <code>'+n.col+'</code><br>分成 '+(n.branches.length+1)+' 類 → <code>'+n.as+'</code>';
     case 'derive': return '<code>'+n.left+' '+n.op+' '+n.right+'</code><br>→ <code>'+n.as+'</code>';
     case 'window': return '<code>'+n.fn+'</code><br>每個 <code>'+(n.partitionBy.join(',')||'全部')+'</code> 內排名';
+    case 'select': {
+      const avail = colsInto(n.id).length;
+      const keep = (n.cols || []).filter(c=>colsInto(n.id).indexOf(c) >= 0).length;
+      return keep ? '留 <code>'+keep+'</code> / '+avail+' 欄' : '<span class="warn">一個都沒選＝全要</span>';
+    }
     case 'groupby':return '依 <code>'+(n.keys.join(', ')||'—')+'</code><br>算 '+n.aggs.length+' 個數字';
   }
   const r = evalNode(n);
@@ -1299,6 +1322,18 @@ function renderInspector(){
     h += '<p class="note">跟 GROUP BY 最大的差別：<b>列數完全不變</b>。<br>它只是在每一列旁邊多寫一個「你在你那組裡排第幾」。</p>';
   }
 
+  if(n.type === 'select'){
+    const keep = (n.cols || []).filter(c=>avail.indexOf(c) >= 0);
+    h += '<div class="sec">要留哪些欄位</div><div class="chips">'+
+      avail.map(c=>'<button class="chip" data-col="'+c+'" aria-pressed="'+(keep.indexOf(c) >= 0)+'">'+c+'</button>').join('')+'</div>';
+    h += '<div style="display:flex;gap:7px">'+
+      '<button class="btn ghost" data-all-cols style="flex:1">全選</button>'+
+      '<button class="btn ghost" data-no-cols style="flex:1">全不選</button></div>';
+    h += '<p class="note">留 <b>'+(keep.length || avail.length)+'</b> / '+avail.length+' 欄'+
+         (keep.length ? '' : '（一個都沒選就是全要）')+'。欄位順序照上一步。'+
+         '<br><b>這塊放越前面越好。</b>越早丟掉不要的欄位，資料庫搬回來的東西越少。</p>';
+  }
+
   if(n.type === 'groupby'){
     h += '<div class="sec">依這些欄分組</div><div class="chips">'+
       avail.map(c=>'<button class="chip" data-key="'+c+'" aria-pressed="'+(n.keys.indexOf(c)>=0)+'">'+c+'</button>').join('')+'</div>';
@@ -1339,6 +1374,15 @@ inspector.addEventListener('click', e=>{
   const t = e.target.closest('button'); if(!t) return;
   if(t.dataset.key !== undefined){ toggle(n.keys, t.dataset.key); refresh(); return; }
   if(t.dataset.part !== undefined){ toggle(n.partitionBy, t.dataset.part); refresh(); return; }
+  if(t.dataset.col !== undefined){
+    const avail = colsInto(n.id);
+    if(!n.cols.length) n.cols = avail.slice();          /* 空的代表全要，先攤開再取消 */
+    toggle(n.cols, t.dataset.col);
+    n.cols = avail.filter(c=>n.cols.indexOf(c) >= 0);   /* 保持上一步的欄位順序 */
+    refresh(); return;
+  }
+  if(t.hasAttribute('data-all-cols')){ n.cols = colsInto(n.id).slice(); refresh(); return; }
+  if(t.hasAttribute('data-no-cols')){ n.cols = []; refresh(); return; }
   if(t.hasAttribute('data-add-branch')){ n.branches.push({op:'>=', val:0, then:'新類別'}); refresh(); return; }
   if(t.dataset.delBranch !== undefined){ n.branches.splice(Number(t.dataset.delBranch),1); refresh(); return; }
   if(t.hasAttribute('data-add-agg')){ n.aggs.push({fn:'COUNT', col:'*', as:'c'+(n.aggs.length+1)}); refresh(); return; }
@@ -1354,6 +1398,7 @@ function prune(n){
   const avail = colsInto(n.id);
   if(n.keys) n.keys = n.keys.filter(k=>avail.indexOf(k) >= 0);
   if(n.partitionBy) n.partitionBy = n.partitionBy.filter(k=>avail.indexOf(k) >= 0);
+  if(n.type === 'select' && n.cols) n.cols = avail.filter(c=>n.cols.indexOf(c) >= 0);
 }
 
 /* ============================================================
@@ -1397,6 +1442,7 @@ function defaultsFor(t){
     case 'case':     return {col:pick(nums), as:'label', branches:[{op:'>=', val:1000, then:'高'}], other:'低'};
     case 'derive':   return {left:pick(nums), op:'*', right:'0.05', as:'calc'};
     case 'window':   return {fn:'ROW_NUMBER', col:pick(nums), partitionBy:[], orderBy:pick(nums), dir:'DESC', as:'rk'};
+    case 'select':   return {cols:cols.slice()};
     case 'filter':   return {col:cols[0]||'', op:'>=', val:0};
     case 'distinct': return {};
     case 'sort':     return {by:pick(nums), dir:'DESC', limit:0};
@@ -1610,6 +1656,21 @@ function buildSteps(){
       });
     }
 
+    if(n.type === 'select'){
+      const P = evalNode(n);
+      const gone = new Set(S.cols.map((c,i)=>i).filter(i=>P.cols.indexOf(S.cols[i]) < 0));
+      steps.push({
+        title:'選欄位',
+        cap:'只留下要的欄位，其他不抓。<strong>一列都沒少，但每一列變窄了</strong>（'+S.cols.length+' 欄 → '+P.cols.length+' 欄）。'+
+            '真的跑在資料庫上時，<strong>這一步決定你要搬多少東西回來</strong>——放得越前面，省得越多。',
+        render: box => {
+          box.appendChild(miniTable('原本', S, {gone:gone}));
+          box.appendChild(mark('→'));
+          box.appendChild(miniTable('挑完', P));
+        }
+      });
+    }
+
     if(n.type === 'filter'){
       const i = S.cols.indexOf(n.col);
       steps.push({
@@ -1693,7 +1754,7 @@ function miniTable(name, data, o){
   const shown = rows.slice(0, MAXROWS);
   let html = '<div class="mt-name">'+name+'<i>'+data.rows.length+' 列 · '+data.cols.length+' 欄</i></div>'+
     '<div class="mt-scroll"><table class="grid"><thead><tr>'+
-    data.cols.map((c,ci)=>'<th'+(o.hi === ci ? ' class="hi"' : '')+'>'+c+'</th>').join('')+'</tr></thead><tbody>';
+    data.cols.map((c,ci)=>'<th'+(o.hi === ci ? ' class="hi"' : (o.gone && o.gone.has(ci) ? ' class="gone"' : ''))+'>'+c+'</th>').join('')+'</tr></thead><tbody>';
   shown.forEach((x, idx)=>{
     const tint = o.tint ? o.tint(x.r, idx, x.i) : null;
     const dropped = o.drop ? o.drop(x.r, idx, x.i) : false;
@@ -1702,7 +1763,7 @@ function miniTable(name, data, o){
     x.r.forEach((v, ci)=>{
       const numeric = v !== null && v !== '' && !isNaN(Number(v));
       if(o.pill === ci) html += '<td><span class="pill" style="--tc:'+(o.pillColor ? o.pillColor(v) : tint)+'">'+fmt(v)+'</span></td>';
-      else html += '<td class="'+(numeric ? 'num ' : '')+(o.hi === ci ? 'hi' : '')+'">'+fmt(v)+'</td>';
+      else html += '<td class="'+(numeric ? 'num ' : '')+(o.hi === ci ? 'hi' : (o.gone && o.gone.has(ci) ? 'gone' : ''))+'">'+fmt(v)+'</td>';
     });
     html += '</tr>';
   });
@@ -2160,6 +2221,37 @@ function astToGraph(parsed){
     return [{col:col, op:c.op, val:v}];
   }
 
+  /* 先掃一遍 AST，算出每張表有哪些欄位。建圖時要靠它分辨
+     「這段 SELECT 是真的在挑欄位」還是「只是把來源欄位原樣抄出來」。 */
+  const refs = [], srcTables = [];
+  (function walk(o){
+    if(!o || typeof o !== 'object') return;
+    if(Array.isArray(o)){ o.forEach(walk); return; }
+    if(o.kind === 'col') refs.push(o);
+    if(o.kind === 'table' && o.name){
+      if(srcTables.indexOf(o.name) < 0) srcTables.push(o.name);
+      if(o.alias) aliasOf[o.alias] = o.name;
+    }
+    Object.keys(o).forEach(k=>walk(o[k]));
+  })(parsed.stmt);
+
+  const perTable = {};
+  srcTables.forEach(t=>{ perTable[t] = []; });
+  refs.forEach(r=>{
+    const t = r.tbl ? (aliasOf[r.tbl] || r.tbl) : (srcTables.length === 1 ? srcTables[0] : null);
+    if(t && perTable[t] && perTable[t].indexOf(r.col) < 0) perTable[t].push(r.col);
+  });
+  if(refs.some(r=>!r.tbl) && srcTables.length > 1)
+    warn.push('有些欄位沒寫表名（像 amount 而不是 o.amount），猜不到它屬於哪張表 — 動畫的示範資料可能少幾欄');
+
+  function knownCols(src){
+    if(!src || src.kind !== 'table') return null;
+    if(cte[src.name.toLowerCase()]) return null;           /* CTE 的欄位由它自己那段決定 */
+    if(state.schema[src.name]) return state.schema[src.name].cols.map(c=>c.name);
+    return perTable[src.name] && perTable[src.name].length ? perTable[src.name].slice() : null;
+  }
+  const sameCols = (a, b) => !!a && !!b && a.length === b.length && a.every((v,i)=>v === b[i]);
+
   function buildSource(s){
     if(s.kind === 'sub') return buildStatement(s.stmt);
     if(s.alias) aliasOf[s.alias] = s.name;
@@ -2172,9 +2264,11 @@ function astToGraph(parsed){
   function buildCore(c){
     if(!c.from){ warn.push('有一段 SELECT 沒有 FROM，跳過了'); return add('table', {table:'?'}); }
     let cur = buildSource(c.from);
+    let cols = knownCols(c.from);          /* 目前這條線吐出哪些欄位；不確定時是 null */
 
     c.joins.forEach(j=>{
       const right = buildSource(j.src);
+      const rc = knownCols(j.src);
       const jn = add('join', {
         joinType: j.type,
         leftCol:  j.on ? exprName(j.on.left)  : '',
@@ -2182,6 +2276,7 @@ function astToGraph(parsed){
       });
       conn(cur, jn, 0); conn(right, jn, 1);
       cur = jn;
+      cols = (cols && rc) ? cols.concat(rc.filter(x=>x !== jn.rightCol)) : null;
     });
 
     c.where.forEach(w=>{
@@ -2208,6 +2303,7 @@ function astToGraph(parsed){
         if(e.branches.some(b=>exprName(b.cond.left) !== exprName(e.branches[0].cond.left)))
           warn.push('CASE 的每個 WHEN 看的欄位不一樣，積木只支援看同一欄 — 用了第一個');
         conn(cur, n); cur = n;
+        cols = cols ? cols.concat([n.as]) : null;
       } else if(e.kind === 'arith'){
         const n = add('derive', {
           left: exprName(e.a), op: e.op,
@@ -2215,6 +2311,7 @@ function astToGraph(parsed){
           as: it.alias || exprName(e)
         });
         conn(cur, n); cur = n;
+        cols = cols ? cols.concat([n.as]) : null;
       } else if(e.kind === 'window'){
         windows.push(it);
       }
@@ -2231,6 +2328,7 @@ function astToGraph(parsed){
       const keys = c.groupBy.map(g=>g.kind === 'case' ? (caseAlias || 'label') : exprName(g));
       const g = add('groupby', {keys:keys, aggs:aggs.length ? aggs : [{fn:'COUNT', col:'*', as:'row_count'}]});
       conn(cur, g); cur = g;
+      cols = g.keys.concat(g.aggs.map(a=>a.as));
     }
 
     c.having.forEach(w=>{
@@ -2251,7 +2349,24 @@ function astToGraph(parsed){
       });
       if(!rankish && AGG_FNS.indexOf(e.fn) < 0) warn.push('視窗函數 '+e.fn+'() 沒有對應積木，先當成 ROW_NUMBER');
       conn(cur, n); cur = n;
+      cols = cols ? cols.concat([n.as]) : null;
     });
+
+    /* SELECT 清單不是 * 就補一塊「選欄位」。
+       少了這塊，反解出來的 SQL 會變成整張表抓 —— 原本只要 4 欄的查詢會拖回 40 欄。
+       有 GROUP BY 時不用補：groupby 積木本來就只吐 key + 聚合那幾欄。 */
+    const hasStar = c.items.some(it=>it.kind === 'star');
+    if(!hasStar && !c.groupBy.length && !aggs.length){
+      const keep = [];
+      c.items.forEach(it=>{
+        if(it.kind !== 'expr') return;
+        const nm = it.alias || exprName(it.expr);
+        if(nm && keep.indexOf(nm) < 0) keep.push(nm);
+      });
+      /* 欄位跟上一步一模一樣就不補 —— 不然 JOIN 自己列出來的欄位清單
+         會被誤認成挑欄位，重新匯入一次就多長一塊積木。 */
+      if(keep.length && !sameCols(cols, keep)){ const pk = add('select', {cols:keep}); conn(cur, pk); cur = pk; }
+    }
 
     if(c.distinct){ const d = add('distinct', {}); conn(cur, d); cur = d; }
     if(c.top){ const s = add('sort', {by:'', dir:'DESC', limit:c.top}); conn(cur, s); cur = s; }
@@ -2278,26 +2393,8 @@ function astToGraph(parsed){
   const out = add('output', {});
   conn(finalNode, out);
 
-  /* 沒見過的表：從 SQL 裡出現的欄位反推 schema，並編一批示範資料 */
-  const refs = [];
-  (function walk(o){
-    if(!o || typeof o !== 'object') return;
-    if(Array.isArray(o)){ o.forEach(walk); return; }
-    if(o.kind === 'col') refs.push(o);
-    Object.keys(o).forEach(k=>walk(o[k]));
-  })(parsed.stmt);
-
+  /* 沒見過的表：用前面反推的欄位建 schema，並編一批示範資料 */
   const tableNames = Object.keys(tables);
-  const perTable = {};
-  tableNames.forEach(t=>{ perTable[t] = []; });
-  refs.forEach(r=>{
-    let t = r.tbl ? (aliasOf[r.tbl] || r.tbl) : (tableNames.length === 1 ? tableNames[0] : null);
-    if(t && perTable[t] && perTable[t].indexOf(r.col) < 0) perTable[t].push(r.col);
-  });
-  const unresolved = refs.filter(r=>!r.tbl).length;
-  if(unresolved && tableNames.length > 1)
-    warn.push('有些欄位沒寫表名（像 amount 而不是 o.amount），猜不到它屬於哪張表 — 動畫的示範資料可能少幾欄');
-
   const schema = Object.assign({}, state.schema);
   const madeUp = [];
   tableNames.forEach(t=>{

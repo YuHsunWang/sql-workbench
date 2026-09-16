@@ -65,6 +65,25 @@ test('regression: linear filters collapse into one CTE', () => {
   return 'one filtered CTE with AND';
 });
 
+test('select block: projection survives parse, SQL and exec', () => {
+  api.state.dialect = 'postgres';
+  const graph = graphFromSQL(api,
+    'SELECT o.order_id, o.amount, c.city FROM orders AS o ' +
+    'INNER JOIN customers AS c ON o.customer_id = c.customer_id WHERE o.amount >= 100');
+  const picked = graph.nodes.filter(n => n.type === 'select');
+  assert.equal(picked.length, 1);
+  assert.deepEqual(json(picked[0].cols), ['order_id', 'amount', 'city']);
+  const generated = api.buildSQL();
+  assert.match(generated, /picked AS \(\n  SELECT order_id,\n         amount,\n         city/);
+  assert.doesNotMatch(generated, /picked AS \(\n  SELECT \*/);
+  const out = api.evalNode(graph.nodes.find(n => n.type === 'output'));
+  assert.deepEqual(json(out.cols), ['order_id', 'amount', 'city']);
+  // JOIN 自己列出來的欄位清單不可以被誤認成挑欄位
+  const again = api.astToGraph(api.parseSQLText(generated));
+  assert.equal(again.nodes.filter(n => n.type === 'select').length, 1);
+  return 'one select block, kept through SQL, exec and re-import';
+});
+
 test('round trip: supported node shapes', () => {
   const inputs = [
     'SELECT * FROM t WHERE x=1', 'SELECT DISTINCT * FROM t',
