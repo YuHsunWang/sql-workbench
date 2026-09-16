@@ -91,10 +91,13 @@ test('generator: ordinary special literals and identifiers', () => {
   return 'quote/backslash/newline/non-ASCII/space round-trip';
 });
 
-test('generator: empty IN is syntactically guarded', () => {
-  assert.equal(api.condSQL({col:'x', op:'IN', val:''}), 'x IN (NULL)');
+test('generator: empty IN is explicit and always false', () => {
+  const generated = api.condSQL({col:'x', op:'IN', val:''});
+  assert.equal(generated, '/* IN 清單是空的 */ 1 = 0');
+  assert.equal(api.cmp(1,'IN',''), false);
+  assert.doesNotMatch(generated, /\(NULL\)/);
   sqlError('SELECT * FROM t WHERE x IN ()');
-  return 'graph emits IN (NULL); source IN () gets sqlErr';
+  return 'graph explains empty IN and emits 1 = 0; source IN () gets sqlErr';
 });
 
 test('exec: LEFT JOIN retains all multiple matches', () => {
@@ -161,117 +164,131 @@ test('graph: chainOrder without output is empty', () => {
   return '[]';
 });
 
-test('DEFECT: NULL predicates use two-valued JS logic', () => {
+test('deferred NULL comparison semantics; IS NULL excludes empty string', () => {
   const actual = [api.cmp(null,'<>','x'), api.cmp(null,'NOT IN','x'), api.cmp('','IS NULL','')];
-  assert.deepEqual(actual, [true,true,true]);
+  assert.deepEqual(actual, [true,true,false]);
   return `cmp(null,'<>','x'), cmp(null,'NOT IN','x'), cmp('','IS NULL') => ${actual.join(',')}`;
 });
 
-test('DEFECT: aggregates coerce NULL and reject text', () => {
+test('fix A3: aggregates ignore NULL and support text', () => {
   const actual = [
     api.aggregate({fn:'AVG',col:'x'}, [[null],[2]], ['x']),
-    api.aggregate({fn:'COUNT',col:'x'}, [['a'],['b']], ['x']),
+    api.aggregate({fn:'COUNT',col:'x'}, [['a'],[null],['b']], ['x']),
     api.aggregate({fn:'MAX',col:'x'}, [['a'],['b']], ['x']),
+    api.aggregate({fn:'MIN',col:'x'}, [['a'],['b']], ['x']),
   ];
-  assert.deepEqual(actual, [1,null,null]);
-  return `AVG(NULL,2), COUNT(a,b), MAX(a,b) => ${JSON.stringify(actual)}`;
+  assert.deepEqual(actual, [2,2,'b','a']);
+  return `AVG(NULL,2), COUNT(a,NULL,b), MAX/MIN(a,b) => ${JSON.stringify(actual)}`;
 });
 
-test('DEFECT: global aggregate over empty input emits no row', () => {
+test('fix A4: global aggregate over empty input emits one row', () => {
   const graph = globalAggregateGraph();
   installGraph(api, graph, {t:{cols:[{name:'x'}],rows:[]}});
   const actual = api.evalNode(graph.nodes[1]);
-  assert.deepEqual(json(actual), {cols:['c'],rows:[]});
+  assert.deepEqual(json(actual), {cols:['c'],rows:[[0]]});
   return `COUNT(*) result=${JSON.stringify(actual)}`;
 });
 
-test('DEFECT: shared upstream is consumed only once', () => {
+test('fix A1: shared upstream is memoized without consuming a branch', () => {
   const graph = branchedGraph();
-  installGraph(api, graph, oneColumnSchema());
+  let reads = 0;
+  const table = {cols:[{name:'x'}]};
+  Object.defineProperty(table, 'rows', {get(){ reads++; return [[1],[2],[3]]; }});
+  installGraph(api, graph, {t:table});
   const actual = api.evalNode(graph.nodes.find(n => n.id === 'u')).rows;
-  assert.deepEqual(json(actual), [[2],[3]]);
-  return `UNION ALL rows=${JSON.stringify(actual)} (second branch missing)`;
+  assert.deepEqual(json(actual), [[2],[3],[1],[2]]);
+  assert.equal(reads, 1);
+  return `UNION ALL rows=${JSON.stringify(actual)}; table evaluated ${reads} time`;
 });
 
-test('DEFECT: aggregate-only graph generates empty GROUP BY', () => {
+test('fix B1: aggregate-only graph omits GROUP BY', () => {
   const graph = globalAggregateGraph();
   installGraph(api, graph, {t:{cols:[{name:'x'}],rows:[[1]]}});
   const generated = api.buildSQL();
-  assert.match(generated, /GROUP BY \n\)/);
-  sqlError(generated);
-  return `generated tail=${JSON.stringify(generated.match(/GROUP BY[^)]*/s)[0])}; reparse=sqlErr`;
+  assert.doesNotMatch(generated, /GROUP BY/);
+  api.parseSQLText(generated);
+  return 'no GROUP BY clause; generated SQL reparses';
 });
 
-test('DEFECT: comma inside IN string becomes extra values', () => {
+test('fix A2: comma inside IN string remains one value', () => {
   const graph = graphFromSQL(api, "SELECT * FROM t WHERE x IN ('a,b','c')");
   const stored = graph.nodes.find(n => n.type === 'filter').val;
+  installGraph(api, graph, {t:{cols:[{name:'x'}],rows:[['a,b'],['c'],['z']]}});
   const generated = api.buildSQL();
-  assert.equal(stored, 'a,b, c');
-  assert.match(generated, /IN \('a', 'b', 'c'\)/);
-  return `stored=${JSON.stringify(stored)} generated=IN ('a', 'b', 'c')`;
+  assert.equal(stored, "'a,b', c");
+  assert.match(generated, /IN \('a,b', 'c'\)/);
+  assert.deepEqual(json(api.evalNode(graph.nodes.find(n => n.type === 'filter')).rows.map(r=>r[0])), ['a,b','c']);
+  return `stored=${JSON.stringify(stored)} generated=IN ('a,b', 'c')`;
 });
 
-test('DEFECT: identifier delimiters are not escaped', () => {
+test('fix B2: identifier closing delimiters are doubled', () => {
   const actual = {};
   for (const [dialect, value] of [['mysql','a`b'],['postgres','a"b'],['mssql','a]b']]) {
     api.state.dialect = dialect; actual[dialect] = api.q(value);
   }
-  assert.deepEqual(actual, {mysql:'`a`b`',postgres:'"a"b"',mssql:'[a]b]'});
+  assert.deepEqual(actual, {mysql:'`a``b`',postgres:'"a""b"',mssql:'[a]]b]'});
+  assert.equal(api.parseSQLText('SELECT [a]]b] FROM [t]]x]').stmt.core.items[0].expr.col, 'a]b');
   return JSON.stringify(actual);
 });
 
-test('DEFECT: MySQL backslashes are emitted unescaped', () => {
+test('fix B4: MySQL string literal doubles backslashes', () => {
   api.state.dialect = 'mysql';
   const value = String.raw`a\nb`;
   const actual = api.condSQL({col:'x',op:'=',val:value});
-  assert.equal(actual, "x = 'a\\nb'");
-  assert.equal((actual.match(/\\/g) || []).length, 1);
-  return `condSQL=${JSON.stringify(actual)} (one backslash)`;
+  const like = api.condSQL({col:'x',op:'LIKE',val:value});
+  assert.equal(actual, "x = 'a\\\\nb'");
+  assert.equal(like, "x LIKE 'a\\\\nb'");
+  assert.equal((actual.match(/\\/g) || []).length, 2);
+  return `comparison=${JSON.stringify(actual)} LIKE=${JSON.stringify(like)}`;
 });
 
-test('DEFECT: empty NOT IN execution disagrees with generated SQL', () => {
+test('fix B4: empty NOT IN execution and SQL both always true', () => {
   const generated = api.condSQL({col:'x',op:'NOT IN',val:''});
   const actual = api.cmp(1,'NOT IN','');
-  assert.equal(generated, 'x NOT IN (NULL)');
+  assert.equal(generated, '/* NOT IN 清單是空的 */ 1 = 1');
+  assert.doesNotMatch(generated, /\(NULL\)/);
   assert.equal(actual, true);
   return `generated=${generated}; cmp(1,NOT IN,'')=${actual}`;
 });
 
-test('DEFECT: unterminated tokens parse successfully', () => {
-  const inputs = ["SELECT 'abc", 'SELECT * FROM [abc', 'SELECT * FROM "abc', 'SELECT * FROM t /*'];
-  const actual = inputs.map(sql => {
-    const parsed = api.parseSQLText(sql);
-    return parsed.warn.length;
+test('fix C1: unterminated tokens report their opening position', () => {
+  const inputs = [["SELECT 'abc", "'"], ['SELECT * FROM [abc','['], ['SELECT * FROM "abc','"'],
+    ['SELECT * FROM `abc','`'], ['SELECT * FROM t /*','/*']];
+  const actual = inputs.map(([sql, opener]) => {
+    const error = sqlError(sql);
+    assert.equal(error.pos, sql.indexOf(opener));
+    return error.pos;
   });
-  assert.deepEqual(actual, [0,0,0,0]);
-  return `4 malformed inputs accepted; warningCounts=${actual.join(',')}`;
+  return `5 sqlErr opening positions=${actual.join(',')}`;
 });
 
-test('DEFECT: statement splitter splits quoted identifier', () => {
-  const input = 'SELECT * FROM [a;b]; SELECT 2';
+test('fix B3: statement splitter skips all quoted identifiers', () => {
+  const input = 'SELECT * FROM [a;b]; SELECT * FROM "c;d"; SELECT * FROM `e;f`; SELECT 2';
   const actual = api.splitStatements(input);
-  assert.deepEqual(json(actual), ['SELECT * FROM [a','b]','SELECT 2']);
+  assert.deepEqual(json(actual), ['SELECT * FROM [a;b]','SELECT * FROM "c;d"','SELECT * FROM `e;f`','SELECT 2']);
   return JSON.stringify(actual);
 });
 
-test('DEFECT: cycle silently generates self-referencing CTE', () => {
+test('fix C2: cycle produces a readable graph error', () => {
   const graph = {nodes:[{id:'f',type:'filter',col:'x',op:'=',val:1},{id:'o',type:'output'}],
     edges:[{from:'f',to:'f',port:0},{from:'f',to:'o',port:0}]};
   installGraph(api, graph, oneColumnSchema());
   const generated = api.buildSQL();
-  assert.match(generated, /filtered AS \([\s\S]*FROM filtered/);
+  assert.match(generated, /^-- 無法產生 SQL：.*循環/);
+  assert.doesNotMatch(generated, /FROM filtered/);
   assert.deepEqual(json(api.evalNode(graph.nodes[0])), {cols:[],rows:[]});
-  return 'eval=EMPTY; SQL has non-recursive FROM filtered self-reference';
+  return generated;
 });
 
-test('DEFECT: unconnected input silently generates FROM ?', () => {
+test('fix C3: unconnected input produces a readable graph error', () => {
   const graph = {nodes:[{id:'f',type:'filter',col:'x',op:'=',val:1},{id:'o',type:'output'}],
     edges:[{from:'f',to:'o',port:0}]};
   installGraph(api, graph, oneColumnSchema());
   const generated = api.buildSQL();
-  assert.match(generated, /FROM \?/);
+  assert.match(generated, /^-- 無法產生 SQL：WHERE 缺少第 1 個來源連線。$/);
+  assert.doesNotMatch(generated, /FROM \?/);
   assert.deepEqual(json(api.evalNode(graph.nodes[0])), {cols:[],rows:[]});
-  return 'eval=EMPTY; generated FROM ?';
+  return generated;
 });
 
 function oneColumnSchema() {

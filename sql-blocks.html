@@ -578,12 +578,14 @@ function dupFlags(rows){
   return rows.map(r=>{ const k = JSON.stringify(r); if(seen.has(k)) return true; seen.add(k); return false; });
 }
 
-function evalNode(node, seen){
+function evalNode(node, ctx){
   if(!node) return EMPTY;
-  seen = seen || new Set();
-  if(seen.has(node.id)) return EMPTY;
-  seen.add(node.id);
-  const S = () => evalNode(srcOf(node.id,0), seen);
+  ctx = ctx || {path:new Set(), memo:new Map()};
+  if(ctx.memo.has(node.id)) return ctx.memo.get(node.id);
+  if(ctx.path.has(node.id)) return EMPTY;
+  ctx.path.add(node.id);
+  const S = () => evalNode(srcOf(node.id,0), ctx);
+  const run = () => {
 
   switch(node.type){
 
@@ -593,7 +595,7 @@ function evalNode(node, seen){
   }
 
   case 'join': {
-    const L = evalNode(srcOf(node.id,0), seen), R = evalNode(srcOf(node.id,1), seen);
+    const L = evalNode(srcOf(node.id,0), ctx), R = evalNode(srcOf(node.id,1), ctx);
     if(!L.cols.length || !R.cols.length) return EMPTY;
     const li = L.cols.indexOf(node.leftCol), ri = R.cols.indexOf(node.rightCol);
     if(li < 0 || ri < 0) return EMPTY;
@@ -609,7 +611,7 @@ function evalNode(node, seen){
   }
 
   case 'union': {
-    const A = evalNode(srcOf(node.id,0), seen), B = evalNode(srcOf(node.id,1), seen);
+    const A = evalNode(srcOf(node.id,0), ctx), B = evalNode(srcOf(node.id,1), ctx);
     if(!A.cols.length) return B;
     if(!B.cols.length) return A;
     const w = Math.min(A.cols.length, B.cols.length);
@@ -712,6 +714,7 @@ function evalNode(node, seen){
       if(!buckets.has(k)) buckets.set(k, []);
       buckets.get(k).push(r);
     });
+    if(!ki.length && !s.rows.length) buckets.set('', []);
     const cols = ki.map(i=>s.cols[i]).concat(node.aggs.map(a=>a.as));
     const rows = [];
     buckets.forEach(group=>{
@@ -722,14 +725,36 @@ function evalNode(node, seen){
 
   }
   return S();
+  };
+  let result;
+  try { result = run(); }
+  finally { ctx.path.delete(node.id); }
+  ctx.memo.set(node.id, result);
+  return result;
 }
 
 const FILTER_OPS = ['>=','>','<=','<','=','<>','IN','NOT IN','LIKE','NOT LIKE','IS NULL','IS NOT NULL'];
 const needsVal = op => op !== 'IS NULL' && op !== 'IS NOT NULL';
+/* IN 清單仍存成 inspector 可直接編輯的文字；含逗號的值用 SQL 式單引號包住，單引號寫兩次。 */
 function inList(val){
-  return String(val == null ? '' : val).split(',')
-    .map(s=>s.trim().replace(/^'([\s\S]*)'$/, '$1'))
-    .filter(s=>s !== '');
+  const text = String(val == null ? '' : val), out = [];
+  let cur = '', quoted = false;
+  for(let i=0; i<text.length; i++){
+    const c = text[i];
+    if(c === "'"){
+      if(quoted && text[i+1] === "'"){ cur += "'"; i++; }
+      else quoted = !quoted;
+    } else if(c === ',' && !quoted){ if(cur.trim() !== '') out.push(cur.trim()); cur = ''; }
+    else cur += c;
+  }
+  if(cur.trim() !== '') out.push(cur.trim());
+  return out;
+}
+function editInList(vals){
+  return vals.map(v=>{
+    const s = String(v);
+    return /[,']|^\s|\s$/.test(s) ? "'"+s.replace(/'/g,"''")+"'" : s;
+  }).join(', ');
 }
 function likeRe(pat){
   const body = String(pat).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*').replace(/_/g, '.');
@@ -748,7 +773,7 @@ function opWords(n){
 }
 
 function cmp(v, op, target){
-  const empty = (v === null || v === undefined || v === '');
+  const empty = (v === null || v === undefined);
   if(op === 'IS NULL')     return empty;
   if(op === 'IS NOT NULL') return !empty;
   if(op === 'IN' || op === 'NOT IN'){
@@ -777,14 +802,16 @@ function aggregate(a, group, cols){
   if(a.fn === 'COUNT' && (a.col === '*' || !a.col)) return group.length;
   const i = cols.indexOf(a.col);
   if(i < 0) return null;
-  const nums = group.map(r=>Number(r[i])).filter(v=>!isNaN(v));
+  const vals = group.map(r=>r[i]).filter(v=>v !== null && v !== undefined);
+  if(a.fn === 'COUNT') return vals.length;
+  if(!vals.length) return null;
+  if(a.fn === 'MAX' || a.fn === 'MIN') return vals.reduce((best,v)=>
+    cmpVal(v, best) * (a.fn === 'MAX' ? 1 : -1) > 0 ? v : best);
+  const nums = vals.map(Number).filter(v=>!isNaN(v));
   if(!nums.length) return null;
   switch(a.fn){
     case 'SUM':   return round(nums.reduce((s,v)=>s+v,0));
     case 'AVG':   return round(nums.reduce((s,v)=>s+v,0)/nums.length);
-    case 'MAX':   return Math.max.apply(null, nums);
-    case 'MIN':   return Math.min.apply(null, nums);
-    case 'COUNT': return nums.length;
   }
   return null;
 }
@@ -801,7 +828,8 @@ const DIALECTS = {
   oracle:   {name:'Oracle',     open:'"', close:'"', lim:'fetch'}
 };
 const D = () => DIALECTS[state.dialect] || DIALECTS.mysql;
-const q = s => /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(s)) ? String(s) : D().open + String(s) + D().close;
+const q = s => /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(s)) ? String(s) :
+  D().open + String(s).split(D().close).join(D().close + D().close) + D().close;
 /* 表名可能帶 schema：[analytic].[trans_detail] */
 const tableRef = n => n.ns ? n.ns.split('.').map(q).join('.') + '.' + q(n.table) : q(n.table);
 const tableLabel = n => (n.ns ? n.ns + '.' : '') + n.table;
@@ -827,14 +855,18 @@ function numish(v){
   return String(Number(s)) === s ? Number(s) : null;
 }
 const isNum = v => numish(v) !== null;
-const lit = v => isNum(v) ? String(numish(v)) : "'"+String(v).replace(/'/g,"''")+"'";
+const strLit = v => "'"+String(v).replace(/\\/g, state.dialect === 'mysql' ? '\\\\' : '\\').replace(/'/g,"''")+"'";
+const lit = v => isNum(v) ? String(numish(v)) : strLit(v);
 function operand(v, cols){ return cols.indexOf(v) >= 0 ? q(v) : (isNum(v) ? String(Number(v)) : lit(v)); }
 function condSQL(n){
   if(!needsVal(n.op)) return q(n.col)+' '+n.op;
-  if(n.op === 'IN' || n.op === 'NOT IN')
-    return q(n.col)+' '+n.op+' ('+(inList(n.val).map(lit).join(', ') || 'NULL')+')';
+  if(n.op === 'IN' || n.op === 'NOT IN'){
+    const vals = inList(n.val);
+    if(!vals.length) return '/* '+n.op+' 清單是空的 */ '+(n.op === 'IN' ? '1 = 0' : '1 = 1');
+    return q(n.col)+' '+n.op+' ('+vals.map(lit).join(', ')+')';
+  }
   if(n.op === 'LIKE' || n.op === 'NOT LIKE')
-    return q(n.col)+' '+n.op+' '+"'"+String(n.val).replace(/'/g,"''")+"'";
+    return q(n.col)+' '+n.op+' '+strLit(n.val);
   return q(n.col)+' '+n.op+' '+lit(n.val);
 }
 
@@ -851,12 +883,41 @@ function chainOrder(){
   return order;
 }
 
+function graphIssue(last){
+  const colour = new Map(), next = new Map();
+  state.nodes.forEach(n=>next.set(n.id, []));
+  state.edges.forEach(e=>{ if(next.has(e.from) && nodeById(e.to)) next.get(e.from).push(e.to); });
+  function cyclic(id){
+    if(colour.get(id) === 1) return true;
+    if(colour.get(id) === 2) return false;
+    colour.set(id, 1);
+    if((next.get(id) || []).some(cyclic)) return true;
+    colour.set(id, 2); return false;
+  }
+  if(state.nodes.some(n=>cyclic(n.id))) return '積木連線形成循環，請先移除繞回前面的連線。';
+  const checked = new Set();
+  function missing(n){
+    if(!n || checked.has(n.id)) return '';
+    checked.add(n.id);
+    const count = (META[n.type] || {ins:0}).ins;
+    for(let port=0; port<count; port++){
+      const s = srcOf(n.id, port);
+      if(!s) return META[n.type].label+' 缺少第 '+(port+1)+' 個來源連線。';
+      const problem = missing(s); if(problem) return problem;
+    }
+    return '';
+  }
+  return missing(last);
+}
+
 const CTE_BASE = {join:'joined', union:'unioned', case:'tagged', derive:'derived',
                   window:'windowed', filter:'filtered', distinct:'deduped', sort:'sorted', groupby:'grouped'};
 
 function buildSQL(){
   const out = state.nodes.find(n=>n.type === 'output');
   const last = out ? srcOf(out.id, 0) : null;
+  const problem = graphIssue(last);
+  if(problem) return '-- 無法產生 SQL：'+problem;
   if(!last) return '-- 把積木接到「結果」，SQL 就會長出來。';
 
   /* ORDER BY / LIMIT 只有放在最外層才有意義 —— 最後一塊是排序就抽出來 */
@@ -939,7 +1000,7 @@ function buildSQL(){
 
     } else if(n.type === 'groupby'){
       const sel = n.keys.map(q).concat(n.aggs.map(a=>a.fn+'('+(a.col === '*' ? '*' : q(a.col))+') AS '+q(a.as)));
-      sql = '  SELECT '+list(sel, 9)+'\n  FROM '+ref(s0)+'\n  GROUP BY '+n.keys.map(q).join(', ');
+      sql = '  SELECT '+list(sel, 9)+'\n  FROM '+ref(s0)+(n.keys.length ? '\n  GROUP BY '+n.keys.map(q).join(', ') : '');
     }
     if(sql) parts.push(names[n.id]+' AS (\n'+sql+'\n)');
   });
@@ -975,7 +1036,7 @@ const KW = /\b(WITH|SELECT|DISTINCT|FROM|WHERE|GROUP BY|ORDER BY|LIMIT|FETCH FIR
 function highlight(sql){
   return sql
     .replace(/[&<>]/g, ch=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))
-    .replace(/(--[^\n]*)/g, '<span class="c">$1</span>')
+    .replace(/(\/\*[\s\S]*?\*\/|--[^\n]*)/g, '<span class="c">$1</span>')
     .replace(/('(?:[^']|'')*')/g, '<span class="s">$1</span>')
     .replace(KW, '<span class="k">$&</span>')
     .replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="n">$1</span>');
@@ -1171,7 +1232,8 @@ function renderInspector(){
     h += '<div class="rowf"><label>條件</label><select data-f="op" style="max-width:108px">'+FILTER_OPS.map(o=>opt(o, n.op)).join('')+
          '</select>'+(needsVal(n.op) ? '<input type="text" data-f="val" value="'+esc(n.val)+'">' : '')+'</div>';
     if(n.op === 'IN' || n.op === 'NOT IN')
-      h += '<p class="note">多個值用<b>逗號</b>分開，像 <code>台北, 台中</code>。</p>';
+      h += '<p class="note">多個值用<b>逗號</b>分開，像 <code>台北, 台中</code>。值本身有逗號時用單引號包住，像 <code>\'a,b\', c</code>。'+
+           (!inList(n.val).length ? '<br><b style="color:var(--drop)">清單是空的：IN 永遠不成立，NOT IN 永遠成立。</b>' : '')+'</p>';
     if(n.op === 'LIKE' || n.op === 'NOT LIKE')
       h += '<p class="note"><code>%</code> = 任意長度，<code>_</code> = 剛好一個字。<br><code>台%</code> 是「開頭是台」，<code>%北%</code> 是「中間有北」。</p>';
     if(up && up.type === 'groupby')
@@ -1764,16 +1826,25 @@ function tokenize(sql){
     const c = sql[i];
     if(/\s/.test(c)){ i++; continue; }
     if(c === '-' && sql[i+1] === '-'){ while(i < n && sql[i] !== '\n') i++; continue; }
-    if(c === '/' && sql[i+1] === '*'){ i += 2; while(i < n && !(sql[i] === '*' && sql[i+1] === '/')) i++; i += 2; continue; }
+    if(c === '/' && sql[i+1] === '*'){
+      const open = i; i += 2; while(i < n && !(sql[i] === '*' && sql[i+1] === '/')) i++;
+      if(i >= n) throw {sqlErr:true, msg:'註解沒有結束', pos:open, got:'/*'};
+      i += 2; continue;
+    }
     if(c === "'"){
       let j = i+1, s = '';
       while(j < n){ if(sql[j] === "'"){ if(sql[j+1] === "'"){ s += "'"; j += 2; continue; } break; } s += sql[j++]; }
+      if(j >= n) throw {sqlErr:true, msg:'字串沒有結束', pos:i, got:"'"};
       T.push({t:'str', v:s, p:i}); i = j+1; continue;
     }
     if(c === '"' || c === '`' || c === '['){
       const close = c === '[' ? ']' : c;
       let j = i+1, s = '';
-      while(j < n && sql[j] !== close) s += sql[j++];
+      while(j < n){
+        if(sql[j] === close){ if(sql[j+1] === close){ s += close; j += 2; continue; } break; }
+        s += sql[j++];
+      }
+      if(j >= n) throw {sqlErr:true, msg:'識別字沒有結束', pos:i, got:c};
       T.push({t:'word', v:s, quoted:true, p:i}); i = j+1; continue;
     }
     if(/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(sql[i+1] || ''))){
@@ -2076,7 +2147,7 @@ function astToGraph(parsed){
     if(c.kind === 'in'){
       const vals = c.vals.map(litOf);
       noteHint(col, vals);
-      return [{col:col, op:(c.neg ? 'NOT IN' : 'IN'), val:vals.join(', ')}];
+      return [{col:col, op:(c.neg ? 'NOT IN' : 'IN'), val:editInList(vals)}];
     }
     if(c.kind === 'like'){
       const pat = litOf(c.pat);
@@ -2292,6 +2363,11 @@ function splitStatements(text){
     if(c === '-' && text[i+1] === '-'){ while(i < text.length && text[i] !== '\n') cur += text[i++]; continue; }
     if(c === '/' && text[i+1] === '*'){ const s = i; i += 2; while(i < text.length && !(text[i] === '*' && text[i+1] === '/')) i++; i += 2; cur += text.slice(s, i); continue; }
     if(c === "'"){ const s = i; i++; while(i < text.length){ if(text[i] === "'"){ if(text[i+1] === "'"){ i += 2; continue; } i++; break; } i++; } cur += text.slice(s, i); continue; }
+    if(c === '"' || c === '`' || c === '['){
+      const s = i, close = c === '[' ? ']' : c; i++;
+      while(i < text.length){ if(text[i] === close){ if(text[i+1] === close){ i += 2; continue; } i++; break; } i++; }
+      cur += text.slice(s, i); continue;
+    }
     if(c === '(') depth++;
     if(c === ')') depth--;
     if(c === ';' && depth === 0){ if(cur.trim()) out.push(cur.trim()); cur = ''; i++; continue; }
