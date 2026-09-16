@@ -179,6 +179,33 @@ test('H2: same table name in different schemas stays two sources', () => {
   return 'analytic.m_member and BI.m_member remain distinct';
 });
 
+test('H6: inferred schema keeps an explicit SELECT projection', () => {
+  api.state.dialect = 'postgres';
+  const graph = graphFromSQL(api, 'SELECT wanted FROM missing_table');
+  const picked = graph.nodes.find(n => n.type === 'select');
+  assert.deepEqual(json(picked?.cols), ['wanted']);
+  assert.match(api.buildSQL(), /picked AS \(\n  SELECT wanted\n  FROM missing_table/);
+  return 'unknown table retains SELECT wanted';
+});
+
+test('M7: reversed JOIN operands and casts follow source aliases', () => {
+  api.state.dialect = 'postgres';
+  const savedSchema = api.state.schema;
+  const graph = graphFromSQL(api,
+    'SELECT l.a_id, r.label FROM left_t l JOIN right_t r ' +
+    'ON CAST(r.b_id AS TEXT) = CAST(l.a_id AS INT)');
+  const join = graph.nodes.find(n => n.type === 'join');
+  assert.deepEqual(json(join.keys), [{left:'a_id',lfn:'INT',right:'b_id',rfn:'TEXT'}]);
+  installGraph(api, graph, {
+    left_t:{cols:[{name:'a_id'}],rows:[[7],[8]]},
+    right_t:{cols:[{name:'b_id'},{name:'label'}],rows:[['7','hit'],['9','miss']]},
+  });
+  assert.deepEqual(json(api.evalNode(graph.nodes.find(n => n.type === 'output')).rows), [[7,'hit']]);
+  assert.match(api.buildSQL(), /ON CAST\(a\.a_id AS INT\) = CAST\(b\.b_id AS TEXT\)/);
+  api.state.schema = savedSchema;
+  return 'reversed ON imports as left a_id INT = right b_id TEXT';
+});
+
 test('select block: empty then one click selects exactly that one', () => {
   // 全不選之後點一個，應該只有那一個被選到
   const avail = ['a', 'b', 'c'];

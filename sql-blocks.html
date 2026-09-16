@@ -2746,7 +2746,14 @@ function astToGraph(parsed){
     if(known) return known.cols.map(c=>c.name);
     return perTable[full] && perTable[full].length ? perTable[full].slice() : null;
   }
+  function hasKnownSchema(src){
+    if(!src || src.kind !== 'table' || cte[src.name.toLowerCase()]) return false;
+    const full = sourceName(src);
+    return !!(state.schema[full] || state.schema[src.name]);
+  }
   const sameCols = (a, b) => !!a && !!b && a.length === b.length && a.every((v,i)=>v === b[i]);
+  const exprTable = e => e && e.kind === 'col' ? e.tbl :
+    (e && e.kind === 'call' && e.args[0] ? exprTable(e.args[0]) : null);
 
   function buildSource(s){
     if(s.kind === 'sub') return buildStatement(s.stmt);
@@ -2762,21 +2769,32 @@ function astToGraph(parsed){
     if(!c.from){ warn.push('有一段 SELECT 沒有 FROM，跳過了'); return add('table', {table:'?'}); }
     let cur = buildSource(c.from);
     let cols = knownCols(c.from);          /* 目前這條線吐出哪些欄位；不確定時是 null */
+    let colsKnown = hasKnownSchema(c.from);
+    const leftAliases = new Set(c.from.alias ? [c.from.alias] : []);
 
     c.joins.forEach(j=>{
       const right = buildSource(j.src);
       const rc = knownCols(j.src);
+      const rightAliases = new Set(j.src.alias ? [j.src.alias] : []);
       const jn = add('join', {
         joinType: j.type,
-        keys: (j.on || []).map(k=>({
-          left:exprName(k.left),   lfn:castOf(k.left),
-          right:exprName(k.right), rfn:castOf(k.right)
-        }))
+        keys: (j.on || []).map(k=>{
+          let left = k.left, rightExpr = k.right;
+          if(rightAliases.has(exprTable(left)) && leftAliases.has(exprTable(rightExpr))){
+            const swap = left; left = rightExpr; rightExpr = swap;
+          }
+          return {
+            left:exprName(left),       lfn:castOf(left),
+            right:exprName(rightExpr), rfn:castOf(rightExpr)
+          };
+        })
       });
       conn(cur, jn, 0); conn(right, jn, 1);
       cur = jn;
       const dropSet = new Set(joinKeys(jn).map(k=>k.right));
       cols = (cols && rc) ? cols.concat(rc.filter(x=>!dropSet.has(x))) : null;
+      colsKnown = colsKnown && hasKnownSchema(j.src);
+      rightAliases.forEach(a=>leftAliases.add(a));
     });
 
     c.where.forEach(w=>{
@@ -2865,7 +2883,7 @@ function astToGraph(parsed){
       });
       /* 欄位跟上一步一模一樣就不補 —— 不然 JOIN 自己列出來的欄位清單
          會被誤認成挑欄位，重新匯入一次就多長一塊積木。 */
-      if(keep.length && !sameCols(cols, keep)){ const pk = add('select', {cols:keep}); conn(cur, pk); cur = pk; }
+      if(keep.length && (!colsKnown || !sameCols(cols, keep))){ const pk = add('select', {cols:keep}); conn(cur, pk); cur = pk; }
     }
 
     if(c.distinct){ const d = add('distinct', {}); conn(cur, d); cur = d; }
