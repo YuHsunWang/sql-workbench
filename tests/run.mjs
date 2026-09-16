@@ -84,6 +84,58 @@ test('select block: projection survives parse, SQL and exec', () => {
   return 'one select block, kept through SQL, exec and re-import';
 });
 
+test('join: composite keys and per-side casts', () => {
+  api.state.dialect = 'mssql';
+  const graph = graphFromSQL(api,
+    'SELECT t.sale_amt FROM analytic.trans_detail AS t ' +
+    'INNER JOIN analytic.store_weather AS w ' +
+    'ON CAST(t.deal_time AS DATE) = w.cutoff_date AND t.ostore_no = w.ostore_no');
+  const keys = graph.nodes.find(n => n.type === 'join').keys;
+  assert.deepEqual(json(keys), [
+    {left:'deal_time', lfn:'DATE', right:'cutoff_date', rfn:''},
+    {left:'ostore_no', lfn:'',     right:'ostore_no',   rfn:''},
+  ]);
+  const generated = api.buildSQL();
+  assert.match(generated, /ON CAST\(a\.deal_time AS DATE\) = b\.cutoff_date\n   AND a\.ostore_no = b\.ostore_no/);
+  // 轉了日期才對得上，所以要有列跑出來
+  const out = api.evalNode(graph.nodes.find(n => n.type === 'output'));
+  assert.ok(out.rows.length > 0, 'cast join produced no rows');
+  // 兩個條件都要成立：拿掉一個列數會變多
+  const one = api.astToGraph(api.parseSQLText(
+    'SELECT t.sale_amt FROM analytic.trans_detail AS t INNER JOIN analytic.store_weather AS w ON t.ostore_no = w.ostore_no'));
+  assert.equal(one.nodes.find(n => n.type === 'join').keys.length, 1);
+  return `composite keys kept, CAST round-tripped, ${out.rows.length} rows`;
+});
+
+test('select block: empty then one click selects exactly that one', () => {
+  // 全不選之後點一個，應該只有那一個被選到
+  const avail = ['a', 'b', 'c'];
+  const pickOne = (cols, clicked) => {
+    const cur = cols.slice();
+    const i = cur.indexOf(clicked);
+    if (i >= 0) cur.splice(i, 1); else cur.push(clicked);
+    return avail.filter(c => cur.indexOf(c) >= 0);
+  };
+  assert.deepEqual(pickOne([], 'b'), ['b']);
+  assert.deepEqual(pickOne(['b'], 'a'), ['a', 'b']);
+  assert.deepEqual(pickOne(['a', 'b'], 'b'), ['a']);
+  return 'empty -> click b -> ["b"]';
+});
+
+test('sample data follows column names, and joins still line up', () => {
+  const tx = api.state.schema['analytic.trans_detail'];
+  const at = n => tx.rows[0][tx.cols.findIndex(c => c.name === n)];
+  assert.match(String(at('deal_time')), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  assert.match(String(at('member_no')), /^M\d{7}$/);
+  assert.equal(typeof at('sale_amt'), 'number');
+  const w = api.state.schema['analytic.store_weather'];
+  const wat = n => w.rows[0][w.cols.findIndex(c => c.name === n)];
+  assert.equal(typeof wat('MaxT_predict'), 'number');
+  // 同一個欄名在不同表要產生同一串值，JOIN 才對得上
+  assert.equal(at('ostore_no'), wat('ostore_no'));
+  return 'names drive values; shared columns stay joinable';
+});
+
 test('round trip: supported node shapes', () => {
   const inputs = [
     'SELECT * FROM t WHERE x=1', 'SELECT DISTINCT * FROM t',

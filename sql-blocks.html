@@ -244,6 +244,10 @@ input[type="number"]{max-width:88px}
   border-radius:20px;padding:3px 10px;transition:.15s;
 }
 .chip[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink)}
+.chip{text-align:left;line-height:1.3}
+.chip b{display:block;font-weight:500}
+.chip i{display:block;font-style:normal;font-size:9.5px;color:var(--ink-3);font-family:var(--body)}
+.chip[aria-pressed="true"] i{color:var(--accent-ink);opacity:.75}
 .branch{display:flex;align-items:center;gap:6px;margin-bottom:7px;font-family:var(--mono);font-size:11.5px;color:var(--ink-3)}
 .branch .x{border:none;background:none;color:var(--ink-3);padding:0 2px;font-size:15px;line-height:1}
 .branch .x:hover{color:var(--drop)}
@@ -268,6 +272,10 @@ input[type="number"]{max-width:88px}
 .sqlbox .n{color:var(--f-coll)}
 .sqlbox .c{color:var(--ink-3);font-style:italic}
 .dnote{margin:0;padding:8px 12px;border-top:1px solid var(--line-soft);font-size:11px;color:var(--ink-3);line-height:1.6}
+.dopt{padding:8px 12px 0;font-size:11.5px;color:var(--ink-2)}
+.dopt label{display:flex;align-items:center;gap:6px;cursor:pointer}
+.dopt input{width:14px;height:14px;accent-color:var(--accent);flex:none}
+.dnote .same{color:var(--accent-ink)}
 .dnote b{color:var(--ink-2);font-weight:500}
 .dnote code{font-family:var(--mono)}
 
@@ -447,6 +455,7 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
           </select>
         </div>
         <pre class="sqlbox" id="sql"></pre>
+        <div class="dopt"><label><input type="checkbox" id="quote-all"> 識別字一律加引號（貼進挑剔的工具時比較保險）</label></div>
         <p class="dnote" id="dnote"></p>
       </section>
     </div>
@@ -548,7 +557,8 @@ const PAL_LABEL = {
 /* ============================================================
    2. STATE + PRESETS
    ============================================================ */
-const state = { schema:{}, nodes:[], edges:[], sel:null, steps:[], step:0, timer:null, uid:0, dialect:'mysql' };
+const state = { schema:{}, nodes:[], edges:[], sel:null, steps:[], step:0, timer:null, uid:0,
+                dialect:'mysql', quoteAll:false };
 
 const SCHEMA_RAW = {
 "analytic.member_high_contributing":"高貢獻會員名單|time_category:時間區間,fdp_upt:轉入數據中台時間,calculate_end_date:計算結束日期,category_id:會員類別,calculate_start_date:計算開始日期,member_no:會員編號",
@@ -666,7 +676,7 @@ function presetAdvanced(){
   resetGraph();
   const tx = mk('table', 26, 40, {table:'analytic.trans_detail'});
   const og = mk('table', 26, 214, {table:'analytic.m_org_last'});
-  const j  = mk('join', 236, 118, {joinType:'INNER', leftCol:'store_no', rightCol:'store_no'});
+  const j  = mk('join', 236, 118, {joinType:'INNER', keys:[{left:'store_no', right:'store_no'}]});
   const pk = mk('select', 446, 118, {cols:['county','fm_name','sale_amt']});
   const g  = mk('groupby', 656, 118, {keys:['county','fm_name'], aggs:[{fn:'SUM', col:'sale_amt', as:'total_amt'}]});
   const w  = mk('window', 866, 118, {fn:'ROW_NUMBER', col:'total_amt', partitionBy:['county'], orderBy:'total_amt', dir:'DESC', as:'rk'});
@@ -680,6 +690,30 @@ function presetAdvanced(){
    3. EXECUTION ENGINE  (graph -> real rows)
    ============================================================ */
 const EMPTY = {cols:[], rows:[]};
+/* JOIN 條件一律當成陣列處理；舊的單一 leftCol/rightCol 自動轉過來 */
+/* JOIN 兩邊型別對不上時要先轉：deal_time(2024-03-01 08:00) 要 cast 成日期才對得上 deal_date */
+const CASTS = {
+  '':      {label:'原值',        run:v=>v},
+  'DATE':  {label:'轉日期',      run:v=>v == null ? v : String(v).slice(0,10)},
+  'TEXT':  {label:'轉文字',      run:v=>v == null ? v : String(v)},
+  'INT':   {label:'轉整數',      run:v=>v == null || v === '' ? null : Math.trunc(Number(v))},
+  'TRIM':  {label:'去頭尾空白',  run:v=>v == null ? v : String(v).trim()},
+  'UPPER': {label:'轉大寫',      run:v=>v == null ? v : String(v).toUpperCase()}
+};
+const castRun = k => (CASTS[k] || CASTS['']).run;
+function castSQL(k, expr){
+  if(!k) return expr;
+  if(k === 'TRIM')  return 'TRIM('+expr+')';
+  if(k === 'UPPER') return 'UPPER('+expr+')';
+  if(k === 'DATE')  return 'CAST('+expr+' AS DATE)';
+  if(k === 'INT')   return 'CAST('+expr+' AS '+(state.dialect === 'oracle' ? 'NUMBER(10)' : 'INT')+')';
+  const txt = state.dialect === 'mssql' ? 'VARCHAR(255)' : state.dialect === 'mysql' ? 'CHAR' : 'VARCHAR(255)';
+  return 'CAST('+expr+' AS '+txt+')';
+}
+function joinKeys(n){
+  if(n.keys && n.keys.length) return n.keys;
+  return (n.leftCol || n.rightCol) ? [{left:n.leftCol || '', right:n.rightCol || '', lfn:'', rfn:''}] : [];
+}
 function inEdges(id){ return state.edges.filter(e=>e.to===id).sort((a,b)=>a.port-b.port); }
 function nodeById(id){ return state.nodes.find(n=>n.id===id) || null; }
 function srcOf(id, port){ const e = state.edges.find(e=>e.to===id && e.port===(port||0)); return e ? nodeById(e.from) : null; }
@@ -718,13 +752,21 @@ function evalNode(node, ctx){
   case 'join': {
     const L = evalNode(srcOf(node.id,0), ctx), R = evalNode(srcOf(node.id,1), ctx);
     if(!L.cols.length || !R.cols.length) return EMPTY;
-    const li = L.cols.indexOf(node.leftCol), ri = R.cols.indexOf(node.rightCol);
-    if(li < 0 || ri < 0) return EMPTY;
-    const keep = R.cols.map((c,i)=>i).filter(i=>i!==ri);
+    const pairs = joinKeys(node)
+      .map(k=>({l:L.cols.indexOf(k.left), r:R.cols.indexOf(k.right), right:k.right, lfn:k.lfn || '', rfn:k.rfn || ''}))
+      .filter(p=>p.l >= 0 && p.r >= 0);
+    if(!pairs.length) return EMPTY;
+    const drop = new Set(pairs.map(p=>p.r));              /* 右邊重複的 key 欄不留 */
+    const keep = R.cols.map((c,i)=>i).filter(i=>!drop.has(i));
     const cols = L.cols.concat(keep.map(i=>R.cols[i]));
+    const key = (row, side) => pairs.map(p=>{
+      const raw = row[side === 'l' ? p.l : p.r];
+      return String(castRun(side === 'l' ? p.lfn : p.rfn)(raw));
+    }).join('\u0000');
     const rows = [];
     L.rows.forEach(l=>{
-      const hits = R.rows.filter(r=>String(r[ri]) === String(l[li]));
+      const k = key(l, 'l');
+      const hits = R.rows.filter(r=>key(r, 'r') === k);
       if(hits.length) hits.forEach(r=>rows.push(l.concat(keep.map(i=>r[i]))));
       else if(node.joinType === 'LEFT') rows.push(l.concat(keep.map(()=>null)));
     });
@@ -959,7 +1001,7 @@ const DIALECTS = {
   oracle:   {name:'Oracle',     open:'"', close:'"', lim:'fetch'}
 };
 const D = () => DIALECTS[state.dialect] || DIALECTS.mysql;
-const q = s => /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(s)) ? String(s) :
+const q = s => (!state.quoteAll && /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(s))) ? String(s) :
   D().open + String(s).split(D().close).join(D().close + D().close) + D().close;
 /* 表名可能帶 schema：[analytic].[trans_detail] */
 const tableRef = n => n.ns
@@ -1067,12 +1109,30 @@ function buildSQL(){
 
   /* 一連串只餵給下一個 filter 的 filter，併成一個 CTE、WHERE 用 AND 串 */
   const absorbed = {};
+  const onlyFeeds = s => state.edges.filter(e=>e.from === s.id).length === 1;
   all.forEach(n=>{
-    if(n.type !== 'filter') return;
     const s = srcOf(n.id, 0);
-    if(s && s.type === 'filter' && state.edges.filter(e=>e.from === s.id).length === 1) absorbed[s.id] = true;
+    if(!s || !onlyFeeds(s)) return;
+    /* 連續的 filter 併成一個 WHERE */
+    if(n.type === 'filter' && s.type === 'filter') absorbed[s.id] = true;
+    /* 「選欄位」只是餵給下一塊時，把欄位清單併進去，不用自己一層 CTE */
+    if(s.type === 'select' && ['filter','distinct','sort'].indexOf(n.type) >= 0) absorbed[s.id] = true;
   });
   const order = all.filter(n=>!absorbed[n.id]);
+  /* 回頭找被併掉的 select 提供的欄位清單 */
+  function inheritedCols(n){
+    let up = srcOf(n.id, 0);
+    while(up && absorbed[up.id]){
+      if(up.type === 'select' && up.cols && up.cols.length) return up.cols;
+      up = srcOf(up.id, 0);
+    }
+    return null;
+  }
+  function realSource(n){
+    let up = srcOf(n.id, 0);
+    while(up && absorbed[up.id] && up.type === 'select') up = srcOf(up.id, 0);
+    return up;
+  }
 
   const names = {}, used = {};
   order.forEach(n=>{
@@ -1091,9 +1151,14 @@ function buildSQL(){
     if(n.type === 'join'){
       const L = srcOf(n.id,0), R = srcOf(n.id,1);
       const Lc = evalNode(L).cols, Rc = evalNode(R).cols;
-      const sel = Lc.map(c=>'a.'+q(c)).concat(Rc.filter(c=>c!==n.rightCol).map(c=>'b.'+q(c)));
+      const ks = joinKeys(n).filter(k=>k.left && k.right);
+      const dropped = new Set(ks.map(k=>k.right));
+      const sel = Lc.map(c=>'a.'+q(c)).concat(Rc.filter(c=>!dropped.has(c)).map(c=>'b.'+q(c)));
+      const on = ks.length
+        ? ks.map(k=>castSQL(k.lfn, 'a.'+q(k.left))+' = '+castSQL(k.rfn, 'b.'+q(k.right))).join('\n   AND ')
+        : '1 = 1 /* 還沒選 JOIN 條件 */';
       sql = '  SELECT '+list(sel, 9)+
-            '\n  FROM '+ref(L)+' AS a\n  '+n.joinType+' JOIN '+ref(R)+' AS b\n    ON a.'+q(n.leftCol)+' = b.'+q(n.rightCol);
+            '\n  FROM '+ref(L)+' AS a\n  '+n.joinType+' JOIN '+ref(R)+' AS b\n    ON '+on;
 
     } else if(n.type === 'union'){
       const A = srcOf(n.id,0), B = srcOf(n.id,1);
@@ -1126,7 +1191,9 @@ function buildSQL(){
         if(up && up.type === 'filter' && absorbed[up.id]) walk = up;
         else { base = up; break; }
       }
-      sql = '  SELECT *\n  FROM '+ref(base)+'\n  WHERE '+conds.join('\n    AND ');
+      const inh = inheritedCols(walk);
+      if(inh) base = realSource(walk);
+      sql = '  SELECT '+(inh ? list(inh.map(q), 9) : '*')+'\n  FROM '+ref(base)+'\n  WHERE '+conds.join('\n    AND ');
 
     } else if(n.type === 'select'){
       /* 照使用者選的欄位原樣寫出來。就算執行引擎認不得某個欄名也不要退回
@@ -1135,12 +1202,15 @@ function buildSQL(){
       sql = '  SELECT '+(keep.length ? list(keep.map(q), 9) : '*')+'\n  FROM '+ref(s0);
 
     } else if(n.type === 'distinct'){
-      sql = '  SELECT DISTINCT *\n  FROM '+ref(s0);
+      const inh = inheritedCols(n);
+      sql = '  SELECT DISTINCT '+(inh ? list(inh.map(q), 18) : '*')+'\n  FROM '+ref(inh ? realSource(n) : s0);
 
     } else if(n.type === 'sort'){
       const lim = Number(n.limit) || 0;
+      const inh = inheritedCols(n), from = inh ? realSource(n) : s0;
       sql = lim > 0
-        ? '  '+limHead(lim)+'\n  FROM '+ref(s0)+'\n  ORDER BY '+q(n.by)+' '+n.dir+limTail(lim, '  ')
+        ? '  '+(inh ? limHead(lim).replace(/\*$/, list(inh.map(q), 9)) : limHead(lim))+
+          '\n  FROM '+ref(from)+'\n  ORDER BY '+q(n.by)+' '+n.dir+limTail(lim, '  ')
         : '  -- 夾在中間的 ORDER BY 資料庫可以不理你，已省略\n'+
           '  -- （排序請放最後一塊，或填「取前幾筆」）\n'+
           '  SELECT *\n  FROM '+ref(s0);
@@ -1167,16 +1237,21 @@ function list(items, pad){ return items.join(',\n' + ' '.repeat(pad)); }
 
 /* 這段查詢有哪些地方是跟資料庫綁死的 */
 function dialectNote(){
-  const d = D(), chain = chainOrder(), notes = [];
-  notes.push('識別字用 <b>'+d.open+'欄名'+d.close+'</b> 包');
+  const d = D(), chain = chainOrder(), sql = buildSQL(), notes = [];
   const lim = chain.reduce((m,n)=>n.type === 'sort' ? Math.max(m, Number(n.limit)||0) : m, 0);
-  if(lim > 0) notes.push('取前 N 筆寫 <b>'+limPhrase(lim)+'</b>');
+  /* 這段查詢真的用到方言差異了嗎？沒有就直說，不要讓人以為切換壞掉 */
+  const quoted = sql.indexOf(d.open) >= 0 && state.quoteAll;
+  if(quoted) notes.push('識別字包成 <b>'+d.open+'欄名'+d.close+'</b>');
+  if(lim > 0) notes.push('取前 N 筆寫成 <b>'+limPhrase(lim)+'</b>');
   const hasWin = chain.some(n=>n.type === 'window');
   const hasCTE = chain.some(n=>n.type !== 'sort' || Number(n.limit) > 0);
   if(state.dialect === 'mysql' && (hasWin || hasCTE)) notes.push('<code>WITH</code> 和視窗函數要 <b>MySQL 8.0</b> 以上');
   if(state.dialect === 'oracle' && lim > 0) notes.push('<code>FETCH FIRST</code> 要 <b>Oracle 12c</b> 以上');
   if(state.dialect === 'mssql' && hasWin) notes.push('視窗函數要 <b>SQL Server 2012</b> 以上');
-  return notes.join(' · ');
+  if(!notes.length)
+    return '<span class="same">這段查詢沒用到任何方言差異的語法，四種資料庫都能直接跑</span> — 換方言不會有變化是正常的。'+
+           '勾上面那格可以看到 '+d.name+' 的引號寫法。';
+  return d.name + '：' + notes.join(' · ');
 }
 
 const KW = /\b(WITH|SELECT|DISTINCT|FROM|WHERE|GROUP BY|ORDER BY|LIMIT|FETCH FIRST|ROWS ONLY|TOP|INNER JOIN|LEFT JOIN|JOIN|UNION ALL|UNION|ON|AS|CASE|WHEN|THEN|ELSE|END|OVER|PARTITION BY|ASC|DESC|ROW_NUMBER|DENSE_RANK|RANK|COUNT|SUM|AVG|MAX|MIN|BETWEEN|NOT IN|IN|NOT LIKE|LIKE|IS NOT NULL|IS NULL|AND|OR)\b/g;
@@ -1208,7 +1283,14 @@ function nodeSummary(n){
       return t ? '<code>'+shown+'</code><br>'+t.cols.length+' 欄 · '+t.rows.length+' 列'
                : '<code>'+shown+'</code><br><span class="warn">找不到這張表</span>';
     }
-    case 'join':   return n.joinType+'<br><code>a.'+n.leftCol+' = b.'+n.rightCol+'</code>';
+    case 'join': {
+      const ks = joinKeys(n);
+      if(!ks.length) return n.joinType+'<br><span class="warn">還沒選條件</span>';
+      const one = k => (k.lfn ? CASTS[k.lfn].label+'(' : '')+k.left+(k.lfn ? ')' : '')+' = '+
+                       (k.rfn ? CASTS[k.rfn].label+'(' : '')+k.right+(k.rfn ? ')' : '');
+      if(ks.length === 1) return n.joinType+'<br><code>'+one(ks[0])+'</code>';
+      return n.joinType+'<br><code>'+one(ks[0])+'</code><br>＋ 另 '+(ks.length-1)+' 個條件';
+    }
     case 'union': {
       const a = evalNode(srcOf(n.id,0)).cols.length, b = evalNode(srcOf(n.id,1)).cols.length;
       const bad = a && b && a !== b;
@@ -1410,6 +1492,20 @@ wires.addEventListener('click', e=>{
 const inspector = document.getElementById('inspector');
 function select(id){ state.sel = id; renderNodes(); drawWires(); renderInspector(); }
 function opt(v, cur, label){ return '<option value="'+v+'"'+(String(v)===String(cur)?' selected':'')+'>'+(label||v)+'</option>'; }
+/* 欄位的中文名：在所有表裡找第一個對得上的 */
+const CH_CACHE = {};
+function chOf(name){
+  if(CH_CACHE[name] !== undefined) return CH_CACHE[name];
+  let hit = '';
+  Object.keys(state.schema).some(t=>state.schema[t].cols.some(c=>{
+    if(c.name === name && c.ch){ hit = c.ch; return true; }
+    return false;
+  }));
+  return (CH_CACHE[name] = hit);
+}
+const colOpt = (c, cur) => opt(c, cur, c + (chOf(c) ? '  —  ' + chOf(c) : ''));
+const colChip = (c, on, attr) => '<button class="chip" '+attr+'="'+c+'" aria-pressed="'+on+'"><b>'+c+'</b>'+
+  (chOf(c) ? '<i>'+chOf(c)+'</i>' : '')+'</button>';
 function esc(v){ return String(v == null ? '' : v).replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
 const OPS = ['>=','>','<=','<','=','<>'];
 
@@ -1431,9 +1527,27 @@ function renderInspector(){
     const L = colsInto(n.id,0), R = colsInto(n.id,1);
     h += '<div class="rowf"><label>方式</label><select data-f="joinType">'+
       opt('INNER', n.joinType, 'INNER（兩邊都有才留）')+opt('LEFT', n.joinType, 'LEFT（左邊全留）')+'</select></div>';
-    h += '<div class="rowf"><label>左欄位</label><select data-f="leftCol">'+L.map(c=>opt(c, n.leftCol)).join('')+'</select></div>';
-    h += '<div class="rowf"><label>右欄位</label><select data-f="rightCol">'+R.map(c=>opt(c, n.rightCol)).join('')+'</select></div>';
+    const ks = joinKeys(n);
+    h += '<div class="sec">對照條件（全部都要相等）</div>';
+    const castOpts = (cur, i, f) => '<select data-k="'+i+'" data-f="'+f+'" style="max-width:96px;flex:none">'+
+      Object.keys(CASTS).map(k=>opt(k, cur || '', CASTS[k].label)).join('')+'</select>';
+    ks.forEach((k,i)=>{
+      h += '<div class="agg" style="flex-wrap:wrap">'+
+           '<select data-k="'+i+'" data-f="left" style="min-width:110px">'+L.map(c=>colOpt(c, k.left)).join('')+'</select>'+
+           castOpts(k.lfn, i, 'lfn')+
+           (ks.length > 1 ? '<button class="x" data-del-key="'+i+'" aria-label="刪掉">×</button>' : '')+
+           '<div style="width:100%;color:var(--ink-3);font-family:var(--mono);font-size:11px;padding-left:2px">=</div>'+
+           '<select data-k="'+i+'" data-f="right" style="min-width:110px">'+R.map(c=>colOpt(c, k.right)).join('')+'</select>'+
+           castOpts(k.rfn, i, 'rfn')+
+           '</div>';
+    });
+    h += '<button class="btn ghost" data-add-key style="width:100%;margin-top:4px">＋ 多一個對照欄位</button>';
     if(!L.length || !R.length) h += '<p class="note">兩個左邊圓點都要接上來源，才會有欄位可選。</p>';
+    else if(ks.length > 1) h += '<p class="note">複合鍵：<b>每一組都相等</b>才算配對成功。少一組就會多配出很多列。</p>';
+    if(ks.some(k=>k.lfn || k.rfn))
+      h += '<p class="note">有套轉換。<b>注意：</b>欄位被函數包住後，資料庫多半用不到那個索引，大表會變慢。<br>可以的話在來源就存好對得上的欄位。</p>';
+    else
+      h += '<p class="note">兩邊型別對不上時用右邊的下拉轉一下。<br>例如 <code>deal_time</code> 是「2024-03-01 08:30」，要跟 <code>deal_date</code> 對就選<b>轉日期</b>。</p>';
   }
 
   if(n.type === 'union'){
@@ -1446,7 +1560,7 @@ function renderInspector(){
 
   if(n.type === 'filter'){
     const up = srcOf(n.id, 0);
-    h += '<div class="rowf"><label>欄位</label><select data-f="col">'+avail.map(c=>opt(c, n.col)).join('')+'</select></div>';
+    h += '<div class="rowf"><label>欄位</label><select data-f="col">'+avail.map(c=>colOpt(c, n.col)).join('')+'</select></div>';
     h += '<div class="rowf"><label>條件</label><select data-f="op" style="max-width:108px">'+FILTER_OPS.map(o=>opt(o, n.op)).join('')+
          '</select>'+(needsVal(n.op) ? '<input type="text" data-f="val" value="'+esc(n.val)+'">' : '')+'</div>';
     if(n.op === 'IN' || n.op === 'NOT IN')
@@ -1464,7 +1578,7 @@ function renderInspector(){
   }
 
   if(n.type === 'sort'){
-    h += '<div class="rowf"><label>依照</label><select data-f="by">'+avail.map(c=>opt(c, n.by)).join('')+'</select></div>';
+    h += '<div class="rowf"><label>依照</label><select data-f="by">'+avail.map(c=>colOpt(c, n.by)).join('')+'</select></div>';
     h += '<div class="rowf"><label>方向</label><select data-f="dir">'+
       opt('DESC', n.dir, 'DESC 大 → 小')+opt('ASC', n.dir, 'ASC 小 → 大')+'</select></div>';
     h += '<div class="rowf"><label>取前幾筆</label><input type="number" min="0" data-f="limit" value="'+esc(n.limit)+'"></div>';
@@ -1474,7 +1588,7 @@ function renderInspector(){
   }
 
   if(n.type === 'case'){
-    h += '<div class="rowf"><label>看哪欄</label><select data-f="col">'+avail.map(c=>opt(c, n.col)).join('')+'</select></div>';
+    h += '<div class="rowf"><label>看哪欄</label><select data-f="col">'+avail.map(c=>colOpt(c, n.col)).join('')+'</select></div>';
     h += '<div class="rowf"><label>新欄名</label><input type="text" data-f="as" value="'+esc(n.as)+'"></div>';
     h += '<div class="sec">分類規則（由上往下比，中了就停）</div>';
     n.branches.forEach((b,i)=>{
@@ -1489,7 +1603,7 @@ function renderInspector(){
   }
 
   if(n.type === 'derive'){
-    h += '<div class="rowf"><label>左邊</label><select data-f="left">'+avail.map(c=>opt(c, n.left)).join('')+'</select></div>';
+    h += '<div class="rowf"><label>左邊</label><select data-f="left">'+avail.map(c=>colOpt(c, n.left)).join('')+'</select></div>';
     h += '<div class="rowf"><label>運算</label><select data-f="op" style="max-width:64px">'+
       ['+','-','*','/'].map(o=>opt(o, n.op)).join('')+'</select>'+
       '<input type="text" data-f="right" value="'+esc(n.right)+'"></div>';
@@ -1508,10 +1622,10 @@ function renderInspector(){
       opt('MAX', n.fn, 'MAX 整組最大')+
       opt('COUNT', n.fn, 'COUNT 整組幾筆')+'</select></div>';
     if(!rankish)
-      h += '<div class="rowf"><label>算哪欄</label><select data-f="col">'+opt('*', n.col)+avail.map(c=>opt(c, n.col)).join('')+'</select></div>';
+      h += '<div class="rowf"><label>算哪欄</label><select data-f="col">'+opt('*', n.col)+avail.map(c=>colOpt(c, n.col)).join('')+'</select></div>';
     h += '<div class="sec">Partition by — 怎麼分組</div><div class="chips">'+
-      avail.map(c=>'<button class="chip" data-part="'+c+'" aria-pressed="'+(n.partitionBy.indexOf(c)>=0)+'">'+c+'</button>').join('')+'</div>';
-    h += '<div class="rowf"><label>組內排序</label><select data-f="orderBy">'+opt('', n.orderBy, '（不排）')+avail.map(c=>opt(c, n.orderBy)).join('')+'</select></div>';
+      avail.map(c=>colChip(c, n.partitionBy.indexOf(c) >= 0, 'data-part')).join('')+'</div>';
+    h += '<div class="rowf"><label>組內排序</label><select data-f="orderBy">'+opt('', n.orderBy, '（不排）')+avail.map(c=>colOpt(c, n.orderBy)).join('')+'</select></div>';
     h += '<div class="rowf"><label>方向</label><select data-f="dir">'+opt('DESC', n.dir)+opt('ASC', n.dir)+'</select></div>';
     h += '<div class="rowf"><label>新欄名</label><input type="text" data-f="as" value="'+esc(n.as)+'"></div>';
     h += '<p class="note">跟 GROUP BY 最大的差別：<b>列數完全不變</b>。<br>它只是在每一列旁邊多寫一個「你在你那組裡排第幾」。</p>';
@@ -1520,7 +1634,7 @@ function renderInspector(){
   if(n.type === 'select'){
     const keep = (n.cols || []).filter(c=>avail.indexOf(c) >= 0);
     h += '<div class="sec">要留哪些欄位</div><div class="chips">'+
-      avail.map(c=>'<button class="chip" data-col="'+c+'" aria-pressed="'+(keep.indexOf(c) >= 0)+'">'+c+'</button>').join('')+'</div>';
+      avail.map(c=>colChip(c, keep.indexOf(c) >= 0, 'data-col')).join('')+'</div>';
     h += '<div style="display:flex;gap:7px">'+
       '<button class="btn ghost" data-all-cols style="flex:1">全選</button>'+
       '<button class="btn ghost" data-no-cols style="flex:1">全不選</button></div>';
@@ -1531,12 +1645,12 @@ function renderInspector(){
 
   if(n.type === 'groupby'){
     h += '<div class="sec">依這些欄分組</div><div class="chips">'+
-      avail.map(c=>'<button class="chip" data-key="'+c+'" aria-pressed="'+(n.keys.indexOf(c)>=0)+'">'+c+'</button>').join('')+'</div>';
+      avail.map(c=>colChip(c, n.keys.indexOf(c) >= 0, 'data-key')).join('')+'</div>';
     h += '<div class="sec">要算的數字</div>';
     n.aggs.forEach((a,i)=>{
       h += '<div class="agg"><select data-a="'+i+'" data-f="fn" style="max-width:78px">'+
         ['COUNT','SUM','AVG','MAX','MIN'].map(f=>opt(f, a.fn)).join('')+'</select>'+
-        '<select data-a="'+i+'" data-f="col">'+opt('*', a.col)+avail.map(c=>opt(c, a.col)).join('')+'</select>'+
+        '<select data-a="'+i+'" data-f="col">'+opt('*', a.col)+avail.map(c=>colOpt(c, a.col)).join('')+'</select>'+
         '<input type="text" data-a="'+i+'" data-f="as" value="'+esc(a.as)+'" style="max-width:100px">'+
         '<button class="x" data-del-agg="'+i+'" aria-label="刪掉">×</button></div>';
     });
@@ -1557,7 +1671,12 @@ inspector.addEventListener('change', e=>{
   const t = e.target, f = t.dataset.f;
   if(!f) return;
   let v = t.value;
-  if(t.dataset.b !== undefined) n.branches[Number(t.dataset.b)][f] = (f === 'val') ? Number(v) : v;
+  if(t.dataset.k !== undefined){
+    n.keys = joinKeys(n).map(x=>({left:x.left, right:x.right, lfn:x.lfn || '', rfn:x.rfn || ''}));
+    n.keys[Number(t.dataset.k)][f] = v;
+    delete n.leftCol; delete n.rightCol;
+  }
+  else if(t.dataset.b !== undefined) n.branches[Number(t.dataset.b)][f] = (f === 'val') ? Number(v) : v;
   else if(t.dataset.a !== undefined) n.aggs[Number(t.dataset.a)][f] = v;
   else if(f === 'all') n.all = (v === 'x');
   else n[f] = v;
@@ -1571,15 +1690,26 @@ inspector.addEventListener('click', e=>{
   if(t.dataset.part !== undefined){ toggle(n.partitionBy, t.dataset.part); refresh(); return; }
   if(t.dataset.col !== undefined){
     const avail = colsInto(n.id);
-    if(!n.cols.length) n.cols = avail.slice();          /* 空的代表全要，先攤開再取消 */
-    toggle(n.cols, t.dataset.col);
-    n.cols = avail.filter(c=>n.cols.indexOf(c) >= 0);   /* 保持上一步的欄位順序 */
+    const cur = (n.cols || []).slice();
+    toggle(cur, t.dataset.col);
+    n.cols = avail.filter(c=>cur.indexOf(c) >= 0);      /* 保持上一步的欄位順序 */
     refresh(); return;
   }
   if(t.hasAttribute('data-all-cols')){ n.cols = colsInto(n.id).slice(); refresh(); return; }
   if(t.hasAttribute('data-no-cols')){ n.cols = []; refresh(); return; }
   if(t.hasAttribute('data-add-branch')){ n.branches.push({op:'>=', val:0, then:'新類別'}); refresh(); return; }
   if(t.dataset.delBranch !== undefined){ n.branches.splice(Number(t.dataset.delBranch),1); refresh(); return; }
+  if(t.hasAttribute('data-add-key')){
+    const L = colsInto(n.id,0), R = colsInto(n.id,1);
+    n.keys = joinKeys(n).concat([{left:L[0] || '', right:R[0] || '', lfn:'', rfn:''}]);
+    delete n.leftCol; delete n.rightCol;
+    refresh(); return;
+  }
+  if(t.dataset.delKey !== undefined){
+    n.keys = joinKeys(n); n.keys.splice(Number(t.dataset.delKey), 1);
+    delete n.leftCol; delete n.rightCol;
+    refresh(); return;
+  }
   if(t.hasAttribute('data-add-agg')){ n.aggs.push({fn:'COUNT', col:'*', as:'c'+(n.aggs.length+1)}); refresh(); return; }
   if(t.dataset.delAgg !== undefined){ n.aggs.splice(Number(t.dataset.delAgg),1); refresh(); return; }
   if(t.hasAttribute('data-del-node')){
@@ -1602,6 +1732,7 @@ function prune(n){
 const openTables = new Set();
 function renderSchema(){
   const list = document.getElementById('schema-list');
+  Object.keys(CH_CACHE).forEach(k=>delete CH_CACHE[k]);
   const all = Object.keys(state.schema);
   document.getElementById('tbl-count').textContent = all.length + ' 張';
 
@@ -1662,7 +1793,7 @@ function defaultsFor(t){
   const nums = cols.filter(c=>/id$|amount|price|qty|count|total|fee|num/i.test(c));
   const pick = a => a.length ? a[a.length-1] : (cols[0] || '');
   switch(t){
-    case 'join':     return {joinType:'INNER', leftCol:cols[0]||'', rightCol:''};
+    case 'join':     return {joinType:'INNER', keys:[{left:cols[0]||'', right:''}]};
     case 'union':    return {all:true};
     case 'case':     return {col:pick(nums), as:'label', branches:[{op:'>=', val:1000, then:'高'}], other:'低'};
     case 'derive':   return {left:pick(nums), op:'*', right:'0.05', as:'calc'};
@@ -1727,7 +1858,7 @@ function parseDDL(txt){
       const tk = s.split(/\s+/);
       const cname = tk[0].replace(/[`"\[\]]/g,'');
       const ctype = (tk[1] || 'TEXT').replace(/\(.*/,'').toUpperCase();
-      return /^[A-Za-z_]/.test(cname) ? {name:cname, type:ctype} : null;
+      return /^[A-Za-z_]/.test(cname) ? {name:cname, ch:'', type:ctype} : null;
     }).filter(Boolean);
     if(cols.length) out[m[1]] = {label:'', cols:cols, rows:fakeRows(cols)};
   }
@@ -1743,23 +1874,73 @@ function splitTop(s){
   if(cur.trim()) parts.push(cur);
   return parts;
 }
-/* hints：SQL 裡出現過的值。拿來當示範資料，篩選才篩得到東西，動畫才看得出變化 */
+/* 依欄位名和中文名猜出像樣的範例資料。
+   同一個欄名在不同表一定產生同一串值，JOIN 才對得起來。 */
+const POOL = {
+  goods : ['御飯糰','茶葉蛋','美式咖啡','鮮奶茶','關東煮','國民便當'],
+  cat   : ['飲料','鮮食','菸酒','日配','雜貨','冰品'],
+  county: ['台北市','台中市','高雄市','新北市','台南市','桃園市'],
+  region: ['信義區','西屯區','苓雅區','板橋區','東區','中壢區'],
+  store : ['忠孝門市','公益門市','三多門市','府中門市','成大門市','中原門市'],
+  person: ['林小美','陳大文','王阿明','張小華','李佳玲','吳志豪'],
+  sign  : ['天秤座','獅子座','雙魚座','金牛座','射手座','處女座'],
+  pay   : ['現金','悠遊卡','LinePay','街口支付','信用卡','icash'],
+  chan  : ['門市','線上','外送','物流','團購','企業']
+};
+const pad2 = v => String(v).length < 2 ? '0'+v : String(v);
+const pick = k => (c, r) => POOL[k][r % POOL[k].length];
+const CODES = ['067','087','097','116','126','178'];
+
+const SAMPLE_RULES = [
+  [c => /是否|旗標/.test(c.ch) || /^is_|_flag$|_fg$/i.test(c.name), (c,r) => r % 3 === 0 ? 'N' : 'Y'],
+  [c => /會員編號/.test(c.ch) || /^member_no$/i.test(c.name),       (c,r) => 'M' + String(1000001 + r*37).slice(-7)],
+  [c => /hash|sha/i.test(c.name) || /Hash/.test(c.ch),              (c,r) => 'a3f' + String(90001 + r*13) + 'e7c'],
+  [c => /店號/.test(c.ch) || /store_no$/i.test(c.name),             (c,r) => String(12001 + (r % 4))],
+  [c => /收銀機/.test(c.ch) || /^tm_no$/i.test(c.name),             (c,r) => pad2(r + 1)],
+  [c => /生日/.test(c.ch),                                          (c,r) => (1978 + r*3) + '-' + pad2(r%9+1) + '-' + pad2(r*3+5)],
+  [c => /時間/.test(c.ch) || /_time$|_at$|_upt$/i.test(c.name),     (c,r) => '2024-' + pad2(r%12+1) + '-' + pad2(r*3+2) + ' ' + pad2(8+r*2) + ':' + pad2(r*7%60) + ':00'],
+  [c => /日期/.test(c.ch) || /_date$|_dt$|date_[se]$/i.test(c.name),(c,r) => '2024-' + pad2(r%12+1) + '-' + pad2(r*3+2)],
+  [c => /金額|單價|售價|費用/.test(c.ch) || /amt$|_price$|^price$|cost|fee/i.test(c.name), (c,r) => [1290, 45, 250, 89, 610, 38][r % 6]],
+  [c => /數量|筆數|次數|個數/.test(c.ch) || /qty$|_cnt$|cnt$/i.test(c.name),               (c,r) => [3, 1, 12, 2, 7, 1][r % 6]],
+  [c => /點數/.test(c.ch),                                          (c,r) => [1250, 80, 430, 95, 2100, 60][r % 6]],
+  [c => /年齡/.test(c.ch),                                          (c,r) => [34, 27, 45, 22, 58, 31][r % 6]],
+  [c => /經度/.test(c.ch),                                          (c,r) => (121.5 + r/100).toFixed(4)],
+  [c => /緯度/.test(c.ch),                                          (c,r) => (25.03 + r/100).toFixed(4)],
+  [c => /性別/.test(c.ch),                                          (c,r) => r % 2 ? '女' : '男'],
+  [c => /星座/.test(c.ch),                                          pick('sign')],
+  [c => /國籍|國碼/.test(c.ch),                                     (c,r) => r % 4 ? '台灣' : '日本'],
+  [c => /縣市/.test(c.ch),                                          pick('county')],
+  [c => /行政區|商圈|立地/.test(c.ch),                              pick('region')],
+  [c => /店舖名稱|店名/.test(c.ch),                                 pick('store')],
+  [c => /商品名稱/.test(c.ch) || /^fm_name$/i.test(c.name),         pick('goods')],
+  [c => /支付|付款/.test(c.ch),                                     pick('pay')],
+  [c => /渠道|通路/.test(c.ch),                                     pick('chan')],
+  [c => /擔當名|人員名|姓名/.test(c.ch),                            pick('person')],
+  [c => /天氣|天候/.test(c.ch),                                     (c,r) => ['晴','多雲','陰','短暫雨','晴時多雲','陰短暫雨'][r % 6]],
+  [c => /溫|體感/.test(c.ch),                                       (c,r) => [28.4, 19.7, 33.1, 24.5, 15.2, 30.8][r % 6]],
+  [c => /濕度|機率/.test(c.ch),                                     (c,r) => [72, 45, 88, 60, 30, 95][r % 6]],
+  [c => /雨量|降雨/.test(c.ch),                                     (c,r) => [0, 12.5, 3.2, 0, 45.8, 1.1][r % 6]],
+  [c => /郵遞區號/.test(c.ch) || /^zip$/i.test(c.name),             (c,r) => ['110','407','802','220','701','330'][r % 6]],
+  [c => /值$|量$|率$|度$|數$|面積|坪/.test(c.ch),                   (c,r) => [128, 45, 260, 87, 612, 39][r % 6]],
+  [c => /名稱|名$/.test(c.ch) || /_name$|_nm$/i.test(c.name),       pick('cat')],
+  [c => /代號|編號|代碼|ID$/i.test(c.ch) || /_code$|_no$|_id$|^id$/i.test(c.name), (c,r) => CODES[r % CODES.length]],
+];
+
+function sampleValue(c, r){
+  for(const [test, make] of SAMPLE_RULES) if(test(c)) return make(c, r);
+  if(/INT/.test(c.type))     return r + 1;
+  if(/DEC|FLOAT|NUM/.test(c.type)) return [1290, 45, 250, 89, 610, 38][r % 6];
+  if(/DATE|TIME/.test(c.type))     return '2024-' + pad2(r%12+1) + '-' + pad2(r*3+2);
+  return POOL.cat[r % POOL.cat.length];
+}
+
+/* hints：這段 SQL 裡出現過的值。優先拿來當資料，篩選才篩得到東西 */
 function fakeRows(cols, hints){
   hints = hints || {};
-  const words = ['台北','台中','高雄','新竹','台南','台北'];
-  return Array.from({length:6}, (_,r)=>cols.map(c=>{
-    const t = c.type;
+  return Array.from({length:6}, (_, r)=>cols.map(c=>{
     const h = hints[c.name];
-    /* _id 欄位不套用，不然兩張表的 key 會對不上，JOIN 就空了 */
-    if(h && h.length && !/(^|_)id$/i.test(c.name) && r < Math.min(4, 2 + h.length)) return h[r % h.length];
-    if(/INT|SERIAL|BIGINT|NUMERIC|DEC|FLOAT|DOUBLE|REAL|MONEY/.test(t)){
-      if(/_id$|^id$/i.test(c.name)) return 101 + (r % 3);
-      return /DEC|FLOAT|DOUBLE|REAL|NUMERIC|MONEY/.test(t) ? [1200,380,90,2400,150,760][r] : r + 1;
-    }
-    if(/(_code|_no|_id)$/i.test(c.name) && t === 'VARCHAR') return ['067','087','097','116','126','178'][r];
-    if(/DATE|TIME/.test(t)) return '2026-0'+(r+1)+'-1'+r;
-    if(/BOOL/.test(t)) return r % 2 === 0 ? 'true' : 'false';
-    return words[r % words.length];
+    if(h && h.length && r < Math.min(4, 2 + h.length)) return h[r % h.length];
+    return sampleValue({name:c.name, ch:c.ch || '', type:c.type || 'VARCHAR'}, r);
   }));
 }
 
@@ -1789,28 +1970,35 @@ function buildSteps(){
 
     if(n.type === 'join'){
       const L = evalNode(srcOf(n.id,0)), R = evalNode(srcOf(n.id,1));
-      const li = L.cols.indexOf(n.leftCol), ri = R.cols.indexOf(n.rightCol);
-      if(li < 0 || ri < 0) return;
+      const pairs = joinKeys(n)
+        .map(k=>({l:L.cols.indexOf(k.left), r:R.cols.indexOf(k.right), left:k.left, right:k.right}))
+        .filter(x=>x.l >= 0 && x.r >= 0);
+      if(!pairs.length) return;
+      const keyL = row => pairs.map(x=>String(row[x.l])).join(' ∥ ');
+      const keyR = row => pairs.map(x=>String(row[x.r])).join(' ∥ ');
       const keys = [];
-      L.rows.forEach(r=>{ const k = String(r[li]); if(keys.indexOf(k) < 0) keys.push(k); });
-      R.rows.forEach(r=>{ const k = String(r[ri]); if(keys.indexOf(k) < 0) keys.push(k); });
+      L.rows.forEach(r=>{ const k = keyL(r); if(keys.indexOf(k) < 0) keys.push(k); });
+      R.rows.forEach(r=>{ const k = keyR(r); if(keys.indexOf(k) < 0) keys.push(k); });
       const col = new Map(keys.map((k,i)=>[k, TINTS[i % TINTS.length]]));
-      const lset = new Set(L.rows.map(r=>String(r[li])));
-      const rset = new Set(R.rows.map(r=>String(r[ri])));
+      const lset = new Set(L.rows.map(keyL));
+      const rset = new Set(R.rows.map(keyR));
+      const label = pairs.map(x=>x.left === x.right ? x.left : x.left+'='+x.right).join(' + ');
       steps.push({
         title:'JOIN 配對',
-        cap:'用 <code>'+n.leftCol+'</code> 當暗號，兩邊對號入座。<strong>同顏色就是同一個人</strong>。配不到的被畫掉 —— 因為選了 '+n.joinType+'。',
+        cap:'用 <code>'+label+'</code> 當暗號，兩邊對號入座。<strong>同顏色就是同一個人</strong>。'+
+            (pairs.length > 1 ? '這是<strong>複合鍵</strong>：'+pairs.length+' 個欄位<strong>全部</strong>相等才算配對成功。' : '')+
+            '配不到的被畫掉 —— 因為選了 '+n.joinType+'。',
         render: box => {
-          box.appendChild(miniTable('左表', L, {tint:r=>col.get(String(r[li])), drop: n.joinType === 'INNER' ? (r=>!rset.has(String(r[li]))) : (()=>false)}));
+          box.appendChild(miniTable('左表', L, {tint:r=>col.get(keyL(r)), drop: n.joinType === 'INNER' ? (r=>!rset.has(keyL(r))) : (()=>false)}));
           box.appendChild(mark('⨝'));
-          box.appendChild(miniTable('右表', R, {tint:r=>col.get(String(r[ri])), drop:r=>!lset.has(String(r[ri]))}));
+          box.appendChild(miniTable('右表', R, {tint:r=>col.get(keyR(r)), drop:r=>!lset.has(keyR(r))}));
         }
       });
       const J = evalNode(n);
       steps.push({
         title:'JOIN 結果',
         cap:'配對成功的左右兩列，被<strong>黏成一列變寬</strong>。原本 '+L.rows.length+' + '+R.rows.length+' 列，現在 <strong>'+J.rows.length+' 列</strong>。',
-        render: box => box.appendChild(miniTable('合併後', J, {tint:r=>col.get(String(r[li]))}))
+        render: box => box.appendChild(miniTable('合併後', J, {tint:r=>col.get(keyL(r))}))
       });
     }
 
@@ -2273,14 +2461,18 @@ function parseSQLText(text){
     else if(eatKw('CROSS')){ warn.push('CROSS JOIN 沒有 ON 條件，被畫成 INNER JOIN'); }
     if(!eatKw('JOIN')){ p = save; return null; }
     const src = parseSource();
-    let on = null;
+    const on = [];
     if(eatKw('ON')){
-      const l = parseExpr(); needOp('='); const r = parseExpr();
-      on = {left:l, right:r};
-      while(eatKw('AND')){ parseExpr(); if(!eatOp('=')) fail('JOIN 的 ON 只看得懂 a.x = b.y'); parseExpr();
-        warn.push('JOIN 的 ON 有多個條件，只畫第一個'); }
-    } else if(isKw('USING')){ p++; needOp('('); const c = nameTok(); needOp(')');
-      on = {left:{kind:'col', col:c}, right:{kind:'col', col:c}}; }
+      do {
+        const l = parseExpr();
+        if(!eatOp('=')) fail('JOIN 的 ON 只看得懂 a.x = b.y');
+        on.push({left:l, right:parseExpr()});
+      } while(eatKw('AND'));
+    } else if(isKw('USING')){
+      p++; needOp('(');
+      do { const c = nameTok(); on.push({left:{kind:'col', col:c}, right:{kind:'col', col:c}}); } while(eatOp(','));
+      needOp(')');
+    }
     return {type:type, src:src, on:on};
   }
 
@@ -2313,9 +2505,14 @@ function parseSQLText(text){
         const fn = take().v.toUpperCase();
         p++;
         const args = [];
+        let castType = '';
         eatKw('DISTINCT');
         if(isOp('*')){ p++; args.push({kind:'star'}); }
         else if(!isOp(')')){ do { args.push(parseExpr()); } while(eatOp(',')); }
+        if(fn === 'CAST' && eatKw('AS')){          /* CAST(x AS DATE) */
+          castType = nameTok();
+          if(isOp('(')){ p++; while(!isOp(')') && at().t !== 'eof') p++; needOp(')'); }
+        }
         needOp(')');
         if(eatKw('OVER')){
           needOp('(');
@@ -2333,7 +2530,7 @@ function parseSQLText(text){
           needOp(')');
           return {kind:'window', fn:fn, args:args, w:w};
         }
-        return {kind:'call', fn:fn, args:args};
+        return {kind:'call', fn:fn, args:args, castType:castType};
       }
       let tbl = null, col = take().v;
       if(isOp('.')){ p++; tbl = col; col = nameTok(); }
@@ -2400,12 +2597,31 @@ function parseSQLText(text){
   return {stmt:stmt, warn:warn};
 }
 
+/* ON 裡包了函數的話，記下是哪一種轉換 */
+function castOf(e){
+  if(!e || e.kind !== 'call') return '';
+  const f = (e.fn || '').toUpperCase();
+  if(f === 'TRIM')  return 'TRIM';
+  if(f === 'UPPER') return 'UPPER';
+  if(f === 'DATE' || f === 'TRUNC') return 'DATE';
+  if(f === 'CAST'){
+    const t = (e.castType || '').toUpperCase();
+    if(/DATE/.test(t)) return 'DATE';
+    if(/INT|NUMBER|DEC/.test(t)) return 'INT';
+    return 'TEXT';
+  }
+  return '';
+}
 function exprName(e){
   if(!e) return '';
   if(e.kind === 'col') return e.col;
   if(e.kind === 'lit') return String(e.v);
   if(e.kind === 'star') return '*';
-  if(e.kind === 'call') return e.fn.toLowerCase() + '_' + (e.args[0] ? exprName(e.args[0]) : 'x').replace('*','all');
+  if(e.kind === 'call'){
+    /* CAST/TRIM/UPPER 這種包一層的，名字取裡面那個欄位 */
+    if(['CAST','TRIM','UPPER','DATE','TRUNC'].indexOf(e.fn) >= 0 && e.args[0]) return exprName(e.args[0]);
+    return e.fn.toLowerCase() + '_' + (e.args[0] ? exprName(e.args[0]) : 'x').replace('*','all');
+  }
   if(e.kind === 'window') return e.fn.toLowerCase();
   if(e.kind === 'arith') return exprName(e.a) + '_calc';
   if(e.kind === 'case') return 'label';
@@ -2503,12 +2719,15 @@ function astToGraph(parsed){
       const rc = knownCols(j.src);
       const jn = add('join', {
         joinType: j.type,
-        leftCol:  j.on ? exprName(j.on.left)  : '',
-        rightCol: j.on ? exprName(j.on.right) : ''
+        keys: (j.on || []).map(k=>({
+          left:exprName(k.left),   lfn:castOf(k.left),
+          right:exprName(k.right), rfn:castOf(k.right)
+        }))
       });
       conn(cur, jn, 0); conn(right, jn, 1);
       cur = jn;
-      cols = (cols && rc) ? cols.concat(rc.filter(x=>x !== jn.rightCol)) : null;
+      const dropSet = new Set(joinKeys(jn).map(k=>k.right));
+      cols = (cols && rc) ? cols.concat(rc.filter(x=>!dropSet.has(x))) : null;
     });
 
     c.where.forEach(w=>{
@@ -2639,7 +2858,7 @@ function astToGraph(parsed){
       return;
     }
     const names = perTable[t].length ? perTable[t] : ['id'];
-    const cols = names.map(c=>({name:c, type:guessType(c)}));
+    const cols = names.map(c=>({name:c, ch:'', type:guessType(c, '')}));
     schema[key] = {label:'推測', cols:cols, rows:fakeRows(cols, hints)};
     madeUp.push(key);
   });
@@ -2802,6 +3021,14 @@ dsel.value = state.dialect;
 dsel.addEventListener('change', ()=>{
   state.dialect = dsel.value;
   try { localStorage.setItem('sqlblocks.dialect', state.dialect); } catch(err){}
+  refresh();
+});
+const qall = document.getElementById('quote-all');
+try { state.quoteAll = localStorage.getItem('sqlblocks.quoteAll') === '1'; } catch(err){}
+qall.checked = state.quoteAll;
+qall.addEventListener('change', ()=>{
+  state.quoteAll = qall.checked;
+  try { localStorage.setItem('sqlblocks.quoteAll', state.quoteAll ? '1' : '0'); } catch(err){}
   refresh();
 });
 
