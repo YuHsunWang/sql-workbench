@@ -786,7 +786,7 @@ function evalNode(node, ctx){
 
   case 'filter': {
     const s = S(), i = s.cols.indexOf(node.col);
-    if(i < 0) return s;
+    if(i < 0) return {cols:s.cols, rows:[]};
     return {cols:s.cols, rows:s.rows.filter(r=>cmp(r[i], node.op, node.val))};
   }
 
@@ -1099,6 +1099,14 @@ function graphIssue(last){
       if(!s) return META[n.type].label+' 缺少第 '+(port+1)+' 個來源連線。';
       const problem = missing(s); if(problem) return problem;
     }
+    if(n.type === 'filter'){
+      const s = srcOf(n.id, 0), cols = evalNode(s).cols;
+      let projected = s;
+      while(projected && ['filter','distinct','sort'].indexOf(projected.type) >= 0)
+        projected = srcOf(projected.id, 0);
+      if(projected && projected.type === 'select' && cols.indexOf(n.col) < 0)
+        return META[n.type].label+' 引用了上一步已沒有的欄位 '+n.col+'。';
+    }
     return '';
   }
   return missing(last);
@@ -1226,7 +1234,7 @@ function buildSQL(){
           '\n  FROM '+ref(from)+(n.by ? '\n  ORDER BY '+q(n.by)+' '+n.dir : '')+limTail(lim, offset, '  ', !!n.by)
         : '  -- 夾在中間的 ORDER BY 資料庫可以不理你，已省略\n'+
           '  -- （排序請放最後一塊，或填「取前幾筆」）\n'+
-          '  SELECT *\n  FROM '+ref(s0);
+          '  SELECT '+(inh ? list(inh.map(q), 9) : '*')+'\n  FROM '+ref(from);
 
     } else if(n.type === 'groupby'){
       const sel = n.keys.map(q).concat(n.aggs.map(a=>a.fn+'('+(a.col === '*' ? '*' : q(a.col))+') AS '+q(a.as)));

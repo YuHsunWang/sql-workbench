@@ -298,6 +298,36 @@ test('graph: branched filter is not absorbed by generator', () => {
   return 'two independent filtered CTEs';
 });
 
+test('H4: projection makes an invalid downstream reference a graph error', () => {
+  const graph = {
+    nodes:[{id:'t',type:'table',table:'t'}, {id:'s',type:'select',cols:['a']},
+      {id:'f',type:'filter',col:'b',op:'=',val:'x'}, {id:'o',type:'output'}],
+    edges:[{from:'t',to:'s',port:0},{from:'s',to:'f',port:0},{from:'f',to:'o',port:0}],
+  };
+  installGraph(api, graph, {t:{cols:[{name:'a'},{name:'b'}],rows:[[1,'x'],[2,'y']]}});
+  assert.deepEqual(json(api.evalNode(graph.nodes[2])), {cols:['a'],rows:[]});
+  const generated = api.buildSQL();
+  assert.equal(generated, '-- 無法產生 SQL：WHERE 引用了上一步已沒有的欄位 b。');
+  assert.doesNotMatch(generated, /WHERE b/);
+  return 'invalid b reference is neither passed through nor absorbed';
+});
+
+test('M8: no-limit middle sort keeps an absorbed projection source', () => {
+  const graph = {
+    nodes:[{id:'t',type:'table',table:'t'}, {id:'s',type:'select',cols:['a']},
+      {id:'r',type:'sort',by:'a',dir:'ASC',limit:0,offset:0},
+      {id:'d',type:'distinct'}, {id:'o',type:'output'}],
+    edges:[{from:'t',to:'s',port:0},{from:'s',to:'r',port:0},
+      {from:'r',to:'d',port:0},{from:'d',to:'o',port:0}],
+  };
+  installGraph(api, graph, {t:{cols:[{name:'a'},{name:'b'}],rows:[[2,'x'],[1,'y'],[1,'z']]}});
+  const generated = api.buildSQL();
+  assert.match(generated, /sorted AS \([\s\S]*SELECT a\n  FROM t/);
+  assert.doesNotMatch(generated, /FROM \?/);
+  assert.deepEqual(json(api.evalNode(graph.nodes[4]).rows), [[1],[2]]);
+  return 'middle sort reads projected a from t, never FROM ?';
+});
+
 test('graph: chainOrder without output is empty', () => {
   installGraph(api,{nodes:[{id:'t',type:'table',table:'t'}],edges:[]},oneColumnSchema());
   assert.deepEqual(json(api.chainOrder()), []);
