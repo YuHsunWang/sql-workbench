@@ -144,6 +144,13 @@ button{font:inherit;color:inherit;cursor:pointer}
 .tbl-exp:hover{color:var(--ink)}
 #schema-list{max-height:250px;overflow-y:auto}
 #inspector{max-height:min(44vh,400px);overflow-y:auto}
+/* 刪除鍵黏在設定面板底部 —— 欄位多的表要捲很久才找得到，等於找不到 */
+.delbar{
+  position:sticky;bottom:-12px;z-index:2;
+  margin:14px -12px -12px;padding:10px 12px;
+  background:var(--surface);border-top:1px solid var(--line-soft);
+}
+.delbar .btn{width:100%;color:var(--drop)}
 .search{
   width:100%;font-family:var(--body);font-size:12.5px;
   background:var(--bg);color:var(--ink);border:1px solid var(--line);
@@ -226,6 +233,11 @@ textarea{
 .port.out{cursor:crosshair;border-color:var(--c);background:var(--c)}
 .port.out:hover{transform:translate(-50%,-50%) scale(1.3)}
 .port.in.hot{border-color:var(--accent);background:var(--accent-soft);transform:translate(-50%,-50%) scale(1.3)}
+/* 已經接上的輸入接點：填滿，點一下就拔掉（吸在一起時沒有線可以點） */
+.port.in.linked{cursor:pointer;border-color:var(--c);background:var(--c)}
+.port.in.linked:hover{border-color:var(--drop);background:var(--drop);transform:translate(-50%,-50%) scale(1.35)}
+/* 拖到會吸上去的位置時，先讓使用者看到 */
+.node.snapping{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 26%,transparent),var(--shadow-m)}
 
 /* ---------- inspector ---------- */
 .rowf{display:flex;align-items:center;gap:8px;margin-bottom:8px}
@@ -1391,8 +1403,13 @@ function renderNodes(){
     el.className = 'node' + (state.sel === n.id ? ' sel' : '');
     el.dataset.id = n.id;
     el.style.cssText = 'left:'+n.x+'px;top:'+n.y+'px;--c:'+m.c;
+    el.style.minHeight = n.minH ? n.minH+'px' : '';
     let html = '<div class="nhead">'+ICONS[n.type]+'<b>'+m.label+'</b></div><div class="nbody">'+nodeSummary(n)+'</div>';
-    for(let i=0;i<m.ins;i++) html += '<div class="port in" data-port="'+i+'" data-node="'+n.id+'"></div>';
+    for(let i=0;i<m.ins;i++){
+      const linked = state.edges.some(x=>x.to === n.id && x.port === i);
+      html += '<div class="port in'+(linked ? ' linked' : '')+'" data-port="'+i+'" data-node="'+n.id+'"'+
+              (linked ? ' title="點一下拔掉這條連線"' : '')+'></div>';
+    }
     if(n.type !== 'output') html += '<div class="port out" data-node="'+n.id+'"></div>';
     el.innerHTML = html;
     surface.appendChild(el);
@@ -1406,25 +1423,165 @@ function positionPorts(){
     if(!el) return;
     const h = el.offsetHeight, w = el.offsetWidth;
     const ins = el.querySelectorAll('.port.in');
-    ins.forEach((p,i)=>{ p.style.left = '0px'; p.style.top = (h*(i+1)/(ins.length+1))+'px'; });
+    const offs = portOffsets(h, ins.length);
+    ins.forEach((p,i)=>{ p.style.left = '0px'; p.style.top = offs[i]+'px'; });
     const out = el.querySelector('.port.out');
     if(out){ out.style.left = w+'px'; out.style.top = (h/2)+'px'; }
   });
 }
 function portXY(nodeId, kind, port){
-  const el = surface.querySelector('.node[data-id="'+nodeId+'"]');
-  const n = nodeById(nodeId);
-  if(!el || !n) return {x:0,y:0};
-  if(kind === 'out') return {x:n.x + el.offsetWidth, y:n.y + el.offsetHeight/2};
-  return {x:n.x, y:n.y + el.offsetHeight*(port+1)/(META[n.type].ins+1)};
+  const b = nodeBox(nodeId);
+  if(!b) return {x:0, y:0};
+  if(kind === 'out') return {x:b.n.x + b.w, y:b.n.y + b.h/2};
+  return {x:b.n.x, y:b.n.y + inPortY(b, port)};
 }
 function bez(a, b){
   const dx = Math.max(46, Math.abs(b.x-a.x)*0.45);
   return 'M'+a.x+' '+a.y+' C '+(a.x+dx)+' '+a.y+', '+(b.x-dx)+' '+b.y+', '+b.x+' '+b.y;
 }
+
+/* ---- 磁吸：靠近就自動對齊並接起來，接點對上了就不畫線 ----
+   一般的直線流程因此完全看不到線；只有「同一個來源分給兩塊」這種排不到
+   隔壁的情況才留線，不然那條關係就沒東西表示了。 */
+const SNAP_GAP = 16;        /* 兩塊吸在一起時中間的縫，剛好放得下兩顆接點 */
+const SNAP_NEAR = 38;       /* 拖到這麼近就吸過去 */
+const SNAP_OK_Y = 12;       /* 接點高度差在這之內就算對上，線不用畫 */
+
+const numOr = (v, d) => (typeof v === 'number' && v > 0) ? v : d;
+function nodeBox(id){
+  const n = nodeById(id);
+  if(!n) return null;
+  const el = surface.querySelector('.node[data-id="'+id+'"]');
+  /* 還沒畫出來就量不到，退回 CSS 的預設尺寸，算出來的位置才不會是 NaN */
+  return {n:n, w:numOr(el && el.offsetWidth, 164), h:numOr(el && el.offsetHeight, 86)};
+}
+/* 輸入接點的高度。兩個以上的輸入用固定內縮往兩端擺，這樣積木長高時接點會跟著
+   拉開 —— JOIN 才有辦法同時貼住上下兩張表而不逼它們重疊。 */
+const PORT_INSET = 26;
+function portOffsets(h, ins){
+  if(ins <= 1) return [h/2];
+  const span = Math.max(0, h - PORT_INSET*2);
+  return Array.from({length:ins}, (x, i)=>PORT_INSET + span*i/(ins-1));
+}
+const inPortY = (box, port) => portOffsets(box.h, META[box.n.type].ins)[port];
+
+/* 這條邊的兩塊剛好貼在一起、接點也對上了嗎？ */
+function isSnapped(e){
+  const A = nodeBox(e.from), B = nodeBox(e.to);
+  if(!A || !B) return false;
+  const gapX = B.n.x - (A.n.x + A.w);
+  const offY = (B.n.y + inPortY(B, e.port)) - (A.n.y + A.h/2);
+  return gapX >= 0 && gapX <= SNAP_GAP + 8 && Math.abs(offY) <= SNAP_OK_Y;
+}
+
+/* from 沿著邊走得到 to 嗎？用來擋掉吸出一個繞回去的環 */
+function reaches(from, to){
+  const seen = new Set([from]);
+  const stack = [from];
+  while(stack.length){
+    const cur = stack.pop();
+    if(cur === to) return true;
+    state.edges.forEach(e=>{ if(e.from === cur && !seen.has(e.to)){ seen.add(e.to); stack.push(e.to); } });
+  }
+  return false;
+}
+
+/* 正在拖的這塊，附近有沒有可以吸上去的位置 */
+function snapFor(id){
+  const D = nodeBox(id);
+  if(!D) return null;
+  let best = null;
+  const consider = (x, y, from, to, port)=>{
+    const d = Math.max(Math.abs(D.n.x - x), Math.abs(D.n.y - y));
+    if(d > SNAP_NEAR) return;
+    if(reaches(to, from)) return;                     /* 會繞成環，不吸 */
+    if(!best || d < best.d) best = {x:Math.round(x), y:Math.round(y), from:from, to:to, port:port, d:d};
+  };
+  state.nodes.forEach(o=>{
+    if(o.id === id) return;
+    const O = nodeBox(o.id);
+    if(!O) return;
+    if(o.type !== 'output')                           /* 把自己吸到 o 的右邊 */
+      for(let i = 0; i < META[D.n.type].ins; i++)
+        consider(O.n.x + O.w + SNAP_GAP, O.n.y + O.h/2 - inPortY(D, i), o.id, id, i);
+    if(D.n.type !== 'output')                         /* 把自己吸到 o 的左邊 */
+      for(let i = 0; i < META[o.type].ins; i++)
+        consider(O.n.x - D.w - SNAP_GAP, O.n.y + inPortY(O, i) - D.h/2, id, o.id, i);
+  });
+  return best;
+}
+
+/* 把一塊的上游整串一起上下移動 —— 第二個輸入要對準時，得把那整條支線搬過來 */
+function shiftUpstream(id, dy, moved){
+  moved = moved || new Set();
+  if(moved.has(id) || !dy) return;
+  moved.add(id);
+  const n = nodeById(id);
+  if(n) n.y = Math.max(0, Math.round(n.y + dy));
+  state.edges.forEach(e=>{ if(e.to === id) shiftUpstream(e.from, dy, moved); });
+}
+
+/* 整理版面之後再吸一次 —— 用真正量到的高度，接點才會剛好對上 */
+function snapLayout(){
+  const depth = {};
+  const deep = (id, guard)=>{
+    if(depth[id] !== undefined) return depth[id];
+    guard = guard || new Set();
+    if(guard.has(id)) return 0;
+    guard.add(id);
+    const ins = state.edges.filter(e=>e.to === id);
+    return (depth[id] = ins.length ? Math.max.apply(null, ins.map(e=>deep(e.from, guard))) + 1 : 0);
+  };
+  state.nodes.forEach(n=>deep(n.id));
+
+  const placed = [];
+  [].concat(state.nodes).sort((a,b)=>depth[a.id] - depth[b.id]).forEach(n=>{
+    refit(n.id);
+    avoidOverlap(n.id, placed);
+    const b = nodeBox(n.id);
+    if(b) placed.push(b);
+  });
+}
+
+/* 兩塊搶到同一個位置時（同一個來源分給兩塊就會這樣），把後來的往下挪。
+   它因此不再貼著來源，那條關係就會用線畫出來 —— 這正是我們要的。 */
+function avoidOverlap(id, placed){
+  const B = nodeBox(id);
+  if(!B) return;
+  const hits = p => p.n !== B.n && p.n.x < B.n.x + B.w && B.n.x < p.n.x + p.w
+                                && p.n.y < B.n.y + B.h && B.n.y < p.n.y + p.h;
+  let guard = 0;
+  while(guard++ < 40 && placed.some(hits)) B.n.y = Math.round(B.n.y + B.h + SNAP_GAP);
+}
+
+/* 讓一塊貼齊它的來源：來源上下疊開不重疊，自己長高到剛好罩住它們的接點 */
+function refit(id){
+  const n = nodeById(id), B = nodeBox(id);
+  const ins = state.edges.filter(e=>e.to === id).sort((a,b)=>a.port - b.port);
+  if(!n || !B || !ins.length) return;
+  const boxes = ins.map(e=>nodeBox(e.from));
+  if(boxes.some(b=>!b)) return;
+  /* x：貼在最右邊那個來源後面（積木寬度固定，同一層的右緣本來就齊） */
+  n.x = Math.max(0, Math.round(Math.max.apply(null, boxes.map(b=>b.n.x + b.w + SNAP_GAP))));
+  for(let k = 1; k < boxes.length; k++)
+    shiftUpstream(boxes[k].n.id, (boxes[k-1].n.y + boxes[k-1].h + SNAP_GAP) - boxes[k].n.y);
+  const centers = boxes.map(b=>b.n.y + b.h/2);
+  if(boxes.length > 1){
+    n.minH = Math.round(centers[centers.length-1] - centers[0] + PORT_INSET*2);
+    n.y = Math.max(0, Math.round(centers[0] - PORT_INSET));
+  } else {
+    n.minH = 0;
+    n.y = Math.max(0, Math.round(centers[0] - B.h/2));
+  }
+  /* 長高要立刻生效，後面那塊量到的才是新高度 */
+  const el = surface.querySelector('.node[data-id="'+id+'"]');
+  if(el) el.style.minHeight = n.minH ? n.minH+'px' : '';
+}
+
 function drawWires(temp){
   let html = '';
   state.edges.forEach((e,i)=>{
+    if(isSnapped(e)) return;                          /* 貼在一起就不用線了 */
     const d = bez(portXY(e.from,'out',0), portXY(e.to,'in',e.port));
     html += '<g class="w" data-i="'+i+'"><path class="hit" d="'+d+'"></path><path class="wire" d="'+d+'"></path></g>';
   });
@@ -1451,6 +1608,14 @@ canvas.addEventListener('pointerdown', e=>{
     conn = {from: port.dataset.node};
     canvas.setPointerCapture(e.pointerId); e.preventDefault(); return;
   }
+  if(port && port.classList.contains('in')){
+    /* 吸在一起的兩塊之間沒有線可以點，所以點輸入接點就是拔掉那條連線 */
+    const to = port.dataset.node, i = Number(port.dataset.port);
+    if(state.edges.some(x=>x.to === to && x.port === i)){
+      state.edges = state.edges.filter(x=>!(x.to === to && x.port === i));
+      select(to); refresh(); e.preventDefault(); return;
+    }
+  }
   const el = e.target.closest('.node');
   if(el){
     select(el.dataset.id);
@@ -1469,6 +1634,9 @@ canvas.addEventListener('pointermove', e=>{
     const p = canvasPt(e), n = nodeById(drag.id);
     n.x = Math.max(0, p.x - drag.dx);
     n.y = Math.max(0, p.y - drag.dy);
+    drag.snap = snapFor(drag.id);
+    if(drag.snap){ n.x = Math.max(0, drag.snap.x); n.y = Math.max(0, drag.snap.y); }
+    drag.el.classList.toggle('snapping', !!drag.snap);
     drag.el.style.left = n.x+'px'; drag.el.style.top = n.y+'px';
     edgeScroll(e);
     drawWires();
@@ -1501,7 +1669,17 @@ canvas.addEventListener('pointerup', e=>{
     if(pan.moved < 4) select(null);
     pan = null; canvas.classList.remove('panning');
   }
-  if(drag){ drag = null; refresh(); }
+  if(drag){
+    const s = drag.snap;
+    if(s){
+      state.edges = state.edges.filter(x=>!(x.to === s.to && x.port === s.port));
+      state.edges.push({from:s.from, to:s.to, port:s.port});
+      /* 兩個輸入的積木要重新對一次，不然第二個來源會壓到第一個 */
+      if(META[nodeById(s.to).type].ins > 1){ renderNodes(); refit(s.to); }
+    }
+    if(drag.el) drag.el.classList.remove('snapping');
+    drag = null; refresh();
+  }
 });
 
 /* ---- 從左邊拖積木/資料表進畫布 ---- */
@@ -1535,6 +1713,14 @@ canvas.addEventListener('drop', e=>{
   state.nodes.push(n);
   state.sel = n.id;
   dragNew = null;
+  /* 剛放下的新積木也要吸 —— 先畫一次才量得到它多大 */
+  renderNodes();
+  const s = snapFor(n.id);
+  if(s){
+    n.x = Math.max(0, s.x); n.y = Math.max(0, s.y);
+    state.edges = state.edges.filter(x=>!(x.to === s.to && x.port === s.port));
+    state.edges.push({from:s.from, to:s.to, port:s.port});
+  }
   refresh();
 });
 wires.addEventListener('click', e=>{
@@ -1721,7 +1907,7 @@ function renderInspector(){
     h += '<p class="note" style="margin-top:0">最後結果：<b>'+r.rows.length+'</b> 列、<b>'+r.cols.length+'</b> 欄。<br>SQL 就在下面，動畫在最底下。</p>';
   }
 
-  if(n.type !== 'output') h += '<button class="btn ghost" data-del-node style="width:100%;margin-top:14px;color:var(--drop)">刪掉這塊積木</button>';
+  if(n.type !== 'output') h += '<div class="delbar"><button class="btn ghost" data-del-node>刪掉這塊積木</button></div>';
   inspector.innerHTML = h;
 }
 
@@ -2337,19 +2523,26 @@ document.getElementById('btn-copy').addEventListener('click', async e=>{
   catch(err){ b.textContent = '複製失敗'; }
   setTimeout(()=>{ b.textContent = '複製 SQL'; }, 1600);
 });
+/* 粗排一次 → 畫出來才量得到寬高 → 再吸一次，接點才會剛好對上 */
+function settleLayout(){
+  layoutGraph(state.nodes, state.edges);
+  renderNodes();       /* 先畫出來才量得到寬高 */
+  snapLayout();
+  renderNodes();       /* 有些積木長高了，接點位置要用新高度重算 */
+}
 function loadPreset(fn){
   stop();
   setSrcLabel('');
   state.schema = demoSchema();
   fn();
-  layoutGraph(state.nodes, state.edges);
+  settleLayout();
   renderSchema();
   state.step = 0;
   refresh();
   canvas.scrollTo({left:0, behavior:'smooth'});
 }
 document.getElementById('btn-tidy').addEventListener('click', ()=>{
-  layoutGraph(state.nodes, state.edges);
+  settleLayout();
   canvas.scrollTo({left:0, top:0, behavior:'smooth'});
   refresh();
 });
@@ -3097,6 +3290,7 @@ function applyStatement(idx){
   state.sel = null;
   state.step = 0;
   renderSchema();
+  settleLayout();          /* 量過真實寬高再吸一次，積木才會整齊貼在一起 */
   refresh();
   canvas.scrollTo({left:0, top:0});
 

@@ -5,11 +5,33 @@ function element() {
   const target = {
     value: '', innerHTML: '', textContent: '', hidden: false, disabled: false,
     dataset: {}, style: {}, children: [], clientWidth: 1200, clientHeight: 700,
+    /* nodes are a fixed width and a natural height, but grow when the layout
+       gives them a min-height — the snapping geometry depends on that */
+    offsetWidth: 164,
+    get offsetHeight() { return Math.max(86, parseInt(this.style.minHeight, 10) || 0); },
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
     addEventListener() {}, removeEventListener() {}, setAttribute() {}, focus() {},
-    appendChild(child) { this.children.push(child); return child; },
-    remove() {}, closest() { return null; }, querySelector() { return null; },
-    querySelectorAll() { return []; },
+    appendChild(child) {
+      if (child) child.parentNode = this;
+      this.children.push(child);
+      return child;
+    },
+    remove() {
+      const parent = this.parentNode;
+      if (parent) parent.children = parent.children.filter(c => c !== this);
+    },
+    closest() { return null; },
+    /* enough of a DOM for the canvas: nodes are appended, found back by their
+       data-id, and removed — which is what the snapping geometry reads */
+    querySelector(selector) {
+      const id = /\[data-id="([^"]+)"\]/.exec(selector || '');
+      if (!id) return null;
+      return this.children.find(c => c.dataset && c.dataset.id === id[1]) || null;
+    },
+    querySelectorAll(selector) {
+      if (!/\.node\b/.test(selector || '')) return [];
+      return this.children.filter(c => c.dataset && c.dataset.id);
+    },
     getBoundingClientRect() { return { left: 0, top: 0, width: 1200, height: 700 }; },
   };
   return new Proxy(target, {
@@ -53,6 +75,7 @@ export function loadApp() {
     'evalNode', 'cmp', 'aggregate', 'numish', 'buildSQL', 'condSQL', 'lit',
     'q', 'tableRef', 'limHead', 'limTail', 'chainOrder',
     'demoSchema', 'sampleValue', 'joinLayout',
+    'isSnapped', 'snapFor', 'snapLayout', 'settleLayout', 'nodeBox', 'SNAP_GAP',
   ];
   const marker = '})();';
   const at = match[1].lastIndexOf(marker);

@@ -678,6 +678,106 @@ test('M12: meaningful quoting survives, redundant quoting is dropped', () => {
   return 'Camel/MyTable stay quoted; analytic.trans_detail goes bare; user stays quoted';
 });
 
+/* Magnetic snapping. Blocks that sit next to each other with their ports lined
+   up are connected and draw NO wire, so the geometry test IS the connection
+   test: if isSnapped() drifts, a real connection silently loses its only
+   on-screen representation, or a wire appears between two touching blocks. */
+const W = 164, H = 86;   /* the sizes the stub DOM reports back */
+
+test('snap: touching blocks read as connected, separated ones do not', () => {
+  installGraph(api, {
+    nodes:[{id:'t', type:'table', table:'t', x:0, y:0},
+           {id:'f', type:'filter', col:'a', op:'=', val:'1', x:W + api.SNAP_GAP, y:0},
+           {id:'o', type:'output', x:400, y:0}],
+    edges:[{from:'t', to:'f', port:0}, {from:'f', to:'o', port:0}],
+  }, {t:{label:'', cols:[{name:'a', ch:'', type:'INT'}], rows:[[1]]}});
+
+  const edge = api.state.edges[0];
+  assert.equal(api.isSnapped(edge), true, 'aligned and touching must read as snapped');
+
+  api.state.nodes[1].y += 40;                     /* nudged out of line */
+  assert.equal(api.isSnapped(edge), false, 'a visible offset must bring the wire back');
+
+  api.state.nodes[1].y = 0;
+  api.state.nodes[1].x += 120;                    /* pulled apart sideways */
+  assert.equal(api.isSnapped(edge), false, 'a gap must bring the wire back');
+  return 'touching = no wire; nudged or pulled apart = wire returns';
+});
+
+test('snap: dragging near a block finds it, and never closes a loop', () => {
+  installGraph(api, {
+    nodes:[{id:'t', type:'table', table:'t', x:0, y:0},
+           {id:'f', type:'filter', col:'a', op:'=', val:'1', x:W + api.SNAP_GAP + 9, y:6},
+           {id:'o', type:'output', x:900, y:900}],
+    edges:[{from:'t', to:'f', port:0}],
+  }, {t:{label:'', cols:[{name:'a', ch:'', type:'INT'}], rows:[[1]]}});
+
+  /* f is close to t's right edge but not exact — it should snap onto it */
+  const near = api.snapFor('f');
+  assert.equal(near.from, 't');
+  assert.equal(near.to, 'f');
+  assert.equal(near.x, W + api.SNAP_GAP);
+
+  /* t sits just left of f, which would mean f -> t: that closes a loop */
+  api.state.nodes[0].x = api.state.nodes[1].x + W + api.SNAP_GAP + 4;
+  api.state.nodes[0].y = api.state.nodes[1].y;
+  const loop = api.snapFor('t');
+  assert.equal(Boolean(loop && loop.from === 'f' && loop.to === 't'), false, 'must not snap into a cycle');
+  return `snapped to x=${near.x}; cycle refused`;
+});
+
+test('snap: tidy leaves every connection touching, so no wires are drawn', () => {
+  const col = name => ({name, ch:'', type:'VARCHAR'});
+  installGraph(api, {
+    nodes:[{id:'a', type:'table', table:'l', x:11, y:250},
+           {id:'b', type:'table', table:'r', x:77, y:3},
+           {id:'j', type:'join', joinType:'INNER', keys:[{left:'id', right:'id', lfn:'', rfn:''}], x:500, y:90},
+           {id:'o', type:'output', x:33, y:600}],
+    edges:[{from:'a', to:'j', port:0}, {from:'b', to:'j', port:1}, {from:'j', to:'o', port:0}],
+  }, {l:{label:'', cols:[col('id'), col('x')], rows:[[1, 'p']]},
+      r:{label:'', cols:[col('id'), col('y')], rows:[[1, 'q']]}});
+
+  api.settleLayout();
+  const loose = api.state.edges.filter(e => !api.isSnapped(e));
+  assert.deepEqual(json(loose), [], 'tidy must line every port up exactly');
+  /* the two sources end up straddling the JOIN's two input ports */
+  const ys = ['a', 'b'].map(id => api.nodeBox(id).n.y);
+  assert.equal(ys[0] !== ys[1], true, 'a two-input block must not stack its sources');
+  return `3 edges all touching; sources at y=${ys.join(' and ')}`;
+});
+
+/* The whole point of the half-magnetic layout: an ordinary left-to-right flow
+   shows no wires at all, a branch still shows the one wire that adjacency
+   cannot express, and nothing ever ends up stacked on top of anything else. */
+test('snap: a plain flow draws no wires, a branch draws exactly one, nothing overlaps', () => {
+  const overlaps = () => {
+    const out = [];
+    api.state.nodes.forEach((p, i) => api.state.nodes.slice(i + 1).forEach(q => {
+      const P = api.nodeBox(p.id), Q = api.nodeBox(q.id);
+      if (P.n.x < Q.n.x + Q.w && Q.n.x < P.n.x + P.w &&
+          P.n.y < Q.n.y + Q.h && Q.n.y < P.n.y + P.h) out.push(`${p.type}/${q.type}`);
+    }));
+    return out;
+  };
+  graphFromSQL(api, 'SELECT county, SUM(sale_amt) AS amt FROM analytic.trans_detail a ' +
+    'JOIN analytic.m_org_last b ON a.store_no = b.store_no GROUP BY county');
+  api.settleLayout();
+  assert.deepEqual(json(api.state.edges.filter(e => !api.isSnapped(e))), [], 'a plain flow needs no wires');
+  assert.deepEqual(json(overlaps()), [], 'blocks must not sit on top of each other');
+
+  /* the same table now also feeds a second block — that cannot be expressed by
+     sitting next to it, so it must fall back to a drawn wire */
+  const table = api.state.nodes.find(n => n.type === 'table');
+  api.state.nodes.push({id:'f2', type:'filter', col:'county', op:'=', val:'台北', x:0, y:0});
+  api.state.edges.push({from:table.id, to:'f2', port:0});
+  api.settleLayout();
+  const drawn = api.state.edges.filter(e => !api.isSnapped(e));
+  assert.equal(drawn.length, 1, `expected exactly one wire, got ${drawn.length}`);
+  assert.equal(drawn[0].to, 'f2');
+  assert.deepEqual(json(overlaps()), [], 'the branch must be moved clear, not stacked');
+  return 'plain flow: 0 wires; branch: 1 wire; no overlaps either way';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {
