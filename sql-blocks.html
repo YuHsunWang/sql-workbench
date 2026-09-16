@@ -121,30 +121,29 @@ button{font:inherit;color:inherit;cursor:pointer}
 /* ---------- left rail ---------- */
 .rail{display:flex;flex-direction:column;gap:14px}
 .tbl-item{
-  width:100%;text-align:left;display:flex;align-items:center;gap:8px;
+  width:100%;text-align:left;display:block;
   border:1px solid var(--line-soft);background:var(--surface);border-radius:8px;
-  padding:7px 9px;margin-bottom:7px;transition:border-color .15s,background .15s;
+  padding:6px 8px 6px 22px;position:relative;
+  transition:border-color .15s,background .15s;cursor:grab;
 }
+.tbl-item:active{cursor:grabbing}
 .tbl-item:hover{border-color:var(--f-src);background:var(--surface-2)}
-.tbl-item svg{width:16px;height:16px;flex:none;color:var(--f-src)}
-.tbl-item{align-items:flex-start}
 .tbl-item b{
-  font-family:var(--mono);font-weight:500;font-size:12px;display:block;
-  line-height:1.4;word-break:break-all;
+  font-family:var(--mono);font-weight:500;font-size:11px;display:block;
+  line-height:1.4;overflow-wrap:anywhere;color:var(--ink);
 }
 .tbl-item b .ns{font-style:normal;color:var(--ink-3)}
-.tbl-item span{font-size:11px;color:var(--ink-3);display:block;line-height:1.4;word-break:break-all}
-.tbl-item svg{margin-top:2px}
-.cols{list-style:none;margin:-3px 0 9px;padding:0 0 0 24px;font-family:var(--mono);font-size:11px;color:var(--ink-2)}
-.tbl-row{display:flex;gap:5px;margin-bottom:6px}
-.tbl-row .tbl-item{margin-bottom:0;flex:1;min-width:0}
+.tbl-item span{font-size:10.5px;color:var(--ink-3);display:block;line-height:1.4;margin-top:1px}
+.cols{list-style:none;margin:-2px 0 8px;padding:0 0 0 22px;font-family:var(--mono);font-size:10.5px;color:var(--ink-2)}
+.tbl-row{position:relative;margin-bottom:5px}
 .tbl-exp{
-  flex:none;width:26px;border:1px solid var(--line-soft);background:var(--surface);
-  border-radius:8px;color:var(--ink-3);font-size:11px;transition:.15s;
+  position:absolute;left:4px;top:5px;z-index:2;
+  width:16px;height:16px;line-height:1;border:none;background:none;
+  color:var(--ink-3);font-size:10px;padding:0;transition:.15s;
 }
-.tbl-exp:hover{border-color:var(--ink-3);color:var(--ink)}
-.tbl-exp[aria-expanded="true"]{background:var(--surface-2);color:var(--ink)}
-#schema-list{max-height:330px;overflow-y:auto}
+.tbl-exp:hover{color:var(--ink)}
+#schema-list{max-height:250px;overflow-y:auto}
+#inspector{max-height:min(44vh,400px);overflow-y:auto}
 .search{
   width:100%;font-family:var(--body);font-size:12.5px;
   background:var(--bg);color:var(--ink);border:1px solid var(--line);
@@ -155,19 +154,23 @@ button{font:inherit;color:inherit;cursor:pointer}
 .cols li{display:flex;justify-content:space-between;gap:10px;padding:1px 0}
 .cols em{font-style:normal;color:var(--ink-3);font-size:10px}
 
-.fam{margin-bottom:12px}
+.fam{margin-bottom:9px}
 .fam:last-child{margin-bottom:0}
-.fam-h{display:flex;align-items:baseline;gap:6px;margin-bottom:6px}
+.fam-h{display:flex;align-items:baseline;gap:6px;margin-bottom:5px}
 .fam-h b{font-family:var(--ui);font-weight:700;font-size:11px;letter-spacing:.06em;color:var(--fc)}
 .fam-h i{font-style:normal;font-size:10.5px;color:var(--ink-3)}
-.palette{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.palette{display:grid;grid-template-columns:1fr 1fr;gap:5px}
 .pal{
-  display:flex;flex-direction:column;align-items:center;gap:4px;
-  border:1px dashed var(--line);background:transparent;border-radius:9px;
-  padding:9px 4px;font-family:var(--ui);font-weight:600;font-size:11px;
-  color:var(--fc);transition:border-color .15s,background .15s;text-align:center;line-height:1.25;
+  display:flex;align-items:center;gap:7px;
+  border:1px dashed var(--line);background:transparent;border-radius:8px;
+  padding:6px 7px;font-family:var(--ui);font-weight:600;
+  color:var(--fc);transition:border-color .15s,background .15s;text-align:left;cursor:grab;
 }
-.pal svg{width:19px;height:19px}
+.pal:active{cursor:grabbing}
+.pal svg{width:17px;height:17px;flex:none}
+.pal span{min-width:0}
+.pal b{display:block;font-size:11px;line-height:1.3;white-space:nowrap}
+.pal i{display:block;font-style:normal;font-size:9.5px;line-height:1.3;color:var(--ink-3);white-space:nowrap}
 .pal:hover{background:var(--surface-2);border-style:solid;border-color:var(--fc)}
 
 details.imp{border-top:1px solid var(--line-soft);padding:10px 12px}
@@ -202,7 +205,7 @@ textarea{
 .wires path.temp{fill:none;stroke:var(--accent);stroke-width:2;stroke-dasharray:5 5}
 
 .node{
-  position:absolute;width:172px;
+  position:absolute;width:164px;
   background:var(--surface);border:1.5px solid var(--line);border-radius:12px;
   box-shadow:var(--shadow-m);cursor:grab;user-select:none;
   transition:border-color .15s,box-shadow .15s;
@@ -212,7 +215,7 @@ textarea{
 .nhead{display:flex;align-items:center;gap:7px;padding:8px 10px;border-bottom:1px solid var(--line-soft);color:var(--c)}
 .nhead svg{width:17px;height:17px;flex:none}
 .nhead b{font-family:var(--ui);font-weight:700;font-size:11px;letter-spacing:.05em;text-transform:uppercase}
-.nbody{padding:8px 10px 10px;font-size:11.5px;color:var(--ink-2);line-height:1.5;word-break:break-all}
+.nbody{padding:8px 10px 10px;font-size:11.5px;color:var(--ink-2);line-height:1.5;overflow-wrap:anywhere}
 .nbody code{font-family:var(--mono);font-size:11px;color:var(--ink)}
 .nbody .warn{color:var(--drop)}
 .port{
@@ -394,6 +397,13 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
 
     <div class="rail">
       <section class="panel">
+        <div class="phead"><h2>積木</h2><span class="sub">10 種</span></div>
+        <div class="pbody">
+          <div id="palette"></div>
+          <p class="hint">顏色代表這塊積木<b>對表格做什麼</b>。<br><b>拖</b>到畫布放在你要的位置，或<b>點一下</b>自動接在選中的那塊後面。</p>
+        </div>
+      </section>
+      <section class="panel">
         <div class="phead"><h2>資料表</h2><span class="sub" id="tbl-count"></span></div>
         <div class="pbody" style="padding-bottom:0">
           <input type="text" class="search" id="tbl-search" placeholder="搜尋表名、中文名或欄位…" spellcheck="false">
@@ -408,13 +418,6 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
         </details>
       </section>
 
-      <section class="panel">
-        <div class="phead"><h2>積木</h2><span class="sub">10 種</span></div>
-        <div class="pbody">
-          <div id="palette"></div>
-          <p class="hint">顏色代表這塊積木<b>對表格做什麼</b>。<br><b>拖</b>到畫布放在你要的位置，或<b>點一下</b>自動接在選中的那塊後面。</p>
-        </div>
-      </section>
     </div>
 
     <section class="panel">
@@ -535,10 +538,11 @@ const GROUPS = [
   {f:'coll',   label:'壓扁',   note:'很多列 → 幾列', types:['groupby']}
 ];
 const PAL_LABEL = {
-  join:'JOIN<br>左右合併', union:'UNION<br>上下疊', case:'CASE<br>分類貼標',
-  derive:'算欄位<br>加減乘除', window:'視窗函數<br>組內排名', select:'選欄位<br>只抓要的',
-  filter:'WHERE<br>篩選',
-  distinct:'DISTINCT<br>去重複', sort:'ORDER BY<br>排序取前 N', groupby:'GROUP BY<br>分組彙總'
+  join:['JOIN','左右合併'],      union:['UNION','上下疊'],
+  case:['CASE','分類貼標'],      derive:['算欄位','加減乘除'],
+  window:['視窗','組內排名'],    select:['選欄位','只抓要的'],
+  filter:['WHERE','篩選'],       distinct:['DISTINCT','去重複'],
+  sort:['ORDER BY','取前 N'],    groupby:['GROUP BY','分組彙總']
 };
 
 /* ============================================================
@@ -1210,7 +1214,11 @@ function nodeSummary(n){
       const bad = a && b && a !== b;
       return (n.all ? 'UNION ALL' : 'UNION（去重）') + (bad ? '<br><span class="warn">欄位數不一樣（'+a+' vs '+b+'）</span>' : '');
     }
-    case 'filter': return '<code>'+n.col+' '+n.op+(needsVal(n.op) ? ' '+n.val : '')+'</code>';
+    case 'filter': {
+      const v = String(n.val == null ? '' : n.val);
+      const shown = v.length > 22 ? v.slice(0, 22)+'…' : v;
+      return '<code>'+n.col+' '+n.op+(needsVal(n.op) ? ' '+shown : '')+'</code>';
+    }
     case 'distinct': {
       const s = evalNode(srcOf(n.id,0)), d = evalNode(n);
       return s.rows.length ? '砍掉 '+(s.rows.length - d.rows.length)+' 列重複' : '整列一模一樣就砍';
@@ -1614,9 +1622,10 @@ function renderSchema(){
     const cols = s.cols.slice().sort((a,b)=>(hit(b) ? 1 : 0) - (hit(a) ? 1 : 0));
     const dot = t.lastIndexOf('.');
     const nm = dot > 0 ? '<i class="ns">'+t.slice(0, dot+1)+'</i>'+t.slice(dot+1) : t;
-    return '<div class="tbl-row"><button class="tbl-item" draggable="true" title="'+esc(t + (s.label ? ' — ' + s.label : ''))+'" data-add-table="'+t+'">'+ICONS.table+
-      '<span style="min-width:0"><b>'+nm+'</b><span>'+(s.label ? s.label+' · ' : '')+s.cols.length+' 欄</span></span></button>'+
-      '<button class="tbl-exp" data-exp="'+t+'" aria-expanded="'+open+'" aria-label="看欄位">'+(open ? '▾' : '▸')+'</button></div>'+
+    return '<div class="tbl-row">'+
+      '<button class="tbl-exp" data-exp="'+t+'" aria-expanded="'+open+'" aria-label="看欄位">'+(open ? '▾' : '▸')+'</button>'+
+      '<button class="tbl-item" draggable="true" title="'+esc(t + (s.label ? ' — ' + s.label : ''))+'" data-add-table="'+t+'">'+
+      '<b>'+nm+'</b><span>'+(s.label ? s.label+' · ' : '')+s.cols.length+' 欄</span></button></div>'+
       (open ? '<ul class="cols">'+cols.map(c=>
         '<li><span'+(hit(c) ? ' style="color:var(--accent-ink);font-weight:500"' : '')+'>'+c.name+'</span>'+
         '<em class="ch">'+(c.ch || c.type)+'</em></li>').join('')+'</ul>' : '');
@@ -1638,7 +1647,8 @@ document.getElementById('schema-list').addEventListener('click', e=>{
 document.getElementById('palette').innerHTML = GROUPS.map(g=>
   '<div class="fam" style="--fc:var(--f-'+g.f+')"><div class="fam-h"><b>'+g.label+'</b><i>'+g.note+'</i></div>'+
   '<div class="palette">'+g.types.map(t=>
-    '<button class="pal" draggable="true" data-t="'+t+'">'+ICONS[t]+'<span>'+PAL_LABEL[t]+'</span></button>').join('')+
+    '<button class="pal" draggable="true" data-t="'+t+'" title="'+PAL_LABEL[t].join(' — ')+'">'+ICONS[t]+
+    '<span><b>'+PAL_LABEL[t][0]+'</b><i>'+PAL_LABEL[t][1]+'</i></span></button>').join('')+
   '</div></div>').join('');
 
 document.getElementById('palette').addEventListener('click', e=>{
@@ -1671,8 +1681,8 @@ function addNode(type, extra){
   const sel = nodeById(state.sel);
   const n = Object.assign({id:'n'+(++state.uid), type:type}, extra||{});
   if(type !== 'table' && sel && sel.type !== 'output'){
-    n.x = sel.x + 200; n.y = sel.y;
-    state.nodes.forEach(m=>{ if(m.x >= sel.x + 150) m.x += 210; });
+    n.x = sel.x + 186; n.y = sel.y;
+    state.nodes.forEach(m=>{ if(m.x >= sel.x + 140) m.x += 196; });
     state.edges.filter(e=>e.from === sel.id).forEach(e=>{ e.from = n.id; });
     state.nodes.push(n);
     state.edges.push({from:sel.id, to:n.id, port:0});
@@ -2058,6 +2068,7 @@ function loadPreset(fn){
   setSrcLabel('');
   state.schema = demoSchema();
   fn();
+  layoutGraph(state.nodes, state.edges);
   renderSchema();
   state.step = 0;
   refresh();
@@ -2652,7 +2663,7 @@ function layoutGraph(nodes, edges){
   nodes.forEach(n=>d(n.id));
   const cols = {};
   nodes.forEach(n=>{ (cols[depth[n.id]] = cols[depth[n.id]] || []).push(n); });
-  Object.keys(cols).forEach(k=>cols[k].forEach((n,i)=>{ n.x = 26 + Number(k)*212; n.y = 40 + i*170; }));
+  Object.keys(cols).forEach(k=>cols[k].forEach((n,i)=>{ n.x = 20 + Number(k)*186; n.y = 34 + i*162; }));
 }
 
 /* ---- 反解視窗的操作 ---- */
