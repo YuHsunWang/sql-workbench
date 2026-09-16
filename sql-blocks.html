@@ -93,20 +93,29 @@ button{font:inherit;color:inherit;cursor:pointer}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
 
 /* ---------- layout ---------- */
-.work{display:grid;grid-template-columns:238px minmax(0,1fr) 352px;gap:14px;align-items:start}
+.work{display:grid;grid-template-columns:276px minmax(0,1fr) 340px;gap:14px;align-items:start}
+.work.narrow{grid-template-columns:minmax(0,1fr) 340px}
+.work.narrow > .rail:first-child{display:none}
 .panel{
   background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
   box-shadow:var(--shadow-s);overflow:hidden;
 }
-.phead{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line-soft)}
+.phead{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;padding:10px 12px;border-bottom:1px solid var(--line-soft)}
+.phead .mini{
+  font-family:var(--ui);font-weight:600;font-size:11px;color:var(--ink-2);
+  border:1px solid var(--line);background:var(--surface);border-radius:6px;padding:3px 8px;transition:.15s;
+}
+.phead .mini:hover{border-color:var(--ink-3);color:var(--ink)}
+.canvas.drop-on{box-shadow:inset 0 0 0 2px var(--accent)}
+.canvas.panning{cursor:grabbing}
 .phead h2{margin:0;font-family:var(--ui);font-weight:700;font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-2)}
 .phead .sub{margin-left:auto;font-size:11px;color:var(--ink-3);font-family:var(--mono)}
 .srcbadge{
-  margin-left:auto;font-size:10.5px;font-family:var(--ui);font-weight:600;
+  font-size:10.5px;font-family:var(--ui);font-weight:600;
   background:var(--accent-soft);color:var(--accent-ink);border-radius:20px;padding:2px 9px;
-  max-width:52%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
-.srcbadge:not([hidden]) + .sub{margin-left:8px}
+
 .pbody{padding:12px}
 
 /* ---------- left rail ---------- */
@@ -118,8 +127,14 @@ button{font:inherit;color:inherit;cursor:pointer}
 }
 .tbl-item:hover{border-color:var(--f-src);background:var(--surface-2)}
 .tbl-item svg{width:16px;height:16px;flex:none;color:var(--f-src)}
-.tbl-item b{font-family:var(--mono);font-weight:500;font-size:12.5px;display:block}
-.tbl-item span{font-size:11px;color:var(--ink-3);display:block;line-height:1.3}
+.tbl-item{align-items:flex-start}
+.tbl-item b{
+  font-family:var(--mono);font-weight:500;font-size:12px;display:block;
+  line-height:1.4;word-break:break-all;
+}
+.tbl-item b .ns{font-style:normal;color:var(--ink-3)}
+.tbl-item span{font-size:11px;color:var(--ink-3);display:block;line-height:1.4;word-break:break-all}
+.tbl-item svg{margin-top:2px}
 .cols{list-style:none;margin:-3px 0 9px;padding:0 0 0 24px;font-family:var(--mono);font-size:11px;color:var(--ink-2)}
 .tbl-row{display:flex;gap:5px;margin-bottom:6px}
 .tbl-row .tbl-item{margin-bottom:0;flex:1;min-width:0}
@@ -173,7 +188,7 @@ textarea{
 
 /* ---------- canvas ---------- */
 .canvas{
-  position:relative;height:468px;overflow:auto;
+  position:relative;height:clamp(430px,58vh,640px);overflow:auto;cursor:grab;
   background-color:var(--bg);
   background-image:radial-gradient(var(--grid-dot) 1.2px, transparent 1.2px);
   background-size:19px 19px;background-position:-1px -1px;
@@ -342,7 +357,8 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
   *{animation-duration:.001s!important;transition-duration:.001s!important}
 }
 @media (max-width:1100px){
-  .work{grid-template-columns:minmax(0,1fr)}
+  .work,.work.narrow{grid-template-columns:minmax(0,1fr)}
+  .work.narrow > .rail:first-child{display:flex}
   .canvas{height:430px}
 }
 @media (max-width:480px){
@@ -396,13 +412,18 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
         <div class="phead"><h2>積木</h2><span class="sub">10 種</span></div>
         <div class="pbody">
           <div id="palette"></div>
-          <p class="hint">顏色代表這塊積木<b>對表格做什麼</b>。點一下加進畫布，會自動接在選中的那塊後面。</p>
+          <p class="hint">顏色代表這塊積木<b>對表格做什麼</b>。<br><b>拖</b>到畫布放在你要的位置，或<b>點一下</b>自動接在選中的那塊後面。</p>
         </div>
       </section>
     </div>
 
     <section class="panel">
-      <div class="phead"><h2>畫布</h2><span class="srcbadge" id="src-label" hidden></span><span class="sub" id="node-count"></span></div>
+      <div class="phead"><h2>畫布</h2>
+        <button class="mini" id="btn-tidy" style="margin-left:auto">整理版面</button>
+        <button class="mini" id="btn-rail">收合左欄</button>
+        <span class="srcbadge" id="src-label" hidden></span>
+        <span class="sub" id="node-count"></span>
+      </div>
       <div class="canvas" id="canvas">
         <div class="surface" id="surface"><svg class="wires" id="wires"></svg></div>
       </div>
@@ -1176,8 +1197,12 @@ function nodeSummary(n){
     case 'table': {
       const t = schemaOf(n);
       const disp = tableLabel(n);
-      return t ? '<code>'+disp+'</code><br>'+t.cols.length+' 欄 · '+t.rows.length+' 列'
-               : '<code>'+(disp||'—')+'</code><br><span class="warn">找不到這張表</span>';
+      const dot = disp.lastIndexOf('.');
+      const shown = dot > 0
+        ? '<span style="color:var(--ink-3)">'+disp.slice(0, dot+1)+'</span>'+disp.slice(dot+1)
+        : (disp || '—');
+      return t ? '<code>'+shown+'</code><br>'+t.cols.length+' 欄 · '+t.rows.length+' 列'
+               : '<code>'+shown+'</code><br><span class="warn">找不到這張表</span>';
     }
     case 'join':   return n.joinType+'<br><code>a.'+n.leftCol+' = b.'+n.rightCol+'</code>';
     case 'union': {
@@ -1259,7 +1284,15 @@ function drawWires(temp){
   wires.innerHTML = html;
 }
 
-let drag = null, conn = null;
+let drag = null, conn = null, pan = null, dragNew = null;
+/* 拖到邊緣自動捲 —— 沒有這個，長一點的流程根本拖不動 */
+function edgeScroll(e){
+  const r = canvas.getBoundingClientRect(), M = 46, S = 16;
+  if(e.clientX > r.right - M)      canvas.scrollLeft += S;
+  else if(e.clientX < r.left + M)  canvas.scrollLeft -= S;
+  if(e.clientY > r.bottom - M)     canvas.scrollTop  += S;
+  else if(e.clientY < r.top + M)   canvas.scrollTop  -= S;
+}
 function canvasPt(e){
   const r = canvas.getBoundingClientRect();
   return {x: e.clientX - r.left + canvas.scrollLeft, y: e.clientY - r.top + canvas.scrollTop};
@@ -1276,7 +1309,12 @@ canvas.addEventListener('pointerdown', e=>{
     const n = nodeById(el.dataset.id), p = canvasPt(e);
     drag = {id:n.id, dx:p.x - n.x, dy:p.y - n.y, el:surface.querySelector('.node[data-id="'+n.id+'"]')};
     canvas.setPointerCapture(e.pointerId); e.preventDefault();
-  } else if(!e.target.closest('.wires')) select(null);
+  } else if(!e.target.closest('.wires')){
+    /* 空白處按住拖 = 平移畫面；沒移動就是取消選取 */
+    pan = {x:e.clientX, y:e.clientY, sl:canvas.scrollLeft, st:canvas.scrollTop, moved:0};
+    canvas.classList.add('panning');
+    canvas.setPointerCapture(e.pointerId);
+  }
 });
 canvas.addEventListener('pointermove', e=>{
   if(drag && drag.el){
@@ -1284,8 +1322,15 @@ canvas.addEventListener('pointermove', e=>{
     n.x = Math.max(0, p.x - drag.dx);
     n.y = Math.max(0, p.y - drag.dy);
     drag.el.style.left = n.x+'px'; drag.el.style.top = n.y+'px';
+    edgeScroll(e);
     drawWires();
+  } else if(pan){
+    const dx = e.clientX - pan.x, dy = e.clientY - pan.y;
+    pan.moved = Math.max(pan.moved, Math.abs(dx) + Math.abs(dy));
+    canvas.scrollLeft = pan.sl - dx;
+    canvas.scrollTop  = pan.st - dy;
   } else if(conn){
+    edgeScroll(e);
     drawWires(bez(portXY(conn.from,'out',0), canvasPt(e)));
     const t = document.elementFromPoint(e.clientX, e.clientY);
     surface.querySelectorAll('.port.in.hot').forEach(x=>x.classList.remove('hot'));
@@ -1304,7 +1349,45 @@ canvas.addEventListener('pointerup', e=>{
     surface.querySelectorAll('.port.in.hot').forEach(x=>x.classList.remove('hot'));
     conn = null; drawWires();
   }
+  if(pan){
+    if(pan.moved < 4) select(null);
+    pan = null; canvas.classList.remove('panning');
+  }
   if(drag){ drag = null; refresh(); }
+});
+
+/* ---- 從左邊拖積木/資料表進畫布 ---- */
+document.addEventListener('dragstart', e=>{
+  const pal = e.target.closest && e.target.closest('.pal');
+  const tbl = e.target.closest && e.target.closest('[data-add-table]');
+  if(pal)      dragNew = {kind:'block', v:pal.dataset.t};
+  else if(tbl) dragNew = {kind:'table', v:tbl.dataset.addTable};
+  else return;
+  if(e.dataTransfer){ e.dataTransfer.effectAllowed = 'copy'; e.dataTransfer.setData('text/plain', dragNew.v); }
+});
+document.addEventListener('dragend', ()=>{ dragNew = null; canvas.classList.remove('drop-on'); });
+canvas.addEventListener('dragover', e=>{
+  if(!dragNew) return;
+  e.preventDefault();
+  if(e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  canvas.classList.add('drop-on');
+});
+canvas.addEventListener('dragleave', e=>{
+  if(!canvas.contains(e.relatedTarget)) canvas.classList.remove('drop-on');
+});
+canvas.addEventListener('drop', e=>{
+  if(!dragNew) return;
+  e.preventDefault();
+  canvas.classList.remove('drop-on');
+  const p = canvasPt(e);
+  const type  = dragNew.kind === 'table' ? 'table' : dragNew.v;
+  const extra = dragNew.kind === 'table' ? {table:dragNew.v} : defaultsFor(dragNew.v);
+  const n = Object.assign({id:'n'+(++state.uid), type:type,
+    x:Math.max(0, Math.round(p.x - 86)), y:Math.max(0, Math.round(p.y - 26))}, extra);
+  state.nodes.push(n);
+  state.sel = n.id;
+  dragNew = null;
+  refresh();
 });
 wires.addEventListener('click', e=>{
   const g = e.target.closest('g.w');
@@ -1529,8 +1612,10 @@ function renderSchema(){
     const open = openTables.has(t) || (qs && s.cols.some(c=>c.name.toLowerCase().indexOf(qs) >= 0 || (c.ch || '').toLowerCase().indexOf(qs) >= 0));
     const hit = c => qs && (c.name.toLowerCase().indexOf(qs) >= 0 || (c.ch || '').toLowerCase().indexOf(qs) >= 0);
     const cols = s.cols.slice().sort((a,b)=>(hit(b) ? 1 : 0) - (hit(a) ? 1 : 0));
-    return '<div class="tbl-row"><button class="tbl-item" data-add-table="'+t+'">'+ICONS.table+
-      '<span style="min-width:0"><b>'+t+'</b><span>'+(s.label ? s.label+' · ' : '')+s.cols.length+' 欄</span></span></button>'+
+    const dot = t.lastIndexOf('.');
+    const nm = dot > 0 ? '<i class="ns">'+t.slice(0, dot+1)+'</i>'+t.slice(dot+1) : t;
+    return '<div class="tbl-row"><button class="tbl-item" draggable="true" title="'+esc(t + (s.label ? ' — ' + s.label : ''))+'" data-add-table="'+t+'">'+ICONS.table+
+      '<span style="min-width:0"><b>'+nm+'</b><span>'+(s.label ? s.label+' · ' : '')+s.cols.length+' 欄</span></span></button>'+
       '<button class="tbl-exp" data-exp="'+t+'" aria-expanded="'+open+'" aria-label="看欄位">'+(open ? '▾' : '▸')+'</button></div>'+
       (open ? '<ul class="cols">'+cols.map(c=>
         '<li><span'+(hit(c) ? ' style="color:var(--accent-ink);font-weight:500"' : '')+'>'+c.name+'</span>'+
@@ -1553,7 +1638,7 @@ document.getElementById('schema-list').addEventListener('click', e=>{
 document.getElementById('palette').innerHTML = GROUPS.map(g=>
   '<div class="fam" style="--fc:var(--f-'+g.f+')"><div class="fam-h"><b>'+g.label+'</b><i>'+g.note+'</i></div>'+
   '<div class="palette">'+g.types.map(t=>
-    '<button class="pal" data-t="'+t+'">'+ICONS[t]+'<span>'+PAL_LABEL[t]+'</span></button>').join('')+
+    '<button class="pal" draggable="true" data-t="'+t+'">'+ICONS[t]+'<span>'+PAL_LABEL[t]+'</span></button>').join('')+
   '</div></div>').join('');
 
 document.getElementById('palette').addEventListener('click', e=>{
@@ -1978,6 +2063,16 @@ function loadPreset(fn){
   refresh();
   canvas.scrollTo({left:0, behavior:'smooth'});
 }
+document.getElementById('btn-tidy').addEventListener('click', ()=>{
+  layoutGraph(state.nodes, state.edges);
+  canvas.scrollTo({left:0, top:0, behavior:'smooth'});
+  refresh();
+});
+document.getElementById('btn-rail').addEventListener('click', e=>{
+  const hidden = document.querySelector('.work').classList.toggle('narrow');
+  e.currentTarget.textContent = hidden ? '展開左欄' : '收合左欄';
+  requestAnimationFrame(()=>{ renderNodes(); drawWires(); });
+});
 document.getElementById('btn-basic').addEventListener('click', ()=>loadPreset(presetBasic));
 document.getElementById('btn-adv').addEventListener('click', ()=>loadPreset(presetAdvanced));
 
