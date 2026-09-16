@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { performance } from 'node:perf_hooks';
+import fs from 'node:fs';
 import { loadApp, graphFromSQL, installGraph } from './loader.mjs';
 
 const api = loadApp();
@@ -105,6 +106,34 @@ test('join: composite keys and per-side casts', () => {
     'SELECT t.sale_amt FROM analytic.trans_detail AS t INNER JOIN analytic.store_weather AS w ON t.ostore_no = w.ostore_no'));
   assert.equal(one.nodes.find(n => n.type === 'join').keys.length, 1);
   return `composite keys kept, CAST round-tripped, ${out.rows.length} rows`;
+});
+
+test('H1: JOIN pruning validates each side without deleting valid keys', () => {
+  const html = fs.readFileSync(new URL('../sql-blocks.html', import.meta.url), 'utf8');
+  const start = html.indexOf('function prune(n){');
+  const end = html.indexOf('\n\n/* ============================================================', start);
+  const makePrune = new Function('colsInto', 'joinKeys', html.slice(start, end) + '\nreturn prune;');
+  const prune = makePrune((id, port) => port === 1 ? ['id','day'] : ['id','date'], n => n.keys);
+  const join = {id:'j', type:'join', joinType:'LEFT', keys:[
+    {left:'id',right:'id'}, {left:'date',right:'day'}, {left:'missing',right:'id'},
+  ]};
+  prune(join);
+  assert.deepEqual(join.keys, [{left:'id',right:'id'}, {left:'date',right:'day'}]);
+  return 'JOIN type update keeps two valid keys and drops only the invalid key';
+});
+
+test('H2: same table name in different schemas stays two sources', () => {
+  const graph = graphFromSQL(api,
+    'SELECT a.member_no FROM analytic.m_member a ' +
+    'JOIN BI.m_member b ON a.member_no = b.member_no');
+  const tables = graph.nodes.filter(n => n.type === 'table');
+  assert.deepEqual(json(tables.map(n => `${n.ns}.${n.table}`)), ['analytic.m_member','BI.m_member']);
+  const join = graph.nodes.find(n => n.type === 'join');
+  const incoming = graph.edges.filter(e => e.to === join.id).sort((a,b)=>a.port-b.port);
+  assert.equal(new Set(incoming.map(e=>e.from)).size, 2);
+  const generated = api.buildSQL();
+  assert.match(generated, /FROM analytic\.m_member AS a\n  INNER JOIN BI\.m_member AS b/);
+  return 'analytic.m_member and BI.m_member remain distinct';
 });
 
 test('select block: empty then one click selects exactly that one', () => {

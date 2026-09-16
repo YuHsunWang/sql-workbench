@@ -1721,7 +1721,12 @@ inspector.addEventListener('click', e=>{
 function toggle(arr, v){ const i = arr.indexOf(v); if(i >= 0) arr.splice(i,1); else arr.push(v); }
 function prune(n){
   const avail = colsInto(n.id);
-  if(n.keys) n.keys = n.keys.filter(k=>avail.indexOf(k) >= 0);
+  if(n.type === 'join'){
+    const L = colsInto(n.id, 0), R = colsInto(n.id, 1);
+    n.keys = joinKeys(n).filter(k=>L.indexOf(k.left) >= 0 && R.indexOf(k.right) >= 0);
+    delete n.leftCol; delete n.rightCol;
+  }
+  else if(n.keys) n.keys = n.keys.filter(k=>avail.indexOf(k) >= 0);
   if(n.partitionBy) n.partitionBy = n.partitionBy.filter(k=>avail.indexOf(k) >= 0);
   if(n.type === 'select' && n.cols) n.cols = avail.filter(c=>n.cols.indexOf(c) >= 0);
 }
@@ -2671,13 +2676,15 @@ function astToGraph(parsed){
   /* 先掃一遍 AST，算出每張表有哪些欄位。建圖時要靠它分辨
      「這段 SELECT 是真的在挑欄位」還是「只是把來源欄位原樣抄出來」。 */
   const refs = [], srcTables = [];
+  const sourceName = s => (s.ns ? s.ns + '.' : '') + s.name;
   (function walk(o){
     if(!o || typeof o !== 'object') return;
     if(Array.isArray(o)){ o.forEach(walk); return; }
     if(o.kind === 'col') refs.push(o);
     if(o.kind === 'table' && o.name){
-      if(srcTables.indexOf(o.name) < 0) srcTables.push(o.name);
-      if(o.alias) aliasOf[o.alias] = o.name;
+      const full = sourceName(o);
+      if(srcTables.indexOf(full) < 0) srcTables.push(full);
+      if(o.alias) aliasOf[o.alias] = full;
     }
     Object.keys(o).forEach(k=>walk(o[k]));
   })(parsed.stmt);
@@ -2694,19 +2701,21 @@ function astToGraph(parsed){
   function knownCols(src){
     if(!src || src.kind !== 'table') return null;
     if(cte[src.name.toLowerCase()]) return null;           /* CTE 的欄位由它自己那段決定 */
-    const known = state.schema[src.name] || (src.ns && state.schema[src.ns+'.'+src.name]);
+    const full = sourceName(src);
+    const known = state.schema[full] || state.schema[src.name];
     if(known) return known.cols.map(c=>c.name);
-    return perTable[src.name] && perTable[src.name].length ? perTable[src.name].slice() : null;
+    return perTable[full] && perTable[full].length ? perTable[full].slice() : null;
   }
   const sameCols = (a, b) => !!a && !!b && a.length === b.length && a.every((v,i)=>v === b[i]);
 
   function buildSource(s){
     if(s.kind === 'sub') return buildStatement(s.stmt);
-    if(s.alias) aliasOf[s.alias] = s.name;
+    const full = sourceName(s);
+    if(s.alias) aliasOf[s.alias] = full;
     const key = s.name.toLowerCase();
     if(cte[key]) return cte[key];
-    if(!tables[s.name]) tables[s.name] = add('table', {table:s.name, ns:s.ns || null});
-    return tables[s.name];
+    if(!tables[full]) tables[full] = add('table', {table:s.name, ns:s.ns || null});
+    return tables[full];
   }
 
   function buildCore(c){
@@ -2851,8 +2860,8 @@ function astToGraph(parsed){
   const madeUp = [];
   tableNames.forEach(t=>{
     const node = tables[t];
-    const full = (node && node.ns) ? node.ns + '.' + t : t;
-    const key = schema[full] ? full : (schema[t] ? t : full);
+    const full = (node && node.ns) ? node.ns + '.' + node.table : node.table;
+    const key = schema[full] ? full : (schema[node.table] ? node.table : full);
     if(schema[key]){
       schema[key] = Object.assign({}, schema[key], {rows:fakeRows(schema[key].cols, hints)});
       return;
