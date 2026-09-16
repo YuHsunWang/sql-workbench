@@ -108,6 +108,49 @@ test('join: composite keys and per-side casts', () => {
   return `composite keys kept, CAST round-tripped, ${out.rows.length} rows`;
 });
 
+test('H5: text JOIN casts avoid silent 255-character truncation', () => {
+  const savedSchema = api.state.schema;
+  const graph = {
+    nodes:[{id:'l',type:'table',table:'l'},{id:'r',type:'table',table:'r'},
+      {id:'j',type:'join',joinType:'INNER',keys:[{left:'k',right:'k',lfn:'TEXT',rfn:'TEXT'}]},
+      {id:'o',type:'output'}],
+    edges:[{from:'l',to:'j',port:0},{from:'r',to:'j',port:1},{from:'j',to:'o',port:0}],
+  };
+  const prefix = 'a'.repeat(255);
+  installGraph(api, graph, {
+    l:{cols:[{name:'k'}],rows:[[prefix+'X']]}, r:{cols:[{name:'k'}],rows:[[prefix+'Y']]},
+  });
+  assert.deepEqual(json(api.evalNode(graph.nodes[3]).rows), []);
+  const expected = {
+    mysql:/CAST\(a\.k AS CHAR\)/, postgres:/CAST\(a\.k AS TEXT\)/,
+    mssql:/CAST\(a\.k AS NVARCHAR\(MAX\)\)/, oracle:/CAST\(a\.k AS VARCHAR2\(4000\)\)/,
+  };
+  for (const [dialect, pattern] of Object.entries(expected)) {
+    api.state.dialect = dialect;
+    const generated = api.buildSQL();
+    assert.match(generated, pattern);
+    assert.doesNotMatch(generated, /VARCHAR\(255\)/);
+    if(dialect === 'oracle') assert.match(generated, /注意：Oracle 無法保證超過 4000 字元的文字轉換不遺失/);
+    const again = api.astToGraph(api.parseSQLText(generated));
+    assert.deepEqual(json(again.nodes.find(n=>n.type === 'join').keys),
+      [{left:'k',lfn:'TEXT',right:'k',rfn:'TEXT'}]);
+  }
+  api.state.schema = savedSchema;
+  return 'CHAR, TEXT, NVARCHAR(MAX), and warned VARCHAR2(4000) preserve intent';
+});
+
+test('M10: MySQL integer casts use and parse SIGNED or UNSIGNED', () => {
+  api.state.dialect = 'mysql';
+  const graph = graphFromSQL(api,
+    'SELECT * FROM l JOIN r ON CAST(l.x AS SIGNED INTEGER) = CAST(r.y AS UNSIGNED)');
+  const keys = graph.nodes.find(n=>n.type === 'join').keys;
+  assert.deepEqual(json(keys), [{left:'x',lfn:'INT',right:'y',rfn:'INT'}]);
+  const generated = api.buildSQL();
+  assert.match(generated, /CAST\(a\.x AS SIGNED\) = CAST\(b\.y AS SIGNED\)/);
+  assert.doesNotMatch(generated, / AS INT\)/);
+  return 'SIGNED INTEGER and UNSIGNED parse as INT; output uses SIGNED';
+});
+
 test('H1: JOIN pruning validates each side without deleting valid keys', () => {
   const html = fs.readFileSync(new URL('../sql-blocks.html', import.meta.url), 'utf8');
   const start = html.indexOf('function prune(n){');

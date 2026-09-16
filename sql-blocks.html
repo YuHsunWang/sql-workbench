@@ -706,9 +706,14 @@ function castSQL(k, expr){
   if(k === 'TRIM')  return 'TRIM('+expr+')';
   if(k === 'UPPER') return 'UPPER('+expr+')';
   if(k === 'DATE')  return 'CAST('+expr+' AS DATE)';
-  if(k === 'INT')   return 'CAST('+expr+' AS '+(state.dialect === 'oracle' ? 'NUMBER(10)' : 'INT')+')';
-  const txt = state.dialect === 'mssql' ? 'VARCHAR(255)' : state.dialect === 'mysql' ? 'CHAR' : 'VARCHAR(255)';
-  return 'CAST('+expr+' AS '+txt+')';
+  if(k === 'INT'){
+    const type = state.dialect === 'oracle' ? 'NUMBER(10)' : state.dialect === 'mysql' ? 'SIGNED' : 'INT';
+    return 'CAST('+expr+' AS '+type+')';
+  }
+  if(state.dialect === 'mysql') return 'CAST('+expr+' AS CHAR)';
+  if(state.dialect === 'postgres') return 'CAST('+expr+' AS TEXT)';
+  if(state.dialect === 'mssql') return 'CAST('+expr+' AS NVARCHAR(MAX))';
+  return 'CAST('+expr+' AS VARCHAR2(4000)) /* 注意：Oracle 無法保證超過 4000 字元的文字轉換不遺失 */';
 }
 function joinKeys(n){
   if(n.keys && n.keys.length) return n.keys;
@@ -2550,6 +2555,7 @@ function parseSQLText(text){
         else if(!isOp(')')){ do { args.push(parseExpr()); } while(eatOp(',')); }
         if(fn === 'CAST' && eatKw('AS')){          /* CAST(x AS DATE) */
           castType = nameTok();
+          if(/^(SIGNED|UNSIGNED)$/i.test(castType) && up(at()) === 'INTEGER') p++;
           if(isOp('(')){ p++; while(!isOp(')') && at().t !== 'eof') p++; needOp(')'); }
         }
         needOp(')');
@@ -2646,7 +2652,7 @@ function castOf(e){
   if(f === 'CAST'){
     const t = (e.castType || '').toUpperCase();
     if(/DATE/.test(t)) return 'DATE';
-    if(/INT|NUMBER|DEC/.test(t)) return 'INT';
+    if(/INT|NUMBER|DEC|SIGNED|UNSIGNED/.test(t)) return 'INT';
     return 'TEXT';
   }
   return '';
