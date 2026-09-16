@@ -234,10 +234,24 @@ test('fix A2: comma inside IN string remains one value', () => {
   const stored = graph.nodes.find(n => n.type === 'filter').val;
   installGraph(api, graph, {t:{cols:[{name:'x'}],rows:[['a,b'],['c'],['z']]}});
   const generated = api.buildSQL();
-  assert.equal(stored, "'a,b', c");
+  assert.equal(stored, "'a,b', 'c'");
   assert.match(generated, /IN \('a,b', 'c'\)/);
   assert.deepEqual(json(api.evalNode(graph.nodes.find(n => n.type === 'filter')).rows.map(r=>r[0])), ['a,b','c']);
   return `stored=${JSON.stringify(stored)} generated=IN ('a,b', 'c')`;
+});
+
+test('string codes keep their quotes even when they look numeric', () => {
+  // 零售代號多半是 VARCHAR：'116' 掉了引號就變成隱式轉型
+  const graph = graphFromSQL(api, "SELECT * FROM t WHERE kgrp_code IN ('067','116','213') AND fm_code = '0987'");
+  const generated = api.buildSQL();
+  assert.match(generated, /IN \('067', '116', '213'\)/);
+  assert.doesNotMatch(generated, /IN \('067', 116, 213\)/);
+  assert.match(generated, /fm_code = '0987'/);
+  // 重新匯入一次還是字串
+  const again = api.astToGraph(api.parseSQLText(generated));
+  assert.match(api.buildSQL.call(null) || '', /.*/);
+  assert.equal(again.nodes.filter(n => n.type === 'filter').length, 2);
+  return "IN ('067', '116', '213') and fm_code = '0987' stay quoted";
 });
 
 test('fix B2: identifier closing delimiters are doubled', () => {

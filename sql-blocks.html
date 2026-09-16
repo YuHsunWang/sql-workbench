@@ -120,7 +120,23 @@ button{font:inherit;color:inherit;cursor:pointer}
 .tbl-item svg{width:16px;height:16px;flex:none;color:var(--f-src)}
 .tbl-item b{font-family:var(--mono);font-weight:500;font-size:12.5px;display:block}
 .tbl-item span{font-size:11px;color:var(--ink-3);display:block;line-height:1.3}
-.cols{list-style:none;margin:0 0 10px;padding:0 0 0 24px;font-family:var(--mono);font-size:11px;color:var(--ink-2)}
+.cols{list-style:none;margin:-3px 0 9px;padding:0 0 0 24px;font-family:var(--mono);font-size:11px;color:var(--ink-2)}
+.tbl-row{display:flex;gap:5px;margin-bottom:6px}
+.tbl-row .tbl-item{margin-bottom:0;flex:1;min-width:0}
+.tbl-exp{
+  flex:none;width:26px;border:1px solid var(--line-soft);background:var(--surface);
+  border-radius:8px;color:var(--ink-3);font-size:11px;transition:.15s;
+}
+.tbl-exp:hover{border-color:var(--ink-3);color:var(--ink)}
+.tbl-exp[aria-expanded="true"]{background:var(--surface-2);color:var(--ink)}
+#schema-list{max-height:330px;overflow-y:auto}
+.search{
+  width:100%;font-family:var(--body);font-size:12.5px;
+  background:var(--bg);color:var(--ink);border:1px solid var(--line);
+  border-radius:8px;padding:6px 9px;margin-bottom:10px;
+}
+.cols li em.ch{color:var(--ink-2);font-size:10.5px;font-family:var(--body)}
+.hitcount{font-size:11px;color:var(--ink-3);margin:0 0 8px}
 .cols li{display:flex;justify-content:space-between;gap:10px;padding:1px 0}
 .cols em{font-style:normal;color:var(--ink-3);font-size:10px}
 
@@ -363,7 +379,11 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
     <div class="rail">
       <section class="panel">
         <div class="phead"><h2>資料表</h2><span class="sub" id="tbl-count"></span></div>
-        <div class="pbody" id="schema-list"></div>
+        <div class="pbody" style="padding-bottom:0">
+          <input type="text" class="search" id="tbl-search" placeholder="搜尋表名、中文名或欄位…" spellcheck="false">
+          <p class="hitcount" id="tbl-hits"></p>
+        </div>
+        <div class="pbody" id="schema-list" style="padding-top:0"></div>
         <details class="imp">
           <summary>貼上你自己的 schema</summary>
           <textarea id="ddl" spellcheck="false" placeholder="CREATE TABLE orders (&#10;  order_id INT,&#10;  amount DECIMAL(10,2)&#10;);"></textarea>
@@ -505,21 +525,90 @@ const PAL_LABEL = {
    ============================================================ */
 const state = { schema:{}, nodes:[], edges:[], sel:null, steps:[], step:0, timer:null, uid:0, dialect:'mysql' };
 
+const SCHEMA_RAW = {
+"analytic.member_high_contributing":"高貢獻會員名單|time_category:時間區間,fdp_upt:轉入數據中台時間,calculate_end_date:計算結束日期,category_id:會員類別,calculate_start_date:計算開始日期,member_no:會員編號",
+"analytic.shelf_dim":"|shelf_name:,shelf_type_name:,publish_date_e:,fdp_upt:,publish_date_s:,shelf_group_id:,kgrp_code:,is_standard:,shelf_class_name:,shelf_id:,shelf_class_id:,kind_code:,fm_code:,shelf_type_id:,fm_name:,shelf_group_name:",
+"analytic.store_weather":"各店天氣資料|rainfall_value:雨量,MaxT_predict:最高溫(預測),RH_predict:相對濕度(預測),zip:郵遞區號,Wx_predict:天氣現象(預測),country_name:縣市別,PoP12h_predict:12 小時降雨機率(預測),app_temp_value:體感溫度,T_predict:氣溫(預測),ostore_no:原始店號,cutoff_date:日期,MinT_predict:最低溫(預測)",
+"analytic.m_store_tag":"|group_id:,store_no:,fdp_upt:,lab_name:,lab_id:,lab_val:",
+"analytic.sales_time_fact":"單日單品銷售實績|time_id:交易日期,org_id:組織代號,prd_id:商品代號,time_range:時間帶,fdp_upt:轉入數據中台時間,s_cnt:銷售數,s_amt:銷售原價,s_real:銷售金額,t_cnt:退貨數量,t_amt:退貨原價,t_real:退貨金額",
+"analytic.bussiness_statistic":"損益表|yyyymm:帳屬年月,store_no:帳屬店號,seq:項目編號,name:項目名稱,rpt_type:店型,srpt_type:SRPT報表分類,update_date:來源資料更新時間,user_id:來源資料更新人員,fdp_upt:轉入數據中台時間,svalue:項目值",
+"analytic.gov_tax_regist":"稅籍資料|seller_ban:統一編號,business_status:營業狀態,city:縣市別,fdp_upt:轉入數據中台時間,business_address:營業地址,head_quarter_ban:總機構統一編號",
+"analytic.m_member":"會員主檔|member_no:會員編號,is_ez_flag:是否為簡易會員,is_valid:是否為正式會員,vehicle_flag:是否綁定記帳本載具,is_hq:是否為FM主管,fdp_upt:轉入數據中台時間,sex:性別代碼,gender:性別,birthday:生日,age:年齡,starsigns:星座,country_code:手機國碼,nationality:國籍,join_date:加入會員日期,mobile_sha:手機號碼Hash值,country_mobile_sha:國碼手機號碼Hash值,last_point:會員點數",
+"analytic.m_cmdt_vend":"商品廠商檔|fm_code:商品代號,fm_name:商品名稱,fdp_upt:轉入數據中台時間,fm_brand:商品品牌,vendor_no:廠商代號,vendor_name:廠商名稱",
+"analytic.psl_d":"隨買主檔 (itemD)|pre_id:預售代號,eff_dt:生效日,pre_fmcode:預售商品代號,rep_fmcode:代售商品代號,pre_fmname:預售商品名稱,rep_fmname:代售商品名稱,set_qty:入數,sale_qty:商品總量,cusqty_min:會員購買下限,cusqty_max:會員購買上限,price:單價,tot_amt:總價,dis_amt:代售售價",
+"analytic.psl_m":"隨買主檔(itemM)|category_type:隨買通路代號,pre_id:預售代號,pre_seq:活動代號,psl_channel:隨買通路,eff_dt:生效日,pre_desc:預售名稱,act_source:活動來源,pre_sdt:預售日期-起始日,pre_edt:預售日期-迄止日,expire_date:到期日,tot_sale_qty:商品總量,tot_cusqty_min:總會員購買下限,tot_cusqty_max:總會員購買上限",
+"analytic.m_org_last":"店舖主檔(最新)|ostore_no:原始店號,fdp_upt:轉入數據中台時間,store_no:既存店號,store_nm:店舖名稱,address_zip:郵遞區號,county:縣市,region:行政區,pdept_no:本部代號,pdept_nm:本部名稱,dept_no:部門代號,dept_nm:部門名稱,branch_no:課別代號,branch_nm:課別名稱,respon_no:擔當代號,respon_nm:擔當名稱,dvb_emp_no:開發擔當代號,dvb_emp_nm:開發擔當名稱,dvb_branch_no:開發課別代號,dvb_dept_name:開發課別名稱,shop_disttrict_main:主商圈別代號,shop_disttrict_nm:主商圈別名稱,shop_zone_main:主立地類型代號,shop_zone_main_nm:主立地類型名稱,shop_district_sec1:次商圈別1代號,shop_district_sec1_nm:次商圈別1名稱,shop_zone_sec1:次立地1類型代號,shop_zone_sec1_nm:次立地1類型名稱,shop_district_sec2:次商圈別2代號,shop_district_sec2_nm:次商圈別2名稱,shop_zone_sec2:次立地2類型代號,shop_zone_sec2_nm:次立地2類型名稱,map_x:經度,map_y:緯度,stsize:店鋪分類,pdept_id:本部ID,dept_id:部門ID,branch_id:課別ID,shelf_cnt:貨架數量",
+"analytic.m_org_hist":"店舖主檔(歷程)|ostore_no:原始店號,opndt:開店日期,enddt:閉店日期,fdp_upt:轉入數據中台時間,store_no:既存店號,store_nm:店舖名稱,address_zip:郵遞區號,county:縣市,region:行政區,pdept_no:本部代號,pdept_nm:本部名稱,dept_no:部門代號,dept_nm:部門名稱,branch_no:課別代號,branch_nm:課別名稱,respon_no:擔當代號,respon_nm:擔當名稱,dvb_emp_no:開發擔當代號,dvb_emp_nm:開發擔當名稱,dvb_branch_no:開發課別代號,dvb_dept_name:開發課別名稱,shop_disttrict_main:主商圈別代號,shop_disttrict_nm:主商圈別名稱,shop_zone_main:開發物件編號,shop_zone_main_nm:主立地類型名稱,shop_district_sec1:次商圈別1代號,shop_district_sec1_nm:次商圈別1名稱,shop_zone_sec1:次立地1類型代號,shop_zone_sec1_nm:次立地1類型名稱,shop_district_sec2:次商圈別2代號,shop_district_sec2_nm:次商圈別2名稱,shop_zone_sec2:次立地2類型代號,shop_zone_sec2_nm:次立地2類型名稱,map_x:經度,map_y:緯度,stsize:店鋪分類,pdept_id:本部ID,dept_id:部門ID,branch_id:課別ID,shelf_cnt:貨架數量",
+"analytic.m_promo":"組促主檔|promo_ym:促銷年月,promo_id:促銷編號,fm_name:商品名稱,fdp_upt:轉入數據中台時間,promo_nm:促銷名稱,cmno:商品代號,bdate:促銷開始日期,edate:促銷結束日期,btime:促銷開始時間,etime:促銷結束時間,activity_id:大活動代碼,mm_msg:面銷訊息",
+"analytic.m_cmdt_online":"商品主檔(線上)|fm_code:商品代號,fm_name:商品名稱,kind_code:品番,fm_kgrp:品群番,fdp_upt:轉入數據中台時間,dt_ordst:訂購生效日,fm_brand:商品品牌,price:售價,group_code:群番,kind_name:品番名稱,group_name:群番名稱,fm_usage:商品用途,fmdp_code:商品口座,prd_id:商品自定義分類代號,prd_nm:商品自定義分類名稱,upd_fg:異動區分,fm_spec:規格,store_md:線下採購,channel_md:渠道採購",
+"analytic.m_cmdt_offline":"商品主檔(線下)|fm_code:商品代號,fm_name:商品名稱,kind_code:品番,fm_kgrp:品群番,fdp_upt:轉入數據中台時間,dt_ordst:訂購生效日,fm_brand:商品品牌,barcode:國際條碼,price:售價,group_code:群番,kind_name:品番名稱,group_name:群番名稱,fm_usage:商品用途,fmdp_code:商品口座,prd_id:商品自定義分類代號,prd_nm:商品自定義分類名稱,upd_fg:異動區分,fm_spec:規格,store_md:線下採購,channel_md:渠道採購",
+"analytic.psl_act_exch":"隨買預售系列別|fdp_upt:轉入數據中台時間,pre_fmcode:預售商品代號,chg_fmcode:可兌換商品代號,stime:兌換開始時間,etime:兌換結束時間,seq:排序",
+"analytic.trans_detail":"交易資料|channel:渠道,channel_ch:通路中文,tx_seq:交易ID,deal_time:交易時間,kind_code:品番代號,kind_name:品番名稱,kgrp_code:品群番代號,kgrp_name:品群番名稱,fm_code:商品代號,fm_name:商品名稱,sale_qty:交易數量,sale_amt:交易金額,fdp_upt:轉入數據中台時間,member_no:會員編號,ostore_no:原始店號,store_no:既存店號,tm_no:收銀機號,tm_txnno:交易序號,item_seq:交易項次,pay_channel:支付方式,pre_id:預售活動ID,pre_start_date:預售活動開始日期,is_cherish:是否為友善時光,is_promo:是否成立組促,booking_ostore_no:預定取貨原始店號,booking_store_no:預定取貨既存店號,ts_code:包裹的ts_code,delivery_type:配送分類,rtn_tx_seq:退貨交易序號,orgecr_no:原始收銀機號,orgtran_cnt:原始交易序號",
+"analytic.comm_nop":"商品庫存|fm_code:商品代號,stock_day:庫存日期,stock_qty:庫存數量,fm_name:商品名稱",
+"analytic.promo_dtl":"組促交易資料|tx_seq:交易流水號,item_seq:項次,ostore_no:原始店號,store_no:既存店號,deal_time:交易時間,fm_code:商品代號,promo_id:促銷代號,mm_cnt:促銷成立次數,mm_sale_qty:促銷成立商品數,sale_qty:銷售數量,mm_dis_amt:折扣金額,sale_amt:實銷金額,fdp_upt:轉入中台日期,member_no:會員編號,fm_name:商品名稱,promo_grp:促銷群組,promo_ym:促銷年月,promo_nm:促銷名稱,promo_msg:面銷訊息",
+"analytic.pos_tx_ag":"代收、寄件資料(線下)|tx_seq:交易ID,fdp_upt:轉入數據中台時間,item_seq:項次,ostore_no:原始店號,deal_time:交易時間,fg_saletype:銷貨型態,fg_spc:交易種類,agn_id:代收代號,nm_agn:代收名稱,cd_agngroup:代收群組,fg_agntype:代收種類,fg_feetype:交易數量類別,qt_feetptot:交易數量,am_agndef:代收應收金額,am_agntre:代收實收金額,fg_agnfee:加收金額型態,am_agnsub:加收金額/比率,am_recdisc:實際加收金額,qt_ticket:印票張數,am_serpoc:廠商手續費,dwh_fg:分析計算區分,id_paydep:,member_no:會員編號",
+"analytic.freebie_pin_dtl":"贈品訊息交易明細|tx_seq:交易流水號,ostore_no:原始店號,store_no:既存店號,deal_time:交易時間,pro_no:活動代號,fdp_upt:轉入數據中台時間,pin_code:條碼,member_no:會員編號,pro_desc:活動名稱",
+"analytic.tfn_pin2_chg":"紅利PIN2.0兌換歷程|trd_datetime:交易時間,fdp_upt:轉入數據中台時間,act_code:活動代號,pin_code:PIN碼,pin_flag:PIN碼標記,fir_flag:紅利金首次交易註記,dis_amt:紅利金面額,amount:紅利金交易金額,tx_seq:交易序號,member_no:會員卡號,store_no:既存店號,no_deal:POS交易序號,tm_no:收銀機號,batch_no:轉入資料批號,tx_seq_fdp_upt:交易序號更新時間",
+"analytic.tfn_pin2_send":"紅利PIN2.0贈送歷程|trd_datetime:交易時間,act_code:活動代號,pin_code:PIN碼,pin_flag:PIN碼標記,member_no:會員卡號,gifted_member_no:轉贈卡號(pin_status = 2時source_desc),batch_no:轉入資料批號",
+"analytic.tfn_pin2_receive":"紅利PIN2.0領取歷程|trd_datetime:交易時間,act_code:活動代號,pin_code:PIN碼,pin_flag:PIN碼標記,member_no:會員卡號,batch_no:轉入資料批號",
+"analytic.tfn_pin2_m":"紅利PIN2.0主檔|category:兌換截止日,act_code:活動代號,act_name:活動名稱,exg_kind:兌換種類,prod_code:商品代號,prod_name:商品名稱,end_date:出貨日期(最小),ship_date:出貨數量,ship_qty:活動分類",
+"analytic.basic_mfact_dtl":"單店單日單品訂進銷廢|time_id:交易日期,org_id:原始店號,prd_id:商品代號,sales_cnt:銷售數,sales_amt:銷售金額,order_cnt:訂購數,order_amt:訂購金額,throw_cnt:廢棄數,throw_amt:廢棄金額,inprd_cnt:進貨數量,inprd_amt:進貨金額,retprd_cnt:退貨數量,retprd_amt:退貨金額,transprd_cnt:轉貨數量,transprd_amt:轉貨金額,dis_amt:折扣金額,sub_amt:折讓金額,fdp_upt:轉入數據中台時間",
+"analytic.basic_mfact_fresh":"鮮食時價商品日銷售明細|time_id:交易日,prd_id:商品代號,sales_cnt:銷售數量,sales_amt:銷售金額,order_cnt:訂購數量,order_amt:訂購金額,throw_cnt:廢棄數量,throw_amt:廢棄金額,inprd_cnt:進貨數量,inprd_amt:進貨金額,dis_amt:折扣金額,sub_amt:折讓金額",
+"analytic.basic_mfact_org_stats":"全公司品群番單日訂進銷廢|time_id:交易日期,prd_id:商品代號,fdp_upt:轉入數據中台時間,sales_cnt:銷售數,sales_amt:銷售金額,order_cnt:訂購數,order_amt:訂購金額,throw_cnt:廢棄數,throw_amt:廢棄金額,inprd_cnt:進貨數量,inprd_amt:進貨金額,retprd_cnt:退貨數量,retprd_amt:退貨金額,transprd_cnt:轉貨數量,transprd_amt:轉貨金額,dis_amt:折扣金額,sub_amt:折讓金額,sales_untax_cost:未稅成本,sales_untax_real_amt:未稅實銷金額,order_sales_cnt:訂購店銷售數量,order_sales_amt:有訂購店實銷金額,inprd_sales_cnt:有進貨店實銷數量,inprd_sales_amt:有進貨店實銷金額,y_order_sales_cnt:可訂購店實銷數量,y_order_sales_amt:可訂購店銷售金額,tsales_cnt:時價銷售數量,tsales_amt:時價銷售金額,ac_tsales_amt:時價銷售實銷金額",
+"analytic.remd_fact":"營收|l_day_id:營收日,ostore_no:原始店號,store_no:既存店號,plan_stnum:單日稼動數,amt:單日日商,cust_num:單日來客數,accu_plan_stnum:該月累計稼動日,accu_amt:該月累計銷貨收入,accu_cust_num:該月累計來客數",
+"analytic.basic_mfact":"單店品群番單日訂進銷廢|time_id:交易日期,org_id:組織代號,prd_id:商品代號,fdp_upt:轉入數據中台時間,sales_cnt:銷售數,sales_amt:銷售金額,order_cnt:訂購數,order_amt:訂購金額,throw_cnt:廢棄數,throw_amt:廢棄金額,inprd_cnt:進貨數量,inprd_amt:進貨金額,retprd_cnt:退貨數量,retprd_amt:退貨金額,transprd_cnt:轉貨數量,transprd_amt:轉貨金額,dis_amt:折扣金額,sub_amt:折讓金額,sales_untax_cost:未稅成本,sales_untax_real_amt:未稅實銷金額,order_sales_cnt:訂購店銷售數量,order_sales_amt:有訂購店實銷金額,inprd_sales_cnt:有進貨店實銷數量,inprd_sales_amt:有進貨店實銷金額,y_order_sales_cnt:可訂購店實銷數量,y_order_sales_amt:可訂購店銷售金額,tsales_cnt:時價銷售數量,tsales_amt:時價銷售金額,ac_tsales_amt:時價銷售實銷金額",
+"analytic.basic_mfact_mr":"單店單日單品廠商訂進銷廢|time_id:交易日期,prd_id:商品代號,mr_id:廠商代號,sales_cnt:銷售數,sales_amt:銷售金額,order_cnt:訂購數,order_amt:訂購金額,inprd_cnt:進貨數,inprd_amt:進貨金額,throw_cnt:廢棄數,throw_amt:廢棄金額,dis_amt:折扣金額,sub_amt:折讓金額,mr_no:廠商代號,mr_name:廠商名稱,respon_no:採購代號,respon_nm:採購姓名,branch_no:課別代號,branch_nm:課別名稱,dept_no:部門代號,dept_nm:部門名稱,tot_no:本部代號,tot_nm:本部名稱,kind_code:品番,fm_kgrp:品群番,fdp_upt:轉入數據中台時間",
+"analytic.einv_channel_category":"全家分類外部統編通路檔|seller_ban:統編(子統編),fdp_upt:更新時間,group_name:群組名,store_classification:商店分類,custom_industry_name:產業別,keywords:關鍵字",
+"analytic.einv_tx_dtl":"外部發票|member_no:會員編號,inv_num:發票號碼,inv_period:發票期數,deal_time:發票開立時間,fdp_upt:更新時間,inv_amount:發票金額,seller_name:財政部登記之公司名稱,seller_ban:銷售公司統一編號,seller_address:地址,barcode:手機載具,row_num:品項項次,name:商品名稱(正規化),name_raw:商品名稱(原始資料),unit_price:品項單價,quantity:銷售數量,amount:單品項總金額,currency:貨幣,sno:統編",
+"analytic.app_push_m":"App推播主檔|segment:推播區分,messageid:推播代號,message:推播文案,send_date:推播時間,pushes:有效推播數,fdp_upt:轉入數據中台時間,push_type:推播類型,end_date:推播下架時間,pushes_list:推播名單數",
+"analytic.pnt_dtl":"累兌點交易|tx_seq:交易ID,member_no:會員編號,deal_time:交易時間,category1:累兌點,sp_qty:點數數量,fdp_upt:轉入數據中台時間,category2:來源,category3:類別,category4:廠商名稱,category5:活動名稱",
+"analytic.psl_sh_stat":"隨買共享|data_type:共享類別,member_no:會員編號,shamem_id:被共享者會員編號,batch_no:轉入中台批號,pre_id:預售代號,pre_fmcode:預售商品代號,sha_time:共享時間,is_use:使用註記,upd_time:異動時間",
+"analytic.member_high_contributing_cohort_dtl":"高貢獻會員運營|cutoff_date:日期,category_id:會員類別,member_no:會員編號,fdp_upt:轉入數據中台時間,app_use_cnt:APP使用次數,all_tx_cnt:全交易次數,all_amt:全交易金額,online_tx_cnt:線上交易次數,online_amt:線上交易金額,offline_tx_cnt:線下交易次數,offline_amt:線下交易金額,mf_tx_cnt:行動購交易次數,mf_amt:行動購交易金額,sgb_tx_cnt:社群電商交易次數,sgb_amt:社群電商交易金額,preorder_tx_cnt:預購交易次數,preorder_amt:預購交易金額,pas_11_tx_cnt:隨買跨店取交易次數,pas_11_amt:隨買跨店取交易金額,pas_41_51_tx_cnt:食食購交易次數,pas_41_51_amt:食食購交易金額,knd_A0_tx_cnt:品番A0交易次數,knd_A0_amt:品番A0交易金額,knd_A1_tx_cnt:品番A1交易次數,knd_A1_amt:品番A1交易金額,knd_A2_tx_cnt:品番A2交易次數,knd_A2_amt:品番A2交易金額,knd_A3_tx_cnt:品番A3交易次數,knd_A3_amt:品番A3交易金額,knd_02_tx_cnt:品番02交易次數,knd_02_amt:品番02交易金額,knd_06_tx_cnt:品番06交易次數,knd_06_amt:品番06交易金額,knd_07_tx_cnt:品番07交易次數,knd_07_amt:品番07交易金額,knd_10_tx_cnt:品番10交易次數,knd_10_amt:品番10交易金額",
+"analytic.app_push_click":"App推播點擊明細檔|member_no:會員編號,send_date:推播時間,first_click_datetime:首次點擊時間,segment:推播區分,messageid:推播代號,import_batch:轉入批號,push_message:點擊文案,click_from:點擊位置,campaign_id:點擊活動ID,offer_id:點擊OfferID,push_file_src:推播來源檔",
+"analytic.psl_stock":"隨買庫存|member_no:會員編號,pre_fmcode:預售商品代號,rep_fmcode:代售商品代號,pre_seq:活動代號,fdp_upt:轉入數據中台時間,stock_qty:預售商品剩餘數量,stock_amt:預售商品剩餘金額,pre_desc:預售活動名稱,expire_date:到期日",
+"analytic.psl_send":"隨買轉贈|send_member_no:轉贈者會員卡號,send_tx_time:轉贈日期時間,send_qty:贈送數量,stock_qty:剩餘數量,pre_fmcode:預售商品代號,rep_fmcode:代售商品代號,rcv_member_no:領取者會員卡號,pre_desc:預售活動名稱,pre_id:預售活動代號,pre_sdt:預售日期-起始日,pre_fmname:預售商品名稱,rep_fmname:代售商品名稱",
+"analytic.psl_chg":"隨買兌換|tm_no:收銀機號,tm_txnno:店鋪交易序號,pre_id:預售代號,pre_fmcode:預售商品代號,rep_fmcode:代售商品代號,fdp_upt:轉入數據中台時間,category_type:隨買通路代號,psl_channel:隨買通路,deal_time:交易時間,chg_store_no:兌換店號_既存店號,chg_ostore_no:兌換店號_原始店號,pre_sdt:預售日期_起始日,chg_qty:兌換數量,chg_price:兌換售價,fg_tax:應免稅區分,pay_store_no:購買店號_既存店號,pay_ostore_no:購買店號_原始店號,member_no:會員編號,src:來源,booking_time:預約取貨日期,pickup_time:實際取貨日期,chg_code:兌換券條碼,chgact_flg:消費者兌換行為,chg_member_no:兌換者會員條碼,sha_type:共享類別,manage_code:限量編號",
+"analytic.m_cmdt_tag_last":"商品標籤|fm_code:商品代號,tag_id:商品標代號,fm_name:商品名稱,tag_name:商品標名稱,ptag_id:父標籤代號,tag_desc:標籤說明,tag_grp:標籤群組,is_use:是否使用,is_sel:是否可選取,last_upd_time:最後異動時間,last_emp_no:最後異動人員",
+"analytic.einv_cmdt_tag":"外部發票商品標籤|sno:統編,name:商品名稱(正規化),tag_bid:大標籤代號,tag_bname:大標籤中文名稱,fdp_upt:更新時間,unit_price:品項單價",
+"BI.trans_detail":"|channel:,channel_ch:,tx_seq:,deal_time:,kind_code:,kind_name:,kgrp_code:,kgrp_name:,fm_code:,fm_name:,sale_qty:,sale_amt:,member_no:,ostore_no:,store_no:,tm_no:,tm_txnno:,item_seq:,pay_channel:,pre_id:,pre_start_date:,is_cherish:,is_promo:,booking_ostore_no:,booking_store_no:,ts_code:,delivery_type:,rtn_tx_seq:,orgecr_no:,orgtran_cnt:",
+"analytic.member_app_usage_stats":"App使用工作階段|dt_cal:計算截止日,member_no:會員編號,app_clickdays:過去1週開啟APP天數,icon_point:過去1週點擊兌點趣天數,icon_stamp:過去1週點擊集章趣天數,icon_map:過去1週點擊地圖趣天數,icon_discount:過去1週點擊優惠趣天數,icon_drawgame:過去1週點擊抽獎趣天數,icon_eins:過去1週點擊易安網投保天數,icon_bibian:過去1週點擊比比昂日貨天數,icon_pas:過去1週點擊隨買跨店取天數,icon_91ord:過去1週點擊全家行動購天數,icon_mep:過去1週點擊食食購天數,icon_faminow:過去1週點擊FamiNOW天數,icon_package:過去1週點擊包裹天數,icon_notebook:過去1週點擊記帳本天數,icon_lsb:過去1週點擊訂便當天數,icon_nb:過去1週點擊Fami週期購天數,icon_goodseller:過去1週點擊好賣市集天數,icon_charity:過去1週點擊我的公益天數,icon_laundry:過去1週點擊自助洗衣天數,icon_payment:過去1週點擊線上繳費天數,icon_fa:過去1週點擊Fa現天數,icon_famiport:過去1週點擊FamiPort天數,icon_food_safety:過去1週點擊食在購安心天數,icon_pluspay:過去1週點擊全盈+Pay天數,icon_pt_redeem:過去1週點擊點數免費換天數,func_myoffer:過去1週點擊我的優惠天數,func_point:過去1週點擊點數天數,func_myproduct:過去1週點擊我的商品天數,func_coupon:過去1週點擊酷碰券天數,sec_hotnews:過去1週點擊熱門消息天數,bu_add_cart_pas:過去1週隨買跨店取加入購物車次數,bu_add_cart_mep:過去1週食食購加入購物車次數,bu_add_cart_lsb:過去1週訂便當加入購物車次數,bu_add_cart_nb:過去1週Fami週期購加入購物車次數,bu_add_cart_point:過去1週兌點趣加入購物車次數,rec_tailored:過去1週點擊個性化推薦-為你量身打造天數,rec_pas:過去1週點擊個性化推薦-隨買跨店取天數,rec_like:過去1週點擊個性化推薦-你會喜歡天數,rec_customize:過去1週點擊個性化推薦-私人訂制天數,rec_dailynew:過去1週點擊個性化推薦-每日新發現天數,rec_selected:過去1週點擊個性化推薦-個性化精選天數,rec_exclusive:過去1週點擊個性化推薦-獨家推薦天數,rec_trending:過去1週點擊個性化推薦-今日夯品天數,rec_expert:過去1週點擊個性化推薦-優選秘笈天數,rec_deals:過去1週點擊個性化推薦-優惠搶購天數,msg_alert:過去1週點擊Alert天數",
+"BI.basic_mfact":"|time_id:,org_id:,prd_id:,sales_cnt:,sales_amt:,order_cnt:,order_amt:,throw_cnt:,throw_amt:,inprd_cnt:,inprd_amt:,retprd_cnt:,retprd_amt:,transprd_cnt:,transprd_amt:,dis_amt:,sub_amt:,sales_untax_cost:,sales_untax_real_amt:,order_sales_cnt:,order_sales_amt:,inprd_sales_cnt:,inprd_sales_amt:,y_order_sales_cnt:,y_order_sales_amt:,tsales_cnt:,tsales_amt:,ac_tsales_amt:",
+"BI.remd_fact":"|l_day_id:,ostore_id:,store_id:,weather:,hitemp:,lotemp:,upload_stnum:,plan_stnum:,amt:,depamt1:,depamt2:,depamt3:,depamt4:,depamt5:,depamt6:,depamt7:,depamt8:,depamt9:,depamt10:,depamt11:,depamt12:,depamt13:,depamt14:,cust_num:,accu_plan_stnum:,accu_amt:,accu_depamt1:,accu_depamt2:,accu_depamt3:,accu_depamt4:,accu_depamt5:,accu_depamt6:,accu_depamt7:,accu_depamt8:,accu_depamt9:,accu_depamt10:,accu_depamt11:,accu_depamt12:,accu_depamt13:,accu_depamt14:,accu_cust_num:,tot_plan_stnum:,tot_amt:,tot_cust_num:,budget_st_avg_amt:,budget_st_tot_amt:,budget_dept_avg_amt:,budget_dept_tot_amt:,accu_budget:,ex_accu_amt:,ex_accu_plan_stnum:,ex_accu_cust_num:,ex_tot_amt_last_year:,ex_tot_plan_stnum_last_year:,ex_tot_cust_num_last_year:,status:,ac:,tot_tksl:,accu_tksl:,tksl:,ex_tot_tksl_last_year:,ex_accu_tksl:,scust_num:,accu_scust_num:,tot_scust_num:,budget_st_tot_plan_stnum:,budget_dept_tot_plan_stnum:,ex_accu_scust_num:,ex_tot_scust_num_last_year:,budget_pdept_avg_amt:,budget_pdept_tot_amt:,budget_pdept_tot_plan_stnum:",
+"BI.basic_mfact_dtl":"|time_id:,org_id:,prd_id:,sales_cnt:,sales_amt:,order_cnt:,order_amt:,throw_cnt:,throw_amt:,inprd_cnt:,inprd_amt:,retprd_cnt:,retprd_amt:,transprd_cnt:,transprd_amt:,dis_amt:,sub_amt:",
+"BI.m_member":"|member_no:,is_ez_flag:,is_valid:,sex:,gender:,birthday:,age:,starsigns:,country_code:,nationality:,join_date:,mobile_sha:,country_mobile_sha:,vehicle_flag:,is_hq:,last_point:",
+"BI.psl_act_m_last":"|category_type:,psl_channel:,pre_id:,pre_seq:,eff_dt:,pre_desc:,act_source:,pre_sdt:,pre_edt:,expire_date:,tot_sale_qty:,tot_cusqty_min:,tot_cusqty_max:",
+"BI.psl_act_d_last":"|pre_id:,eff_dt:,pre_fmcode:,rep_fmcode:,pre_fmname:,rep_fmname:,set_qty:,sale_qty:,cusqty_min:,cusqty_max:,price:,tot_amt:,dis_amt:",
+"BI.m_org_hist":"|store_no:,ostore_no:,store_nm:,opndt:,enddt:,address_zip:,county:,region:,pdept_no:,pdept_nm:,dept_no:,dept_nm:,branch_no:,branch_nm:,respon_no:,respon_nm:,dvb_emp_no:,dvb_emp_nm:,dvb_branch_no:,dvb_dept_name:,shop_disttrict_main:,shop_disttrict_nm:,shop_zone_main:,shop_zone_main_nm:,shop_district_sec1:,shop_district_sec1_nm:,shop_zone_sec1:,shop_zone_sec1_nm:,shop_district_sec2:,shop_district_sec2_nm:,shop_zone_sec2:,shop_zone_sec2_nm:,map_x:,map_y:,stsize:",
+"BI.m_org_last":"|store_no:,ostore_no:,store_nm:,address_zip:,county:,region:,pdept_no:,pdept_nm:,dept_no:,dept_nm:,branch_no:,branch_nm:,respon_no:,respon_nm:,dvb_emp_no:,dvb_emp_nm:,dvb_branch_no:,dvb_dept_name:,shop_disttrict_main:,shop_disttrict_nm:,shop_zone_main:,shop_zone_main_nm:,shop_district_sec1:,shop_district_sec1_nm:,shop_zone_sec1:,shop_zone_sec1_nm:,shop_district_sec2:,shop_district_sec2_nm:,shop_zone_sec2:,shop_zone_sec2_nm:,map_x:,map_y:,stsize:",
+"BI.psl_act_exch":"|pre_fmcode:,chg_fmcode:,stime:,etime:,seq:,fdp_upt:",
+"BI.m_cmdt_online":"|fm_code:,fm_name:,dt_ordst:,fm_brand:,price:,kind_code:,group_code:,kind_name:,group_name:,fm_kgrp:,fm_usage:,fmdp_code:,prd_id:,prd_nm:,upd_fg:,fm_spec:,store_md:,channel_md:",
+"BI.m_cmdt_offline":"|fm_code:,fm_name:,dt_ordst:,fm_brand:,barcode:,price:,kind_code:,group_code:,kind_name:,group_name:,fm_kgrp:,fm_usage:,fmdp_code:,prd_id:,prd_nm:,upd_fg:,fm_spec:,store_md:,channel_md:"
+};
+
+/* CSV 只給欄位名和中文名，沒有型別 —— 用兩邊一起猜 */
+function guessType(name, ch){
+  ch = ch || '';
+  if(/日期|時間/.test(ch) || /date|time|_at$|_dt$/i.test(name)) return 'DATE';
+  if(/金額|價|額|費/.test(ch) || /amount|amt|price|total|fee|cost|sum|avg|rate/i.test(name)) return 'DECIMAL';
+  if(/數量|筆數|次數|個數|點數|年齡/.test(ch) || /qty|cnt|count|rank|seq|year|month|age|_num$/i.test(name)) return 'INT';
+  if(/(^|_)id$/i.test(name)) return 'INT';
+  return 'VARCHAR';
+}
+
 function demoSchema(){
-  return {
-    orders: {
-      label:'訂單',
-      cols:[{name:'order_id',type:'INT'},{name:'customer_id',type:'INT'},{name:'amount',type:'DECIMAL'},{name:'order_date',type:'DATE'}],
-      rows:[[1,101,1200,'2026-01-05'],[2,102,380,'2026-01-11'],[3,101,90,'2026-02-02'],
-            [4,103,2400,'2026-02-14'],[5,102,150,'2026-03-01'],[6,104,760,'2026-03-09'],
-            [7,103,640,'2026-03-22'],[8,101,1800,'2026-04-03']]
-    },
-    customers: {
-      label:'客戶',
-      cols:[{name:'customer_id',type:'INT'},{name:'name',type:'VARCHAR'},{name:'city',type:'VARCHAR'}],
-      rows:[[101,'林小美','台北'],[102,'陳大文','台中'],[103,'王阿明','台北'],[105,'張小華','高雄']]
-    }
-  };
+  const out = {};
+  Object.keys(SCHEMA_RAW).forEach(full=>{
+    const cut = SCHEMA_RAW[full].indexOf('|');
+    const label = SCHEMA_RAW[full].slice(0, cut);
+    const cols = SCHEMA_RAW[full].slice(cut+1).split(',').map(pair=>{
+      const i = pair.indexOf(':');
+      const name = i < 0 ? pair : pair.slice(0, i);
+      const ch = i < 0 ? '' : pair.slice(i+1);
+      return {name:name, ch:ch, type:guessType(name, ch)};
+    });
+    out[full] = {label:label, cols:cols, rows:fakeRows(cols)};
+  });
+  return out;
 }
 
 let mk;
@@ -532,30 +621,33 @@ function resetGraph(){
 }
 function link(a, b, port){ state.edges.push({from:a.id, to:b.id, port:port||0}); }
 
+/* 照使用者實際跑的那段查詢：交易資料按品群番彙總 */
 function presetBasic(){
   resetGraph();
-  const o = mk('table', 26, 40, {table:'orders'});
-  const c = mk('table', 26, 214, {table:'customers'});
-  const j = mk('join', 250, 118, {joinType:'INNER', leftCol:'customer_id', rightCol:'customer_id'});
-  const k = mk('case', 470, 118, {col:'amount', as:'tier', branches:[{op:'>=',val:1000,then:'大單'},{op:'>=',val:300,then:'中單'}], other:'小單'});
-  const g = mk('groupby', 690, 118, {keys:['city','tier'], aggs:[{fn:'COUNT',col:'*',as:'order_count'},{fn:'SUM',col:'amount',as:'total_amount'}]});
-  const out = mk('output', 910, 118, {});
-  link(o,j,0); link(c,j,1); link(j,k); link(k,g); link(g,out);
-  state.sel = k.id;
+  const t  = mk('table', 26, 96, {table:'analytic.trans_detail'});
+  const pk = mk('select', 236, 96, {cols:['kind_code','kind_name','kgrp_code','kgrp_name','sale_qty','sale_amt']});
+  const f  = mk('filter', 446, 96, {col:'kgrp_code', op:'IN', val:"'067', '087', '097', '116'"});
+  const g  = mk('groupby', 656, 96, {
+    keys:['kind_code','kind_name','kgrp_code','kgrp_name'],
+    aggs:[{fn:'SUM', col:'sale_qty', as:'total_qty'}, {fn:'SUM', col:'sale_amt', as:'total_amt'}]
+  });
+  const out = mk('output', 866, 96, {});
+  link(t,pk); link(pk,f); link(f,g); link(g,out);
+  state.sel = pk.id;
 }
 
-/* 每個城市金額最大的兩筆訂單 —— window function 的經典用途 */
+/* 每個縣市賣最多錢的商品前 2 名 —— 這題只有視窗函數做得出來 */
 function presetAdvanced(){
   resetGraph();
-  const o = mk('table', 26, 40, {table:'orders'});
-  const c = mk('table', 26, 214, {table:'customers'});
-  const j = mk('join', 236, 118, {joinType:'INNER', leftCol:'customer_id', rightCol:'customer_id'});
-  const d = mk('derive', 436, 118, {left:'amount', op:'*', right:'0.05', as:'fee'});
-  const w = mk('window', 636, 118, {fn:'ROW_NUMBER', col:'amount', partitionBy:['city'], orderBy:'amount', dir:'DESC', as:'city_rank'});
-  const f = mk('filter', 836, 118, {col:'city_rank', op:'<=', val:2});
-  const s = mk('sort', 1036, 118, {by:'amount', dir:'DESC', limit:0});
-  const out = mk('output', 1236, 118, {});
-  link(o,j,0); link(c,j,1); link(j,d); link(d,w); link(w,f); link(f,s); link(s,out);
+  const tx = mk('table', 26, 40, {table:'analytic.trans_detail'});
+  const og = mk('table', 26, 214, {table:'analytic.m_org_last'});
+  const j  = mk('join', 236, 118, {joinType:'INNER', leftCol:'store_no', rightCol:'store_no'});
+  const pk = mk('select', 446, 118, {cols:['county','fm_name','sale_amt']});
+  const g  = mk('groupby', 656, 118, {keys:['county','fm_name'], aggs:[{fn:'SUM', col:'sale_amt', as:'total_amt'}]});
+  const w  = mk('window', 866, 118, {fn:'ROW_NUMBER', col:'total_amt', partitionBy:['county'], orderBy:'total_amt', dir:'DESC', as:'rk'});
+  const f  = mk('filter', 1076, 118, {col:'rk', op:'<=', val:2});
+  const out = mk('output', 1286, 118, {});
+  link(tx,j,0); link(og,j,1); link(j,pk); link(pk,g); link(g,w); link(w,f); link(f,out);
   state.sel = w.id;
 }
 
@@ -594,7 +686,7 @@ function evalNode(node, ctx){
   switch(node.type){
 
   case 'table': {
-    const t = state.schema[node.table];
+    const t = schemaOf(node);
     return t ? {cols:t.cols.map(c=>c.name), rows:t.rows.map(r=>r.slice())} : EMPTY;
   }
 
@@ -747,24 +839,27 @@ function evalNode(node, ctx){
 const FILTER_OPS = ['>=','>','<=','<','=','<>','IN','NOT IN','LIKE','NOT LIKE','IS NULL','IS NOT NULL'];
 const needsVal = op => op !== 'IS NULL' && op !== 'IS NOT NULL';
 /* IN 清單仍存成 inspector 可直接編輯的文字；含逗號的值用 SQL 式單引號包住，單引號寫兩次。 */
-function inList(val){
+function inListRaw(val){
   const text = String(val == null ? '' : val), out = [];
-  let cur = '', quoted = false;
+  let cur = '', quoted = false, wasQuoted = false;
+  const flush = () => { if(cur.trim() !== '') out.push({v:cur.trim(), quoted:wasQuoted}); cur = ''; wasQuoted = false; };
   for(let i=0; i<text.length; i++){
     const c = text[i];
     if(c === "'"){
       if(quoted && text[i+1] === "'"){ cur += "'"; i++; }
-      else quoted = !quoted;
-    } else if(c === ',' && !quoted){ if(cur.trim() !== '') out.push(cur.trim()); cur = ''; }
+      else { quoted = !quoted; wasQuoted = true; }
+    } else if(c === ',' && !quoted){ flush(); }
     else cur += c;
   }
-  if(cur.trim() !== '') out.push(cur.trim());
+  flush();
   return out;
 }
+const inList = val => inListRaw(val).map(x=>x.v);
 function editInList(vals){
   return vals.map(v=>{
     const s = String(v);
-    return /[,']|^\s|\s$/.test(s) ? "'"+s.replace(/'/g,"''")+"'" : s;
+    /* 來源是字串就一定加引號，'116' 這種才不會被當成數字 */
+    return (typeof v === 'string' || /[,']|^\s|\s$/.test(s)) ? "'"+s.replace(/'/g,"''")+"'" : s;
   }).join(', ');
 }
 function likeRe(pat){
@@ -842,8 +937,15 @@ const D = () => DIALECTS[state.dialect] || DIALECTS.mysql;
 const q = s => /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(s)) ? String(s) :
   D().open + String(s).split(D().close).join(D().close + D().close) + D().close;
 /* 表名可能帶 schema：[analytic].[trans_detail] */
-const tableRef = n => n.ns ? n.ns.split('.').map(q).join('.') + '.' + q(n.table) : q(n.table);
+const tableRef = n => n.ns
+  ? n.ns.split('.').map(q).join('.') + '.' + q(n.table)
+  : String(n.table).split('.').map(q).join('.');
 const tableLabel = n => (n.ns ? n.ns + '.' : '') + n.table;
+/* 表名可能存成 analytic.trans_detail，也可能拆成 ns + table —— 兩種都要查得到 */
+function schemaOf(n){
+  if(!n || !n.table) return null;
+  return state.schema[(n.ns ? n.ns + '.' : '') + n.table] || state.schema[n.table] || null;
+}
 
 /* SQL Server 的 TOP 長在 SELECT 上，其他家長在尾巴 */
 function limHead(lim){ return (lim > 0 && D().lim === 'top') ? 'SELECT TOP '+lim+' *' : 'SELECT *'; }
@@ -871,10 +973,12 @@ const lit = v => isNum(v) ? String(numish(v)) : strLit(v);
 function operand(v, cols){ return cols.indexOf(v) >= 0 ? q(v) : (isNum(v) ? String(Number(v)) : lit(v)); }
 function condSQL(n){
   if(!needsVal(n.op)) return q(n.col)+' '+n.op;
+  if(n.str) return q(n.col)+' '+n.op+' '+strLit(n.val);
   if(n.op === 'IN' || n.op === 'NOT IN'){
-    const vals = inList(n.val);
+    const vals = inListRaw(n.val);
     if(!vals.length) return '/* '+n.op+' 清單是空的 */ '+(n.op === 'IN' ? '1 = 0' : '1 = 1');
-    return q(n.col)+' '+n.op+' ('+vals.map(lit).join(', ')+')';
+    /* 原本寫成 '116' 的就繼續當字串 —— 代號欄位是 VARCHAR，拿掉引號會變成隱式轉型 */
+    return q(n.col)+' '+n.op+' ('+vals.map(x=>x.quoted ? strLit(x.v) : lit(x.v)).join(', ')+')';
   }
   if(n.op === 'LIKE' || n.op === 'NOT LIKE')
     return q(n.col)+' '+n.op+' '+strLit(n.val);
@@ -1070,7 +1174,7 @@ const canvas  = document.getElementById('canvas');
 function nodeSummary(n){
   switch(n.type){
     case 'table': {
-      const t = state.schema[n.table];
+      const t = schemaOf(n);
       const disp = tableLabel(n);
       return t ? '<code>'+disp+'</code><br>'+t.cols.length+' 欄 · '+t.rows.length+' 列'
                : '<code>'+(disp||'—')+'</code><br><span class="warn">找不到這張表</span>';
@@ -1228,7 +1332,7 @@ function renderInspector(){
   if(n.type === 'table'){
     h += '<div class="rowf"><label>選表</label><select data-f="table">'+
       Object.keys(state.schema).map(t=>opt(t, n.table, t+(state.schema[t].label?'（'+state.schema[t].label+'）':''))).join('')+'</select></div>';
-    const t = state.schema[n.table];
+    const t = schemaOf(n);
     if(t) h += '<div class="sec">欄位</div><ul class="cols">'+t.cols.map(c=>'<li><span>'+c.name+'</span><em>'+c.type+'</em></li>').join('')+'</ul>';
   }
 
@@ -1404,18 +1508,44 @@ function prune(n){
 /* ============================================================
    7. LEFT RAIL
    ============================================================ */
+const openTables = new Set();
 function renderSchema(){
   const list = document.getElementById('schema-list');
-  const keys = Object.keys(state.schema);
-  document.getElementById('tbl-count').textContent = keys.length + ' 張';
+  const all = Object.keys(state.schema);
+  document.getElementById('tbl-count').textContent = all.length + ' 張';
+
+  const qs = (document.getElementById('tbl-search').value || '').trim().toLowerCase();
+  const keys = !qs ? all : all.filter(t=>{
+    const s = state.schema[t];
+    return t.toLowerCase().indexOf(qs) >= 0 || (s.label || '').toLowerCase().indexOf(qs) >= 0 ||
+      s.cols.some(c=>c.name.toLowerCase().indexOf(qs) >= 0 || (c.ch || '').toLowerCase().indexOf(qs) >= 0);
+  });
+  document.getElementById('tbl-hits').textContent =
+    qs ? ('找到 '+keys.length+' 張表') : (all.length ? '點表名加進畫布，點 ▸ 看欄位' : '');
+
   list.innerHTML = keys.map(t=>{
     const s = state.schema[t];
-    return '<button class="tbl-item" data-add-table="'+t+'">'+ICONS.table+
-      '<span style="min-width:0"><b>'+t+'</b><span>'+(s.label ? s.label+' · ' : '')+s.cols.length+' 欄 · '+s.rows.length+' 列</span></span></button>'+
-      '<ul class="cols">'+s.cols.map(c=>'<li><span>'+c.name+'</span><em>'+c.type+'</em></li>').join('')+'</ul>';
-  }).join('') || '<p class="empty">還沒有資料表。<br>貼一段 schema 進來。</p>';
+    /* 搜尋時自動展開，並把符合的欄位排前面 */
+    const open = openTables.has(t) || (qs && s.cols.some(c=>c.name.toLowerCase().indexOf(qs) >= 0 || (c.ch || '').toLowerCase().indexOf(qs) >= 0));
+    const hit = c => qs && (c.name.toLowerCase().indexOf(qs) >= 0 || (c.ch || '').toLowerCase().indexOf(qs) >= 0);
+    const cols = s.cols.slice().sort((a,b)=>(hit(b) ? 1 : 0) - (hit(a) ? 1 : 0));
+    return '<div class="tbl-row"><button class="tbl-item" data-add-table="'+t+'">'+ICONS.table+
+      '<span style="min-width:0"><b>'+t+'</b><span>'+(s.label ? s.label+' · ' : '')+s.cols.length+' 欄</span></span></button>'+
+      '<button class="tbl-exp" data-exp="'+t+'" aria-expanded="'+open+'" aria-label="看欄位">'+(open ? '▾' : '▸')+'</button></div>'+
+      (open ? '<ul class="cols">'+cols.map(c=>
+        '<li><span'+(hit(c) ? ' style="color:var(--accent-ink);font-weight:500"' : '')+'>'+c.name+'</span>'+
+        '<em class="ch">'+(c.ch || c.type)+'</em></li>').join('')+'</ul>' : '');
+  }).join('') || '<p class="empty">沒有符合的表。<br>換個關鍵字試試。</p>';
 }
+document.getElementById('tbl-search').addEventListener('input', renderSchema);
 document.getElementById('schema-list').addEventListener('click', e=>{
+  const x = e.target.closest('[data-exp]');
+  if(x){
+    const t = x.dataset.exp;
+    if(openTables.has(t)) openTables.delete(t); else openTables.add(t);
+    renderSchema();
+    return;
+  }
   const b = e.target.closest('[data-add-table]');
   if(b) addNode('table', {table:b.dataset.addTable});
 });
@@ -1531,6 +1661,7 @@ function fakeRows(cols, hints){
       if(/_id$|^id$/i.test(c.name)) return 101 + (r % 3);
       return /DEC|FLOAT|DOUBLE|REAL|NUMERIC|MONEY/.test(t) ? [1200,380,90,2400,150,760][r] : r + 1;
     }
+    if(/(_code|_no|_id)$/i.test(c.name) && t === 'VARCHAR') return ['067','087','097','116','126','178'][r];
     if(/DATE|TIME/.test(t)) return '2026-0'+(r+1)+'-1'+r;
     if(/BOOL/.test(t)) return r % 2 === 0 ? 'true' : 'false';
     return words[r % words.length];
@@ -2174,13 +2305,6 @@ function exprName(e){
   if(e.kind === 'case') return 'label';
   return 'expr';
 }
-function guessType(name){
-  if(/(^|_)id$/i.test(name)) return 'INT';
-  if(/amount|price|total|fee|cost|qty|rate|sum|avg/i.test(name)) return 'DECIMAL';
-  if(/date|time|_at$/i.test(name)) return 'DATE';
-  if(/count|rank|num|seq|year|month|age/i.test(name)) return 'INT';
-  return 'VARCHAR';
-}
 
 /* AST -> 積木圖 */
 function astToGraph(parsed){
@@ -2203,7 +2327,8 @@ function astToGraph(parsed){
       const lo = litOf(c.lo), hi = litOf(c.hi);
       noteHint(col, [lo, hi]);
       warn.push('BETWEEN 被拆成兩塊積木（>= 和 <=）— 這就是它真正的意思');
-      return [{col:col, op:'>=', val:lo}, {col:col, op:'<=', val:hi}];
+      const q2 = e => e.kind === 'lit' && typeof e.v === 'string';
+      return [{col:col, op:'>=', val:lo, str:q2(c.lo)}, {col:col, op:'<=', val:hi, str:q2(c.hi)}];
     }
     if(c.kind === 'in'){
       const vals = c.vals.map(litOf);
@@ -2218,7 +2343,7 @@ function astToGraph(parsed){
     if(c.kind === 'null') return [{col:col, op:(c.neg ? 'IS NOT NULL' : 'IS NULL'), val:''}];
     const v = litOf(c.right);
     if(c.right.kind === 'lit') noteHint(col, [v]);
-    return [{col:col, op:c.op, val:v}];
+    return [{col:col, op:c.op, val:v, str:(c.right.kind === 'lit' && typeof c.right.v === 'string')}];
   }
 
   /* 先掃一遍 AST，算出每張表有哪些欄位。建圖時要靠它分辨
@@ -2247,7 +2372,8 @@ function astToGraph(parsed){
   function knownCols(src){
     if(!src || src.kind !== 'table') return null;
     if(cte[src.name.toLowerCase()]) return null;           /* CTE 的欄位由它自己那段決定 */
-    if(state.schema[src.name]) return state.schema[src.name].cols.map(c=>c.name);
+    const known = state.schema[src.name] || (src.ns && state.schema[src.ns+'.'+src.name]);
+    if(known) return known.cols.map(c=>c.name);
     return perTable[src.name] && perTable[src.name].length ? perTable[src.name].slice() : null;
   }
   const sameCols = (a, b) => !!a && !!b && a.length === b.length && a.every((v,i)=>v === b[i]);
@@ -2393,16 +2519,23 @@ function astToGraph(parsed){
   const out = add('output', {});
   conn(finalNode, out);
 
-  /* 沒見過的表：用前面反推的欄位建 schema，並編一批示範資料 */
+  /* 已知的表沿用真欄位，但示範資料改用這段查詢裡出現的值 —— 不然篩選會篩掉全部，
+     動畫一片空白。沒見過的表才反推欄位。 */
   const tableNames = Object.keys(tables);
   const schema = Object.assign({}, state.schema);
   const madeUp = [];
   tableNames.forEach(t=>{
-    if(schema[t]) return;
+    const node = tables[t];
+    const full = (node && node.ns) ? node.ns + '.' + t : t;
+    const key = schema[full] ? full : (schema[t] ? t : full);
+    if(schema[key]){
+      schema[key] = Object.assign({}, schema[key], {rows:fakeRows(schema[key].cols, hints)});
+      return;
+    }
     const names = perTable[t].length ? perTable[t] : ['id'];
     const cols = names.map(c=>({name:c, type:guessType(c)}));
-    schema[t] = {label:'推測', cols:cols, rows:fakeRows(cols, hints)};
-    madeUp.push(t);
+    schema[key] = {label:'推測', cols:cols, rows:fakeRows(cols, hints)};
+    madeUp.push(key);
   });
 
   layoutGraph(nodes, edges);
