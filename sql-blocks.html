@@ -96,28 +96,34 @@ button{font:inherit;color:inherit;cursor:pointer}
 /* 左欄改成浮動抽屜：平常只留一條窄邊，畫布因此寬了快 300px */
 .work{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 340px;
   gap:14px;align-items:start;padding-left:46px}
-/* 只跟畫布差不多高就好 —— 整頁高的話滑鼠經過左邊就會誤觸 */
-.dock{position:absolute;left:0;top:0;width:46px;height:min(100%,560px);z-index:40}
+/* 兩個抽屜各一個標籤，只有點才開 —— 滑過去就開太容易誤觸 */
+.dock{position:absolute;left:0;top:0;width:46px;z-index:40;display:flex;flex-direction:column;gap:10px}
 .dock-tab{
-  width:46px;height:100%;cursor:pointer;
+  width:46px;height:128px;flex:none;cursor:pointer;
   background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
   box-shadow:var(--shadow-s);color:var(--ink-2);
-  font-family:var(--ui);font-weight:700;font-size:11px;letter-spacing:.14em;
-  writing-mode:vertical-rl;text-orientation:mixed;padding:14px 0;
+  font-family:var(--ui);font-weight:700;font-size:11.5px;letter-spacing:.14em;
+  writing-mode:vertical-rl;text-orientation:mixed;padding:12px 0;
 }
 .dock-tab:hover{border-color:var(--accent);color:var(--accent-ink)}
-.dock.pinned .dock-tab{border-color:var(--accent);color:var(--accent-ink);background:var(--accent-soft)}
+.dock-tab[aria-expanded="true"]{border-color:var(--accent);color:var(--accent-ink);background:var(--accent-soft)}
 .dock-body{
   position:absolute;left:52px;top:0;width:min(306px,calc(100vw - 76px));
   max-height:min(78vh,660px);overflow-y:auto;overscroll-behavior:contain;
-  opacity:0;pointer-events:none;transform:translateX(-10px);
-  transition:opacity .16s ease,transform .16s ease;
+  display:none;
 }
-/* 滑過去、釘住、或正從裡面拖積木出來時，都要展開 */
-.dock:hover > .dock-body,
-.dock.pinned > .dock-body,
-.dock.dragging > .dock-body{opacity:1;pointer-events:auto;transform:none}
-@media (prefers-reduced-motion:reduce){ .dock-body{transition:none} }
+.dock[data-open="blocks"] > .dock-body[data-drawer="blocks"],
+.dock[data-open="tables"] > .dock-body[data-drawer="tables"]{display:flex}
+
+/* 快速濾網 */
+.quick{display:flex;flex-direction:column;gap:5px}
+.quick button{
+  display:flex;align-items:baseline;gap:8px;width:100%;text-align:left;cursor:pointer;
+  background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:7px 9px;
+}
+.quick button:hover{border-color:var(--f-narrow);background:var(--accent-soft)}
+.quick b{font-family:var(--ui);font-weight:700;font-size:12px;color:var(--ink)}
+.quick i{font-style:normal;font-size:10.5px;color:var(--ink-3);font-family:var(--mono);margin-left:auto}
 .panel{
   background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
   box-shadow:var(--shadow-s);overflow:hidden;
@@ -436,9 +442,18 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
 
   <div class="work">
 
-    <div class="dock" id="dock">
-      <button class="dock-tab" id="dock-tab" aria-expanded="false" title="滑過來打開，點一下釘住">積木 ・ 資料表</button>
-      <div class="dock-body rail">
+    <div class="dock" id="dock" data-open="">
+      <button class="dock-tab" data-drawer="blocks" aria-expanded="false" title="點一下開關">積木</button>
+      <button class="dock-tab" data-drawer="tables" aria-expanded="false" title="點一下開關">資料表</button>
+
+      <div class="dock-body rail" data-drawer="blocks">
+      <section class="panel">
+        <div class="phead"><h2>快速濾網</h2><span class="sub">常用品番</span></div>
+        <div class="pbody">
+          <div id="quick"></div>
+          <p class="hint">點一下就變成一塊<b>篩選</b>積木，接在選中的那塊後面。<br>代號清單會直接寫進去，之後可以自己改。</p>
+        </div>
+      </section>
       <section class="panel">
         <div class="phead"><h2>積木</h2><span class="sub">10 種</span></div>
         <div class="pbody">
@@ -446,6 +461,9 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
           <p class="hint">顏色代表這塊積木<b>對表格做什麼</b>。<br><b>拖</b>到畫布放在你要的位置，或<b>點一下</b>自動接在選中的那塊後面。</p>
         </div>
       </section>
+      </div>
+
+      <div class="dock-body rail" data-drawer="tables">
       <section class="panel">
         <div class="phead"><h2>資料表</h2><span class="sub" id="tbl-count"></span></div>
         <div class="pbody" style="padding-bottom:0">
@@ -466,7 +484,6 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
     <section class="panel">
       <div class="phead"><h2>畫布</h2>
         <button class="mini" id="btn-tidy" style="margin-left:auto">整理版面</button>
-        <button class="mini" id="btn-rail">釘住左欄</button>
         <span class="srcbadge" id="src-label" hidden></span>
         <span class="sub" id="node-count"></span>
       </div>
@@ -1712,14 +1729,9 @@ document.addEventListener('dragstart', e=>{
   if(pal)      dragNew = {kind:'block', v:pal.dataset.t};
   else if(tbl) dragNew = {kind:'table', v:tbl.dataset.addTable};
   else return;
-  dock.classList.add('dragging');        /* 拖到一半左欄不能收掉 */
   if(e.dataTransfer){ e.dataTransfer.effectAllowed = 'copy'; e.dataTransfer.setData('text/plain', dragNew.v); }
 });
-document.addEventListener('dragend', ()=>{
-  dragNew = null;
-  canvas.classList.remove('drop-on');
-  dock.classList.remove('dragging');
-});
+document.addEventListener('dragend', ()=>{ dragNew = null; canvas.classList.remove('drop-on'); });
 canvas.addEventListener('dragover', e=>{
   if(!dragNew) return;
   e.preventDefault();
@@ -2053,6 +2065,40 @@ document.getElementById('schema-list').addEventListener('click', e=>{
   if(b) addNode('table', {table:b.dataset.addTable});
 });
 
+/* ---- 快速濾網 ----
+   品番是固定兩碼的字串。02-22 這種範圍一律展開成完整清單，不用 BETWEEN ——
+   '02' 前面的 0 一旦被當成數字就會變成 2，範圍的意思整個跑掉。 */
+function codeRange(a, b){
+  const out = [];
+  if(/^\d+$/.test(a) && /^\d+$/.test(b))
+    for(let i = Number(a); i <= Number(b); i++) out.push(String(i).padStart(a.length, '0'));
+  else if(a.charAt(0) === b.charAt(0))            /* A0-A9 這種：頭一碼固定，尾碼遞增 */
+    for(let i = a.charCodeAt(1); i <= b.charCodeAt(1); i++) out.push(a.charAt(0) + String.fromCharCode(i));
+  return out;
+}
+const QUICK = [
+  {label:'泛鮮食', col:'kind_code', op:'IN',
+   codes:codeRange('02','22').concat(codeRange('A0','A9'), ['B2','B5','B6']),
+   note:'02-22 A0-A9 B2/5/6'},
+  {label:'飲料',   col:'kind_code', op:'IN',     codes:codeRange('27','34'), note:'27-34'},
+  {label:'香菸',   col:'kind_code', op:'IN',     codes:['58'],               note:'58'},
+  {label:'計算營收', col:'kind_code', op:'NOT IN',
+   codes:['00','80','81','89','91','92','93','94','95','96','98','99','X1','T1','Z1'],
+   note:'扣掉非營收'}
+];
+const quickVal = q => q.codes.map(c=>"'"+c+"'").join(', ');
+
+document.getElementById('quick').innerHTML = '<div class="quick">'+QUICK.map((q,i)=>
+  '<button data-q="'+i+'" title="'+q.col+' '+q.op+' ('+q.codes.length+' 個代號)">'+
+  '<b>'+q.label+'</b><i>'+q.note+'</i></button>').join('')+'</div>';
+
+document.getElementById('quick').addEventListener('click', e=>{
+  const b = e.target.closest('[data-q]');
+  if(!b) return;
+  const q = QUICK[Number(b.dataset.q)];
+  addNode('filter', {col:q.col, op:q.op, val:quickVal(q)});
+});
+
 document.getElementById('palette').innerHTML = GROUPS.map(g=>
   '<div class="fam" style="--fc:var(--f-'+g.f+')"><div class="fam-h"><b>'+g.label+'</b><i>'+g.note+'</i></div>'+
   '<div class="palette">'+g.types.map(t=>
@@ -2090,11 +2136,13 @@ function addNode(type, extra){
   const sel = nodeById(state.sel);
   const n = Object.assign({id:'n'+(++state.uid), type:type}, extra||{});
   if(type !== 'table' && sel && sel.type !== 'output'){
-    n.x = sel.x + 186; n.y = sel.y;
-    state.nodes.forEach(m=>{ if(m.x >= sel.x + 140) m.x += 196; });
+    const step = 164 + SNAP_GAP;                 /* 一塊的寬度加上磁吸的縫 */
+    n.x = sel.x + step; n.y = sel.y;
+    state.nodes.forEach(m=>{ if(m.x >= sel.x + 140) m.x += step; });
     state.edges.filter(e=>e.from === sel.id).forEach(e=>{ e.from = n.id; });
     state.nodes.push(n);
     state.edges.push({from:sel.id, to:n.id, port:0});
+    renderNodes(); refit(n.id);                  /* 貼齊前一塊，接點才會對上 */
   } else {
     n.x = 26; n.y = 40 + state.nodes.filter(m=>m.type === 'table').length * 174;
     state.nodes.push(n);
@@ -2574,18 +2622,20 @@ document.getElementById('btn-tidy').addEventListener('click', ()=>{
   canvas.scrollTo({left:0, top:0, behavior:'smooth'});
   refresh();
 });
-/* 左欄抽屜：滑過去自己展開（純 CSS），點一下釘住不收 */
+/* 左邊兩個抽屜：點標籤開關，一次只開一個。開著的狀態會記住 */
 const dock = document.getElementById('dock');
-const btnRail = document.getElementById('btn-rail');
-function setPinned(on){
-  dock.classList.toggle('pinned', on);
-  document.getElementById('dock-tab').setAttribute('aria-expanded', on ? 'true' : 'false');
-  btnRail.textContent = on ? '放開左欄' : '釘住左欄';
-  try { localStorage.setItem('sqlblocks.dockPinned', on ? '1' : '0'); } catch(err){}
+function openDrawer(which){
+  dock.dataset.open = which || '';
+  [].slice.call(dock.querySelectorAll('.dock-tab')).forEach(t=>
+    t.setAttribute('aria-expanded', t.dataset.drawer === which ? 'true' : 'false'));
+  try { localStorage.setItem('sqlblocks.dock', which || ''); } catch(err){}
 }
-document.getElementById('dock-tab').addEventListener('click', ()=>setPinned(!dock.classList.contains('pinned')));
-btnRail.addEventListener('click', ()=>setPinned(!dock.classList.contains('pinned')));
-try { if(localStorage.getItem('sqlblocks.dockPinned') === '1') setPinned(true); } catch(err){}
+dock.addEventListener('click', e=>{
+  const tab = e.target.closest('.dock-tab');
+  if(!tab) return;
+  openDrawer(dock.dataset.open === tab.dataset.drawer ? '' : tab.dataset.drawer);
+});
+try { openDrawer(localStorage.getItem('sqlblocks.dock') || ''); } catch(err){ openDrawer(''); }
 document.getElementById('btn-basic').addEventListener('click', ()=>loadPreset(presetBasic));
 document.getElementById('btn-adv').addEventListener('click', ()=>loadPreset(presetAdvanced));
 

@@ -778,6 +778,47 @@ test('snap: a plain flow draws no wires, a branch draws exactly one, nothing ove
   return 'plain flow: 0 wires; branch: 1 wire; no overlaps either way';
 });
 
+/* Quick filters. These are real product-category code ranges the analyst uses
+   every day, and the codes are fixed-width strings: '02' is a category, not the
+   number 2. A range is expanded to an explicit list so nothing downstream can
+   reinterpret it, and every code must survive to the SQL still quoted —
+   including the ones that look like numbers, such as '22' and '58'. */
+test('quick: code ranges expand as fixed-width strings', () => {
+  assert.deepEqual(json(api.codeRange('02', '22').slice(0, 3)), ['02', '03', '04']);
+  assert.equal(api.codeRange('02', '22').length, 21);
+  assert.equal(api.codeRange('02', '22').every(c => c.length === 2), true);
+  assert.deepEqual(json(api.codeRange('A0', 'A9')), ['A0','A1','A2','A3','A4','A5','A6','A7','A8','A9']);
+  assert.equal(api.codeRange('27', '34').length, 8);
+
+  const sizes = Object.fromEntries(api.QUICK.map(q => [q.label, q.codes.length]));
+  assert.deepEqual(json(sizes), {泛鮮食:34, 飲料:8, 香菸:1, 計算營收:15});
+  return `泛鮮食=34 飲料=8 香菸=1 營收排除=15`;
+});
+
+test('quick: every code reaches the SQL quoted, even the numeric-looking ones', () => {
+  const schema = {t:{label:'', cols:[{name:'kind_code', ch:'品番代號', type:'VARCHAR'}],
+                     rows:[['02'], ['22'], ['58']]}};
+  for (const q of api.QUICK) {
+    installGraph(api, {
+      nodes:[{id:'t', type:'table', table:'t'},
+             {id:'f', type:'filter', col:q.col, op:q.op, val:api.quickVal(q)},
+             {id:'o', type:'output'}],
+      edges:[{from:'t', to:'f', port:0}, {from:'f', to:'o', port:0}],
+    }, schema);
+    api.state.dialect = 'mssql';
+    const sql = api.buildSQL();
+    q.codes.forEach(code => {
+      assert.match(sql, new RegExp(`'${code}'`), `${q.label}: ${code} must stay quoted`);
+    });
+    assert.doesNotMatch(sql, /\((\s*\d+\s*,)/, `${q.label}: no bare numeric code`);
+    assert.match(sql, new RegExp(q.op.replace(' ', '\\s+')));
+    /* and the generated SQL still reparses into the same filter */
+    const back = api.astToGraph(api.parseSQLText(sql)).nodes.find(n => n.type === 'filter');
+    assert.equal(back.op, q.op, `${q.label}: operator survives the round trip`);
+  }
+  return `${api.QUICK.length} presets: all codes quoted, operators round-trip`;
+});
+
 let passed = 0;
 for (const item of cases) {
   try {
