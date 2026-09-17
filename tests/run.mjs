@@ -924,6 +924,42 @@ test('summary: zero rows and no source are told apart', () => {
   return 'rows / filtered-to-zero / unconnected all read differently';
 });
 
+/* Deleting a step used to leave a hole: the steps either side were dropped
+   loose and had to be reconnected by hand, which is the part that felt bad.
+   The chain now heals, and the upstream step is selected so the next one can
+   be added straight after it. */
+test('delete: removing a middle step reconnects the two either side', () => {
+  const schema = {t:{label:'', cols:[{name:'x', ch:'', type:'INT'}], rows:[[3], [1], [2]]}};
+  const chain = () => ({
+    nodes:[{id:'t', type:'table', table:'t'},
+           {id:'f', type:'filter', col:'x', op:'>=', val:2},
+           {id:'s', type:'sort', by:'x', dir:'ASC', limit:0, offset:0},
+           {id:'o', type:'output'}],
+    edges:[{from:'t', to:'f', port:0}, {from:'f', to:'s', port:0}, {from:'s', to:'o', port:0}],
+  });
+
+  installGraph(api, chain(), schema);
+  api.removeNode('f');
+  assert.deepEqual(json(api.state.nodes.map(n => n.id)), ['t', 's', 'o']);
+  assert.deepEqual(json(api.state.edges.map(e => `${e.from}>${e.to}`)), ['s>o', 't>s']);
+  /* the sort now reads the whole table, unfiltered */
+  assert.deepEqual(json(api.evalNode(api.state.nodes[2]).rows), [[1], [2], [3]]);
+  /* and the step before it is selected, ready to continue from */
+  assert.equal(api.state.sel, 't');
+
+  /* deleting a source just drops it — there is nothing to heal to */
+  installGraph(api, chain(), schema);
+  api.removeNode('t');
+  assert.deepEqual(json(api.state.edges.map(e => `${e.from}>${e.to}`)), ['f>s', 's>o']);
+  assert.equal(api.state.sel, null);
+
+  /* 結果 is not deletable: nothing downstream could replace it */
+  installGraph(api, chain(), schema);
+  api.removeNode('o');
+  assert.equal(api.state.nodes.length, 4);
+  return 'middle step heals the chain; source just drops; 結果 refuses';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {

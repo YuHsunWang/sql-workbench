@@ -77,7 +77,7 @@ export function loadApp() {
     'demoSchema', 'sampleValue', 'joinLayout',
     'isSnapped', 'snapFor', 'snapLayout', 'settleLayout', 'nodeBox', 'SNAP_GAP',
     'QUICK', 'QUICK_DEFAULT', 'codeRange', 'parseCodes', 'quickCodes', 'quickVal',
-    'nodeSummary',
+    'nodeSummary', 'removeNode',
   ];
   const marker = '})();';
   const at = match[1].lastIndexOf(marker);

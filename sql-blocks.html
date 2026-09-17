@@ -1,4 +1,4 @@
-<title>SQL 積木工坊</title>
+<title>SQL 流程工作台</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <style>
 :root{
@@ -283,6 +283,15 @@ textarea{
 .port.in.linked:hover{border-color:var(--drop);background:var(--drop);transform:translate(-50%,-50%) scale(1.35)}
 /* 拖到會吸上去的位置時，先讓使用者看到 */
 .node.snapping{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 26%,transparent),var(--shadow-m)}
+/* 刪除鈕：滑到那個步驟上、或它被選起來時才出現 */
+.nkill{
+  position:absolute;top:-9px;right:-9px;width:21px;height:21px;border-radius:50%;z-index:5;
+  background:var(--surface);border:1.5px solid var(--line);color:var(--ink-3);
+  font-size:14px;line-height:1;cursor:pointer;padding:0;
+  opacity:0;pointer-events:none;transition:opacity .12s,background .12s,color .12s;
+}
+.node:hover > .nkill,.node.sel > .nkill{opacity:1;pointer-events:auto}
+.nkill:hover{border-color:var(--drop);background:var(--drop);color:#fff}
 
 /* ---------- inspector ---------- */
 .rowf{display:flex;align-items:center;gap:8px;margin-bottom:8px}
@@ -448,8 +457,8 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/><path d="M11 7h4a2 2 0 0 1 2 2v4"/></svg>
       </span>
       <div>
-        <h1>SQL 積木工坊</h1>
-        <p class="tag">拖積木 → 出 SQL → 看資料怎麼被搬動</p>
+        <h1>SQL 流程工作台</h1>
+        <p class="tag">接步驟 → 出 SQL → 看資料怎麼被搬動</p>
       </div>
     </div>
     <div class="top-acts">
@@ -463,7 +472,7 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
   <div class="work">
 
     <div class="dock" id="dock" data-open="">
-      <button class="dock-tab" data-drawer="blocks" aria-expanded="false" title="點一下開關">積木</button>
+      <button class="dock-tab" data-drawer="blocks" aria-expanded="false" title="點一下開關">步驟</button>
       <button class="dock-tab" data-drawer="quick"  aria-expanded="false" title="點一下開關">常用操作</button>
       <button class="dock-tab" data-drawer="tables" aria-expanded="false" title="點一下開關">資料表</button>
 
@@ -487,7 +496,7 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
               <button class="btn ghost" type="button" id="q-cancel">取消</button>
             </div>
           </form>
-          <p class="hint">點一下就變成一塊<b>篩選</b>積木，接在選中的那塊後面。<br>
+          <p class="hint">點一下就變成一個<b>篩選</b>步驟，接在選中的那個後面。<br>
             範圍可以寫成 <code>02-22</code>，會自動展開成每一個代號。存在這台瀏覽器裡。</p>
         </div>
       </section>
@@ -495,10 +504,10 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
 
       <div class="dock-body rail" data-drawer="blocks">
       <section class="panel">
-        <div class="phead"><h2>積木</h2><span class="sub">10 種</span></div>
+        <div class="phead"><h2>步驟</h2><span class="sub">10 種</span></div>
         <div class="pbody">
           <div id="palette"></div>
-          <p class="hint">顏色代表這塊積木<b>對表格做什麼</b>。<br><b>拖</b>到畫布放在你要的位置，或<b>點一下</b>自動接在選中的那塊後面。</p>
+          <p class="hint">顏色代表這個步驟<b>對表格做什麼</b>。<br><b>拖</b>到畫布放在你要的位置，或<b>點一下</b>自動接在選中的那塊後面。</p>
         </div>
       </section>
       </div>
@@ -534,7 +543,7 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
 
     <div class="rail">
       <section class="panel">
-        <div class="phead"><h2>積木設定</h2><span class="sub" id="insp-kind"></span></div>
+        <div class="phead"><h2>步驟設定</h2><span class="sub" id="insp-kind"></span></div>
         <div class="pbody" id="inspector"></div>
       </section>
     </div>
@@ -575,7 +584,7 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
 <div class="overlay" id="overlay" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <div class="modal-head">
-      <h2 id="modal-title">貼 SQL，反解成積木</h2>
+      <h2 id="modal-title">貼 SQL，反解成步驟</h2>
       <button class="btn ghost" id="modal-close">關掉</button>
     </div>
     <div class="modal-body">
@@ -583,7 +592,7 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
       <div class="modal-acts">
         <button class="btn ghost" id="sample-a">範例：GROUP BY</button>
         <button class="btn ghost" id="sample-b">範例：視窗函數</button>
-        <button class="btn primary grow" id="do-parse">解析成積木</button>
+        <button class="btn primary grow" id="do-parse">解析成步驟</button>
       </div>
       <div id="stmt-pick"></div>
       <div id="parse-out"></div>
@@ -1217,7 +1226,7 @@ function graphIssue(last){
     if((next.get(id) || []).some(cyclic)) return true;
     colour.set(id, 2); return false;
   }
-  if(state.nodes.some(n=>cyclic(n.id))) return '積木連線形成循環，請先移除繞回前面的連線。';
+  if(state.nodes.some(n=>cyclic(n.id))) return '步驟連線形成循環，請先移除繞回前面的連線。';
   const checked = new Set();
   function missing(n){
     if(!n || checked.has(n.id)) return '';
@@ -1250,7 +1259,7 @@ function buildSQL(){
   const last = out ? srcOf(out.id, 0) : null;
   const problem = graphIssue(last);
   if(problem) return '-- 無法產生 SQL：'+problem;
-  if(!last) return '-- 把積木接到「結果」，SQL 就會長出來。';
+  if(!last) return '-- 把步驟接到「結果」，SQL 就會長出來。';
 
   /* ORDER BY / LIMIT 只有放在最外層才有意義 —— 最後一塊是排序就抽出來 */
   const tailSort = (last.type === 'sort') ? last : null;
@@ -1347,7 +1356,7 @@ function buildSQL(){
 
     } else if(n.type === 'select'){
       /* 照使用者選的欄位原樣寫出來。就算執行引擎認不得某個欄名也不要退回
-         SELECT * —— 那會把整張表抓回來，正好是這塊積木要避免的事。 */
+         SELECT * —— 那會把整張表抓回來，正好是這個步驟要避免的事。 */
       const keep = n.cols || [];
       sql = '  SELECT '+(keep.length ? list(keep.map(q), 9) : '*')+'\n  FROM '+ref(s0);
 
@@ -1502,11 +1511,14 @@ function renderNodes(){
               (linked ? ' title="點一下拔掉這條連線"' : '')+'></div>';
     }
     if(n.type !== 'output') html += '<div class="port out" data-node="'+n.id+'"></div>';
+    /* 每個步驟自己帶一顆刪除鈕，不用先選起來再跑去右邊面板找 */
+    if(n.type !== 'output')
+      html += '<button class="nkill" data-kill="'+n.id+'" title="刪掉這個步驟" aria-label="刪掉這個步驟">×</button>';
     el.innerHTML = html;
     surface.appendChild(el);
   });
   positionPorts();
-  document.getElementById('node-count').textContent = state.nodes.length + ' 塊';
+  document.getElementById('node-count').textContent = state.nodes.length + ' 步';
 }
 function positionPorts(){
   state.nodes.forEach(n=>{
@@ -1546,7 +1558,7 @@ function nodeBox(id){
   /* 還沒畫出來就量不到，退回 CSS 的預設尺寸，算出來的位置才不會是 NaN */
   return {n:n, w:numOr(el && el.offsetWidth, 164), h:numOr(el && el.offsetHeight, 86)};
 }
-/* 輸入接點的高度。兩個以上的輸入用固定內縮往兩端擺，這樣積木長高時接點會跟著
+/* 輸入接點的高度。兩個以上的輸入用固定內縮往兩端擺，這樣步驟長高時接點會跟著
    拉開 —— JOIN 才有辦法同時貼住上下兩張表而不逼它們重疊。 */
 const PORT_INSET = 26;
 function portOffsets(h, ins){
@@ -1652,7 +1664,7 @@ function refit(id){
   if(!n || !B || !ins.length) return;
   const boxes = ins.map(e=>nodeBox(e.from));
   if(boxes.some(b=>!b)) return;
-  /* x：貼在最右邊那個來源後面（積木寬度固定，同一層的右緣本來就齊） */
+  /* x：貼在最右邊那個來源後面（步驟寬度固定，同一層的右緣本來就齊） */
   n.x = Math.max(0, Math.round(Math.max.apply(null, boxes.map(b=>b.n.x + b.w + SNAP_GAP))));
   for(let k = 1; k < boxes.length; k++)
     shiftUpstream(boxes[k].n.id, (boxes[k-1].n.y + boxes[k-1].h + SNAP_GAP) - boxes[k].n.y);
@@ -1694,6 +1706,8 @@ function canvasPt(e){
   return {x: e.clientX - r.left + canvas.scrollLeft, y: e.clientY - r.top + canvas.scrollTop};
 }
 canvas.addEventListener('pointerdown', e=>{
+  const kill = e.target.closest('.nkill');
+  if(kill){ removeNode(kill.dataset.kill); e.preventDefault(); return; }
   const port = e.target.closest('.port');
   if(port && port.classList.contains('out')){
     conn = {from: port.dataset.node};
@@ -1765,7 +1779,7 @@ canvas.addEventListener('pointerup', e=>{
     if(s){
       state.edges = state.edges.filter(x=>!(x.to === s.to && x.port === s.port));
       state.edges.push({from:s.from, to:s.to, port:s.port});
-      /* 兩個輸入的積木要重新對一次，不然第二個來源會壓到第一個 */
+      /* 兩個輸入的步驟要重新對一次，不然第二個來源會壓到第一個 */
       if(META[nodeById(s.to).type].ins > 1){ renderNodes(); refit(s.to); }
     }
     if(drag.el) drag.el.classList.remove('snapping');
@@ -1773,7 +1787,7 @@ canvas.addEventListener('pointerup', e=>{
   }
 });
 
-/* ---- 從左邊拖積木/資料表進畫布 ---- */
+/* ---- 從左邊拖步驟/資料表進畫布 ---- */
 document.addEventListener('dragstart', e=>{
   const pal = e.target.closest && e.target.closest('.pal');
   const tbl = e.target.closest && e.target.closest('[data-add-table]');
@@ -1804,7 +1818,7 @@ canvas.addEventListener('drop', e=>{
   state.nodes.push(n);
   state.sel = n.id;
   dragNew = null;
-  /* 剛放下的新積木也要吸 —— 先畫一次才量得到它多大 */
+  /* 剛放下的新步驟也要吸 —— 先畫一次才量得到它多大 */
   renderNodes();
   const s = snapFor(n.id);
   if(s){
@@ -1847,7 +1861,7 @@ const OPS = ['>=','>','<=','<','=','<>'];
 function renderInspector(){
   const n = nodeById(state.sel);
   document.getElementById('insp-kind').textContent = n ? META[n.type].label : '';
-  if(!n){ inspector.innerHTML = '<p class="empty">點畫布上任何一塊積木，<br>這裡就會出現它的設定。</p>'; return; }
+  if(!n){ inspector.innerHTML = '<p class="empty">點畫布上任何一個步驟，<br>這裡就會出現它的設定。</p>'; return; }
   const avail = colsInto(n.id);
   let h = '';
 
@@ -1998,7 +2012,7 @@ function renderInspector(){
     h += '<p class="note" style="margin-top:0">最後結果：<b>'+r.rows.length+'</b> 列、<b>'+r.cols.length+'</b> 欄。<br>SQL 就在下面，動畫在最底下。</p>';
   }
 
-  if(n.type !== 'output') h += '<div class="delbar"><button class="btn ghost" data-del-node>刪掉這塊積木</button></div>';
+  if(n.type !== 'output') h += '<div class="delbar"><button class="btn ghost" data-del-node>刪掉這個步驟</button></div>';
   inspector.innerHTML = h;
 }
 
@@ -2048,12 +2062,27 @@ inspector.addEventListener('click', e=>{
   }
   if(t.hasAttribute('data-add-agg')){ n.aggs.push({fn:'COUNT', col:'*', as:'c'+(n.aggs.length+1)}); refresh(); return; }
   if(t.dataset.delAgg !== undefined){ n.aggs.splice(Number(t.dataset.delAgg),1); refresh(); return; }
-  if(t.hasAttribute('data-del-node')){
-    state.edges = state.edges.filter(x=>x.from !== n.id && x.to !== n.id);
-    state.nodes = state.nodes.filter(x=>x.id !== n.id);
-    state.sel = null; refresh(); return;
-  }
+  if(t.hasAttribute('data-del-node')){ removeNode(n.id); return; }
 });
+
+/* 刪一個步驟就把它前後接回去 —— 中間空一截還要自己重拉，很煩。
+   刪完選回上一個，才接得下去。 */
+function removeNode(id){
+  const n = nodeById(id);
+  if(!n || n.type === 'output') return;
+  const from = srcOf(id, 0);
+  const outs = state.edges.filter(e=>e.from === id);
+  state.edges = state.edges.filter(e=>e.from !== id && e.to !== id);
+  if(from) outs.forEach(e=>{
+    if(!state.edges.some(x=>x.to === e.to && x.port === e.port))
+      state.edges.push({from:from.id, to:e.to, port:e.port});
+  });
+  state.nodes = state.nodes.filter(x=>x.id !== id);
+  state.sel = from ? from.id : null;
+  renderNodes();
+  outs.forEach(e=>refit(e.to));          /* 接回去之後把缺口補起來 */
+  refresh();
+}
 function toggle(arr, v){ const i = arr.indexOf(v); if(i >= 0) arr.splice(i,1); else arr.push(v); }
 function prune(n){
   const avail = colsInto(n.id);
@@ -2271,7 +2300,7 @@ function defaultsFor(t){
   return {};
 }
 
-/* 加積木時自動接在選中那塊後面，並把下游整串往右推 */
+/* 加步驟時自動接在選中那塊後面，並把下游整串往右推 */
 function addNode(type, extra){
   const sel = nodeById(state.sel);
   const n = Object.assign({id:'n'+(++state.uid), type:type}, extra||{});
@@ -2629,11 +2658,11 @@ function buildSteps(){
     const R = evalNode(out);
     if(R.cols.length) steps.push({
       title:'完成',
-      cap:'這就是右邊那段 SQL 跑出來的東西。<strong>改上面任何一塊積木，SQL 和這張表會同時跟著變。</strong>',
+      cap:'這就是右邊那段 SQL 跑出來的東西。<strong>改上面任何一個步驟，SQL 和這張表會同時跟著變。</strong>',
       render: box => box.appendChild(miniTable('最終結果', R, {tint:(r,i)=>TINTS[i % TINTS.length]}))
     });
   }
-  if(!steps.length) steps.push({title:'—', cap:'畫布上還沒有能跑的流程。先放一張資料表，再接上積木。', render:()=>{}});
+  if(!steps.length) steps.push({title:'—', cap:'畫布上還沒有能跑的流程。先放一張資料表，再接上步驟。', render:()=>{}});
   return steps;
 }
 
@@ -2708,7 +2737,7 @@ function renderStage(){
   const flow = document.getElementById('flow');
   flow.innerHTML = '';
   try { s.render(flow); }
-  catch(err){ flow.innerHTML = '<p class="empty">這一步畫不出來，先檢查積木有沒有接好。</p>'; }
+  catch(err){ flow.innerHTML = '<p class="empty">這一步畫不出來，先檢查步驟有沒有接好。</p>'; }
   document.getElementById('foot').textContent = '這些數字是真的算出來的，不是假圖 —— 就是右邊那段 SQL 會回給你的結果。';
   document.getElementById('btn-prev').disabled = i === 0;
   document.getElementById('btn-next').disabled = i === steps.length - 1;
@@ -2727,7 +2756,7 @@ function settleLayout(){
   layoutGraph(state.nodes, state.edges);
   renderNodes();       /* 先畫出來才量得到寬高 */
   snapLayout();
-  renderNodes();       /* 有些積木長高了，接點位置要用新高度重算 */
+  renderNodes();       /* 有些步驟長高了，接點位置要用新高度重算 */
 }
 function loadPreset(fn){
   setSrcLabel('');
@@ -2783,7 +2812,7 @@ function refresh(keepInspector){
 }
 
 /* ============================================================
-   10. 反解：SQL -> 積木
+   10. 反解：SQL -> 步驟
    ============================================================ */
 const KEYWORDS = new Set(('SELECT FROM WHERE GROUP ORDER BY HAVING LIMIT OFFSET FETCH FIRST NEXT ROWS ROW ONLY '+
   'UNION ALL JOIN INNER LEFT RIGHT FULL OUTER CROSS ON USING AS WITH AND OR NOT CASE WHEN THEN ELSE END '+
@@ -2998,7 +3027,7 @@ function parseSQLText(text){
     if(t.t === 'str'){ p++; return {kind:'lit', v:t.v}; }
     if(isOp('(')){ p++; const e = parseExpr(); needOp(')'); return e; }
     if(t.t === 'word' && !t.quoted && ['IN','EXISTS','BETWEEN','LIKE','NOT'].indexOf(t.v.toUpperCase()) >= 0)
-      fail(t.v.toUpperCase()+' 目前還做不出對應的積木');
+      fail(t.v.toUpperCase()+' 目前還做不出對應的步驟');
     if(t.t === 'word'){
       if(isOp('(',1)){
         const fn = take().v.toUpperCase();
@@ -3128,7 +3157,7 @@ function exprName(e){
   return 'expr';
 }
 
-/* AST -> 積木圖 */
+/* AST -> 步驟圖 */
 function astToGraph(parsed){
   const warn = parsed.warn.slice();
   const nodes = [], edges = [], tables = {}, cte = {}, aliasOf = {};
@@ -3141,14 +3170,14 @@ function astToGraph(parsed){
     if(!hints[col]) hints[col] = [];
     vals.forEach(v=>{ if(v !== '' && v !== null && v !== undefined && hints[col].indexOf(v) < 0) hints[col].push(v); });
   }
-  /* 一個條件可能要好幾塊積木：BETWEEN 就是 >= 和 <= 兩塊 */
+  /* 一個條件可能要好幾個步驟：BETWEEN 就是 >= 和 <= 兩塊 */
   function condFilters(c){
     const col = exprName(c.left);
     if(c.kind === 'between'){
       if(c.neg){ warn.push('NOT BETWEEN 要用 OR 才畫得出來 — 這個條件被略過，畫面上的列會比實際多'); return []; }
       const lo = litOf(c.lo), hi = litOf(c.hi);
       noteHint(col, [lo, hi]);
-      warn.push('BETWEEN 被拆成兩塊積木（>= 和 <=）— 這就是它真正的意思');
+      warn.push('BETWEEN 被拆成兩個步驟（>= 和 <=）— 這就是它真正的意思');
       const q2 = e => e.kind === 'lit' && typeof e.v === 'string';
       return [{col:col, op:'>=', val:lo, str:q2(c.lo)}, {col:col, op:'<=', val:hi, str:q2(c.hi)}];
     }
@@ -3274,7 +3303,7 @@ function astToGraph(parsed){
         });
         if(n.col) noteHint(n.col, e.branches.map(b=>b.cond.right.kind === 'lit' ? b.cond.right.v : null).filter(v=>v !== null));
         if(e.branches.some(b=>exprName(b.cond.left) !== exprName(e.branches[0].cond.left)))
-          warn.push('CASE 的每個 WHEN 看的欄位不一樣，積木只支援看同一欄 — 用了第一個');
+          warn.push('CASE 的每個 WHEN 看的欄位不一樣，步驟只支援看同一欄 — 用了第一個');
         conn(cur, n); cur = n;
         cols = cols ? cols.concat([n.as]) : null;
       } else if(e.kind === 'arith'){
@@ -3320,14 +3349,14 @@ function astToGraph(parsed){
         dir: e.w.dir,
         as: it.alias || exprName(e)
       });
-      if(!rankish && AGG_FNS.indexOf(e.fn) < 0) warn.push('視窗函數 '+e.fn+'() 沒有對應積木，先當成 ROW_NUMBER');
+      if(!rankish && AGG_FNS.indexOf(e.fn) < 0) warn.push('視窗函數 '+e.fn+'() 沒有對應的步驟，先當成 ROW_NUMBER');
       conn(cur, n); cur = n;
       cols = cols ? cols.concat([n.as]) : null;
     });
 
     /* SELECT 清單不是 * 就補一塊「選欄位」。
        少了這塊，反解出來的 SQL 會變成整張表抓 —— 原本只要 4 欄的查詢會拖回 40 欄。
-       有 GROUP BY 時不用補：groupby 積木本來就只吐 key + 聚合那幾欄。 */
+       有 GROUP BY 時不用補：groupby 步驟本來就只吐 key + 聚合那幾欄。 */
     const hasStar = c.items.some(it=>it.kind === 'star');
     if(!hasStar && !c.groupBy.length && !aggs.length){
       const keep = [];
@@ -3337,7 +3366,7 @@ function astToGraph(parsed){
         if(nm && keep.indexOf(nm) < 0) keep.push(nm);
       });
       /* 欄位跟上一步一模一樣就不補 —— 不然 JOIN 自己列出來的欄位清單
-         會被誤認成挑欄位，重新匯入一次就多長一塊積木。 */
+         會被誤認成挑欄位，重新匯入一次就多長一個步驟。 */
       if(keep.length && (!colsKnown || !sameCols(cols, keep))){ const pk = add('select', {cols:keep}); conn(cur, pk); cur = pk; }
     }
 
@@ -3422,6 +3451,17 @@ document.getElementById('btn-import').addEventListener('click', openModal);
 document.getElementById('modal-close').addEventListener('click', closeModal);
 overlay.addEventListener('click', e=>{ if(e.target === overlay) closeModal(); });
 document.addEventListener('keydown', e=>{ if(e.key === 'Escape' && !overlay.hidden) closeModal(); });
+/* Delete / Backspace 刪掉選中的步驟 —— 但正在打字時不算，不然會刪掉整個步驟 */
+document.addEventListener('keydown', e=>{
+  if(e.key !== 'Delete' && e.key !== 'Backspace') return;
+  if(!overlay.hidden) return;
+  const el = document.activeElement;
+  if(el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return;
+  const n = nodeById(state.sel);
+  if(!n || n.type === 'output') return;
+  e.preventDefault();
+  removeNode(n.id);
+});
 function loadSample(k){
   sqlin.value = SAMPLES[k];
   parseOut.innerHTML = '';
@@ -3496,12 +3536,12 @@ function applyStatement(idx){
   state.sel = null;
   state.step = 0;
   renderSchema();
-  settleLayout();          /* 量過真實寬高再吸一次，積木才會整齊貼在一起 */
+  settleLayout();          /* 量過真實寬高再吸一次，步驟才會整齊貼在一起 */
   refresh();
   canvas.scrollTo({left:0, top:0});
 
   const blocks = graph.nodes.filter(n=>n.type !== 'output' && n.type !== 'table').length;
-  let html = '<div class="pok"><b>解析成功</b> — 產生 '+blocks+' 塊積木、'+
+  let html = '<div class="pok"><b>解析成功</b> — 產生 '+blocks+' 個步驟、'+
     graph.nodes.filter(n=>n.type === 'table').length+' 張表。畫布已經換好了。';
   if(graph.madeUp.length)
     html += '<br>這幾張表不在你的 schema 裡：<code>'+graph.madeUp.join('</code>、<code>')+
