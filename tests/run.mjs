@@ -1174,6 +1174,54 @@ test('join: chained joins work and do not spell out the left side', () => {
   return `2 chained joins, ${generated.split('\n').length} lines, round-trips`;
 });
 
+/* Tidying a chain of JOINs used to leave tables stacked on top of each other:
+   laying out a two-input step shifts its sources, and those sources had already
+   been placed and checked, so nothing looked at them again. Sources are now
+   positioned first, in the order they are consumed, and the overlap sweep runs
+   after every step has been placed. */
+test('tidy: chained joins lay out without overlapping', () => {
+  const overlaps = () => {
+    const out = [];
+    api.state.nodes.forEach((p, i) => api.state.nodes.slice(i + 1).forEach(q => {
+      const P = api.nodeBox(p.id), Q = api.nodeBox(q.id);
+      if (P.n.x < Q.n.x + Q.w && Q.n.x < P.n.x + P.w &&
+          P.n.y < Q.n.y + Q.h && Q.n.y < P.n.y + P.h) out.push(`${p.type}/${q.type}`);
+    }));
+    return out;
+  };
+  const join = (alias, table, on) => `JOIN ${table} ${alias} ON ${on}`;
+  const shapes = {
+    two:  'SELECT * FROM analytic.trans_detail a ' + join('b', 'analytic.m_org_last', 'a.ostore_no=b.ostore_no'),
+    three:'SELECT * FROM analytic.trans_detail a ' + join('b', 'analytic.m_org_last', 'a.ostore_no=b.ostore_no') +
+          ' ' + join('c', 'analytic.m_cmdt_offline', 'a.fm_code=c.fm_code'),
+    five: 'SELECT * FROM analytic.trans_detail a ' + join('b', 'analytic.m_org_last', 'a.ostore_no=b.ostore_no') +
+          ' ' + join('c', 'analytic.m_cmdt_offline', 'a.fm_code=c.fm_code') +
+          ' ' + join('d', 'analytic.m_member', 'a.member_no=d.member_no') +
+          ' ' + join('e', 'analytic.store_weather', 'a.ostore_no=e.ostore_no'),
+  };
+  const report = [];
+  for (const [name, sql] of Object.entries(shapes)) {
+    graphFromSQL(api, sql);
+    api.settleLayout();
+    assert.deepEqual(json(overlaps()), [], `${name}: steps must not sit on top of each other`);
+    const loose = api.state.edges.filter(e => !api.isSnapped(e));
+    assert.deepEqual(json(loose), [], `${name}: every link should still be touching`);
+    report.push(`${name}=${api.state.nodes.length} steps`);
+  }
+
+  /* a branch must not shove the main chain around to make room for itself */
+  graphFromSQL(api, shapes.three);
+  const table = api.state.nodes.find(n => n.type === 'table');
+  api.state.nodes.push({id:'side', type:'filter', col:'county', op:'=', val:'台北', x:0, y:0});
+  api.state.edges.push({from:table.id, to:'side', port:0});
+  api.settleLayout();
+  assert.deepEqual(json(overlaps()), [], 'the branch is placed clear, not stacked');
+  const drawn = api.state.edges.filter(e => !api.isSnapped(e));
+  assert.equal(drawn.length, 1, `only the branch link should need a wire, got ${drawn.length}`);
+  assert.equal(drawn[0].to, 'side', 'and it must be the branch that yields, not the chain');
+  return report.join(', ') + '; branch costs exactly one wire';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {

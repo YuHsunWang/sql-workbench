@@ -1703,13 +1703,31 @@ function snapLayout(){
   };
   state.nodes.forEach(n=>deep(n.id));
 
+  /* 1. 每一塊貼齊自己的來源（refit 會順手把來源的右緣對齊） */
+  [].concat(state.nodes).sort((a,b)=>depth[a.id] - depth[b.id]).forEach(n=>refit(n.id));
+
+  /* 2. 通到「結果」的主線位置是算準的，不能被支線推開。先讓主線佔好位子，
+        再把支線排進剩下的空間。被推開的支線不再相鄰，那條線會自己畫出來。 */
+  const main = new Set();
+  const outNode = state.nodes.find(n=>n.type === 'output');
+  (function mark(id){
+    if(!id || main.has(id)) return;
+    main.add(id);
+    state.edges.filter(e=>e.to === id).forEach(e=>mark(e.from));
+  })(outNode && outNode.id);
+
   const placed = [];
-  [].concat(state.nodes).sort((a,b)=>depth[a.id] - depth[b.id]).forEach(n=>{
-    refit(n.id);
-    avoidOverlap(n.id, placed);
-    const b = nodeBox(n.id);
-    if(b) placed.push(b);
-  });
+  const keep = n => { const b = nodeBox(n.id); if(b) placed.push(b); };
+  state.nodes.filter(n=>main.has(n.id)).forEach(keep);
+  [].concat(state.nodes).filter(n=>!main.has(n.id))
+    .sort((a,b)=>depth[a.id] - depth[b.id])
+    .forEach(n=>{ refit(n.id); avoidOverlap(n.id, placed); keep(n); });
+
+  /* 3. 保險：萬一主線自己還是撞在一起，寧可多畫一條線，也不要疊著看不出誰接誰 */
+  const done = [];
+  [].concat(state.nodes)
+    .sort((a,b)=>((main.has(b.id) ? 1 : 0) - (main.has(a.id) ? 1 : 0)) || (depth[a.id] - depth[b.id]))
+    .forEach(n=>{ avoidOverlap(n.id, done); const b = nodeBox(n.id); if(b) done.push(b); });
 }
 
 /* ---- 新東西要看得見 ----
@@ -1760,6 +1778,13 @@ function refit(id){
   if(boxes.some(b=>!b)) return;
   /* x：貼在最右邊那個來源後面（步驟寬度固定，同一層的右緣本來就齊） */
   n.x = Math.max(0, Math.round(Math.max.apply(null, boxes.map(b=>b.n.x + b.w + SNAP_GAP))));
+  /* 來源的右緣要對齊，不然只有最右邊那個貼得上，其他還在上一欄。
+     只推「單獨餵這一塊」的來源，共用的來源動了會害另一個消費者對不上。 */
+  boxes.forEach(A=>{
+    const want = n.x - A.w - SNAP_GAP;
+    if(want > A.n.x && state.edges.filter(e=>e.from === A.n.id).length === 1)
+      A.n.x = Math.round(want);
+  });
   for(let k = 1; k < boxes.length; k++)
     shiftUpstream(boxes[k].n.id, (boxes[k-1].n.y + boxes[k-1].h + SNAP_GAP) - boxes[k].n.y);
   const centers = boxes.map(b=>b.n.y + b.h/2);
@@ -1800,6 +1825,7 @@ function canvasPt(e){
   return {x: e.clientX - r.left + canvas.scrollLeft, y: e.clientY - r.top + canvas.scrollTop};
 }
 canvas.addEventListener('pointerdown', e=>{
+  if(dock.dataset.open) openDrawer('');    /* 動到畫布就把抽屜收起來，別擋著 */
   const kill = e.target.closest('.nkill');
   if(kill){ removeNode(kill.dataset.kill); e.preventDefault(); return; }
   const port = e.target.closest('.port');
@@ -1922,6 +1948,7 @@ canvas.addEventListener('drop', e=>{
   }
   refresh();
   flashNode(n.id);
+  openDrawer('');                          /* 拖進來放好了，抽屜就可以收了 */
 });
 wires.addEventListener('click', e=>{
   const g = e.target.closest('g.w');
