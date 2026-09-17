@@ -1487,6 +1487,11 @@ const surface = document.getElementById('surface');
 const wires   = document.getElementById('wires');
 const canvas  = document.getElementById('canvas');
 
+/* 資料表沒特別寫註記就用 schema 的中文表名 —— 光看 analytic.trans_detail
+   認不出是什麼。自己寫過的（包含清成空白）就照自己寫的。 */
+const autoNote = n => (n.type === 'table' && schemaOf(n)) ? (schemaOf(n).label || '') : '';
+const noteOf = n => n.note != null ? n.note : autoNote(n);
+
 function nodeSummary(n){
   switch(n.type){
     case 'table': {
@@ -1559,7 +1564,8 @@ function renderNodes(){
     el.style.cssText = 'left:'+n.x+'px;top:'+n.y+'px;--c:'+m.c;
     el.style.minHeight = n.minH ? n.minH+'px' : '';
     /* 註記放在標題列旁邊 —— 一長串代號看不出是哪一組，名字才認得出來 */
-    const note = n.note ? '<span class="nnote">'+esc(n.note)+'</span>' : '';
+    const txt = noteOf(n);
+    const note = txt ? '<span class="nnote" title="'+esc(txt)+'">'+esc(txt)+'</span>' : '';
     let html = '<div class="nhead">'+ICONS[n.type]+'<b>'+m.label+'</b>'+note+'</div>'+
                '<div class="nbody">'+nodeSummary(n)+'</div>';
     for(let i=0;i<m.ins;i++){
@@ -2101,7 +2107,9 @@ function renderInspector(){
   /* 註記：常用操作會自動填上名字，也可以自己寫，寫什麼畫布上就顯示什麼 */
   if(n.type !== 'output')
     h += '<div class="rowf"><label>註記</label>'+
-         '<input type="text" data-f="note" value="'+esc(n.note || '')+'" placeholder="畫布上會顯示，例如 計算營收" spellcheck="false"></div>';
+         '<input type="text" data-f="note" value="'+esc(n.note || '')+'" placeholder="'+
+         esc(autoNote(n) ? autoNote(n)+'（表的中文名，自動帶）' : '畫布上會顯示，例如 計算營收')+
+         '" spellcheck="false"></div>';
 
   if(n.type !== 'output') h += '<div class="delbar"><button class="btn ghost" data-del-node>刪掉這個步驟</button></div>';
   inspector.innerHTML = h;

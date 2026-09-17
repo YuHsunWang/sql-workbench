@@ -1096,6 +1096,34 @@ test('notes: a note survives the trip out to SQL and back', () => {
   return 'note round-trips readable; a mismatched manifest is ignored';
 });
 
+/* analytic.trans_detail says nothing about what the table holds. The schema
+   already carries the Chinese name, so a table step wears it without being
+   asked — but a name the user typed themselves always wins, including a blank
+   one they deliberately cleared. */
+test('notes: a table step shows its Chinese name unless told otherwise', () => {
+  const schema = api.demoSchema();
+  installGraph(api, {
+    nodes:[{id:'a', type:'table', table:'analytic.trans_detail'},
+           {id:'b', type:'table', table:'analytic.trans_detail', note:'我自己取的'},
+           {id:'c', type:'table', table:'analytic.trans_detail', note:''},
+           {id:'d', type:'table', table:'沒這張表'},
+           {id:'o', type:'output'}],
+    edges:[],
+  }, schema);
+  const shown = id => api.noteOf(api.state.nodes.find(n => n.id === id));
+  assert.equal(shown('a'), '交易資料', 'the schema label is used by default');
+  assert.equal(shown('b'), '我自己取的', 'a typed note wins');
+  assert.equal(shown('c'), '', 'a deliberately cleared note stays cleared');
+  assert.equal(shown('d'), '', 'an unknown table invents nothing');
+
+  /* only tables get one; every other step starts blank */
+  installGraph(api, {nodes:[{id:'f', type:'filter', col:'x', op:'=', val:1}], edges:[]}, schema);
+  assert.equal(api.noteOf(api.state.nodes[0]), '');
+
+  const labelled = Object.keys(schema).filter(t => schema[t].label).length;
+  return `${labelled}/${Object.keys(schema).length} tables carry a Chinese name`;
+});
+
 let passed = 0;
 for (const item of cases) {
   try {

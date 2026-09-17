@@ -84,7 +84,7 @@ export function loadApp(stored = {}) {
     'isSnapped', 'snapFor', 'snapLayout', 'settleLayout', 'nodeBox', 'SNAP_GAP',
     'QUICK', 'QUICK_DEFAULT', 'codeRange', 'parseCodes', 'readCodes', 'expandRange',
     'validQuick', 'quickCodes', 'quickVal', 'noteManifest', 'applyNotes', 'chainOf',
-    'nodeSummary', 'removeNode', 'addNode', 'viewCenter',
+    'nodeSummary', 'removeNode', 'addNode', 'viewCenter', 'noteOf', 'autoNote',
   ];
   const marker = '})();';
   const at = match[1].lastIndexOf(marker);
