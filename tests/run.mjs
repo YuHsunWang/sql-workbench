@@ -960,6 +960,40 @@ test('delete: removing a middle step reconnects the two either side', () => {
   return 'middle step heals the chain; source just drops; 結果 refuses';
 });
 
+/* A step added out of view reads as nothing having happened, so it gets added
+   again. Anything added without a step to attach to lands in the middle of what
+   the user is actually looking at. */
+test('add: a step with nowhere to attach lands in the visible middle', () => {
+  const schema = {t:{label:'', cols:[{name:'x', ch:'', type:'INT'}], rows:[[1]]}};
+  installGraph(api, {nodes:[{id:'o', type:'output', x:0, y:0}], edges:[]}, schema);
+  api.state.sel = null;
+  api.addNode('table', {table:'t'});
+  const added = api.state.nodes.find(n => n.type === 'table');
+  const centre = api.viewCenter();
+  assert.deepEqual(json([added.x, added.y]), json([centre.x, centre.y]));
+  assert.equal(added.x > 20 && added.y > 20, true, 'must not be parked at the origin');
+  return `landed at ${added.x},${added.y} — the middle of the view`;
+});
+
+/* A quick operation puts a long list of codes on the canvas. Without its name
+   the step is unreadable, and two of them side by side are indistinguishable. */
+test('add: a quick operation carries its name onto the canvas', () => {
+  const schema = {t:{label:'', cols:[{name:'kind_code', ch:'', type:'VARCHAR'}], rows:[['02'], ['58']]}};
+  installGraph(api, {nodes:[{id:'t', type:'table', table:'t'}, {id:'o', type:'output'}],
+                     edges:[{from:'t', to:'o', port:0}]}, schema);
+  api.state.sel = 't';
+  const preset = api.QUICK_DEFAULT.find(q => q.label === '計算營收');
+  api.addNode('filter', {col:preset.col, op:preset.op, val:api.quickVal(preset), note:preset.label});
+
+  const step = api.state.nodes.find(n => n.type === 'filter');
+  assert.equal(step.note, '計算營收');
+  assert.equal(api.state.sel, step.id, 'the new step is selected');
+  /* it was spliced into the chain, not left loose */
+  assert.equal(api.state.edges.some(e => e.from === 't' && e.to === step.id), true);
+  assert.equal(api.state.edges.some(e => e.from === step.id && e.to === 'o'), true);
+  return `note="${step.note}", spliced between the table and 結果`;
+});
+
 let passed = 0;
 for (const item of cases) {
   try {

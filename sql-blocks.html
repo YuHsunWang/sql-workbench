@@ -267,6 +267,12 @@ textarea{
 .nhead{display:flex;align-items:center;gap:7px;padding:8px 10px;border-bottom:1px solid var(--line-soft);color:var(--c)}
 .nhead svg{width:17px;height:17px;flex:none}
 .nhead b{font-family:var(--ui);font-weight:700;font-size:11px;letter-spacing:.05em;text-transform:uppercase}
+.nnote{
+  margin-left:auto;max-width:92px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-family:var(--ui);font-weight:700;font-size:10px;letter-spacing:.02em;
+  color:var(--c);background:color-mix(in srgb,var(--c) 13%,transparent);
+  border-radius:999px;padding:2px 7px;
+}
 .nbody{padding:8px 10px 10px;font-size:11.5px;color:var(--ink-2);line-height:1.5;overflow-wrap:anywhere}
 .nbody code{font-family:var(--mono);font-size:11px;color:var(--ink)}
 .nbody .warn{color:var(--drop)}
@@ -292,6 +298,13 @@ textarea{
 }
 .node:hover > .nkill,.node.sel > .nkill{opacity:1;pointer-events:auto}
 .nkill:hover{border-color:var(--drop);background:var(--drop);color:#fff}
+/* 剛加進來的閃一下 */
+@keyframes justadded{
+  0%   {box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 60%,transparent),var(--shadow-m)}
+  55%  {box-shadow:0 0 0 9px color-mix(in srgb,var(--accent) 0%,transparent),var(--shadow-m)}
+  100% {box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 0%,transparent),var(--shadow-m)}
+}
+.node.justadded{animation:justadded .9s ease-out 2}
 
 /* ---------- inspector ---------- */
 .rowf{display:flex;align-items:center;gap:8px;margin-bottom:8px}
@@ -472,9 +485,9 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
   <div class="work">
 
     <div class="dock" id="dock" data-open="">
+      <button class="dock-tab" data-drawer="tables" aria-expanded="false" title="點一下開關">資料表</button>
       <button class="dock-tab" data-drawer="blocks" aria-expanded="false" title="點一下開關">步驟</button>
       <button class="dock-tab" data-drawer="quick"  aria-expanded="false" title="點一下開關">常用操作</button>
-      <button class="dock-tab" data-drawer="tables" aria-expanded="false" title="點一下開關">資料表</button>
 
       <div class="dock-body rail" data-drawer="quick">
       <section class="panel">
@@ -1504,7 +1517,10 @@ function renderNodes(){
     el.dataset.id = n.id;
     el.style.cssText = 'left:'+n.x+'px;top:'+n.y+'px;--c:'+m.c;
     el.style.minHeight = n.minH ? n.minH+'px' : '';
-    let html = '<div class="nhead">'+ICONS[n.type]+'<b>'+m.label+'</b></div><div class="nbody">'+nodeSummary(n)+'</div>';
+    /* 註記放在標題列旁邊 —— 一長串代號看不出是哪一組，名字才認得出來 */
+    const note = n.note ? '<span class="nnote">'+esc(n.note)+'</span>' : '';
+    let html = '<div class="nhead">'+ICONS[n.type]+'<b>'+m.label+'</b>'+note+'</div>'+
+               '<div class="nbody">'+nodeSummary(n)+'</div>';
     for(let i=0;i<m.ins;i++){
       const linked = state.edges.some(x=>x.to === n.id && x.port === i);
       html += '<div class="port in'+(linked ? ' linked' : '')+'" data-port="'+i+'" data-node="'+n.id+'"'+
@@ -1644,6 +1660,34 @@ function snapLayout(){
     const b = nodeBox(n.id);
     if(b) placed.push(b);
   });
+}
+
+/* ---- 新東西要看得見 ----
+   放在畫面外等於沒加：使用者按了鈕卻什麼都沒發生，只好再按一次。 */
+function viewCenter(w, h){
+  const sl = numOr(canvas.scrollLeft, 0), st = numOr(canvas.scrollTop, 0);
+  const cw = numOr(canvas.clientWidth, 900), ch = numOr(canvas.clientHeight, 460);
+  return {x:Math.max(20, Math.round(sl + cw/2 - (w || 164)/2)),
+          y:Math.max(20, Math.round(st + ch/2 - (h || 86)/2))};
+}
+/* 捲到看得到這一塊為止，已經看得到就不動 */
+function revealNode(id){
+  const b = nodeBox(id);
+  if(!b || typeof canvas.scrollTo !== 'function') return;
+  const M = 40, cw = numOr(canvas.clientWidth, 900), ch = numOr(canvas.clientHeight, 460);
+  let sl = numOr(canvas.scrollLeft, 0), st = numOr(canvas.scrollTop, 0);
+  if(b.n.x + b.w + M > sl + cw) sl = b.n.x + b.w + M - cw;
+  if(b.n.x - M < sl)            sl = b.n.x - M;
+  if(b.n.y + b.h + M > st + ch) st = b.n.y + b.h + M - ch;
+  if(b.n.y - M < st)            st = b.n.y - M;
+  canvas.scrollTo({left:Math.max(0, sl), top:Math.max(0, st), behavior:'smooth'});
+}
+/* 閃一下，眼睛才抓得到剛剛多了什麼 */
+function flashNode(id){
+  const el = surface.querySelector('.node[data-id="'+id+'"]');
+  if(!el || !el.classList) return;
+  el.classList.add('justadded');
+  setTimeout(()=>{ if(el.classList) el.classList.remove('justadded'); }, 900);
 }
 
 /* 兩塊搶到同一個位置時（同一個來源分給兩塊就會這樣），把後來的往下挪。
@@ -1827,6 +1871,7 @@ canvas.addEventListener('drop', e=>{
     state.edges.push({from:s.from, to:s.to, port:s.port});
   }
   refresh();
+  flashNode(n.id);
 });
 wires.addEventListener('click', e=>{
   const g = e.target.closest('g.w');
@@ -2011,6 +2056,11 @@ function renderInspector(){
     const r = evalNode(n);
     h += '<p class="note" style="margin-top:0">最後結果：<b>'+r.rows.length+'</b> 列、<b>'+r.cols.length+'</b> 欄。<br>SQL 就在下面，動畫在最底下。</p>';
   }
+
+  /* 註記：常用操作會自動填上名字，也可以自己寫，寫什麼畫布上就顯示什麼 */
+  if(n.type !== 'output')
+    h += '<div class="rowf"><label>註記</label>'+
+         '<input type="text" data-f="note" value="'+esc(n.note || '')+'" placeholder="畫布上會顯示，例如 計算營收" spellcheck="false"></div>';
 
   if(n.type !== 'output') h += '<div class="delbar"><button class="btn ghost" data-del-node>刪掉這個步驟</button></div>';
   inspector.innerHTML = h;
@@ -2242,7 +2292,8 @@ quickBox.addEventListener('click', e=>{
   const go = e.target.closest('[data-q]');
   if(!go) return;
   const q = QUICK[Number(go.dataset.q)];
-  addNode('filter', {col:q.col, op:q.op, val:quickVal(q)});
+  /* 把名字一起帶上畫布 —— 不然看到的只是一長串代號，認不出是哪一組 */
+  addNode('filter', {col:q.col, op:q.op, val:quickVal(q), note:q.label});
 });
 
 document.getElementById('q-new').addEventListener('click', ()=>showForm(null));
@@ -2313,11 +2364,16 @@ function addNode(type, extra){
     state.edges.push({from:sel.id, to:n.id, port:0});
     renderNodes(); refit(n.id);                  /* 貼齊前一塊，接點才會對上 */
   } else {
-    n.x = 26; n.y = 40 + state.nodes.filter(m=>m.type === 'table').length * 174;
+    const c = viewCenter();                      /* 放在看得到的地方，不然等於沒加 */
+    n.x = c.x; n.y = c.y;
     state.nodes.push(n);
+    renderNodes();
+    avoidOverlap(n.id, state.nodes.filter(m=>m.id !== n.id).map(m=>nodeBox(m.id)).filter(Boolean));
   }
   state.sel = n.id;
   refresh();
+  revealNode(n.id);
+  flashNode(n.id);
 }
 
 /* --- DDL parser --- */

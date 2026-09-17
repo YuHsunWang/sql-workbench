@@ -5,6 +5,7 @@ function element() {
   const target = {
     value: '', innerHTML: '', textContent: '', hidden: false, disabled: false,
     dataset: {}, style: {}, children: [], clientWidth: 1200, clientHeight: 700,
+    scrollLeft: 0, scrollTop: 0, scrollTo() {},
     /* nodes are a fixed width and a natural height, but grow when the layout
        gives them a min-height — the snapping geometry depends on that */
     offsetWidth: 164,
@@ -77,7 +78,7 @@ export function loadApp() {
     'demoSchema', 'sampleValue', 'joinLayout',
     'isSnapped', 'snapFor', 'snapLayout', 'settleLayout', 'nodeBox', 'SNAP_GAP',
     'QUICK', 'QUICK_DEFAULT', 'codeRange', 'parseCodes', 'quickCodes', 'quickVal',
-    'nodeSummary', 'removeNode',
+    'nodeSummary', 'removeNode', 'addNode', 'viewCenter',
   ];
   const marker = '})();';
   const at = match[1].lastIndexOf(marker);
