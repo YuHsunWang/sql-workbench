@@ -833,6 +833,48 @@ test('quick: every code reaches the SQL quoted, even the numeric-looking ones', 
   return `${api.QUICK.length} presets: all codes quoted, operators round-trip`;
 });
 
+/* v16 shipped with both drawers stuck open. `.dock-body{display:none}` and
+   `.rail{display:flex}` have the same specificity, the same element carries both
+   classes, and `.rail` is written later — so it won and the drawers never
+   closed. Nothing in the suite could see it, and neither could I: I cannot look
+   at the page. So the invariant is checked directly — no element may depend on
+   source order between two equally specific display rules. */
+test('css: no element depends on source order between two display rules', () => {
+  const html = fs.readFileSync(new URL('../sql-blocks.html', import.meta.url), 'utf8');
+  const style = /<style>([\s\S]*?)<\/style>/.exec(html)[1];
+  const markup = html.slice(html.indexOf('</style>'));
+  /* comments first: a comment sitting above a rule otherwise gets swallowed into
+     the selector capture and the rule stops looking like a single class */
+  const noComments = style.replace(/\/\*[\s\S]*?\*\//g, '');
+  /* @media rules apply conditionally, so they are not part of this comparison */
+  const flat = noComments.replace(/@media[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}/g, '');
+
+  /* last single-class rule per class wins, which is what the cascade does */
+  const singles = new Map();
+  for (const rule of flat.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const display = /(?:^|;)\s*display\s*:\s*([\w-]+)/.exec(rule[2]);
+    if (!display) continue;
+    for (const part of rule[1].split(',')) {
+      const selector = part.trim();
+      if (/^\.[\w-]+$/.test(selector)) singles.set(selector.slice(1), display[1]);
+    }
+  }
+
+  const risky = [];
+  for (const el of markup.matchAll(/class="([^"]+)"/g)) {
+    const hits = el[1].trim().split(/\s+/).filter(c => singles.has(c));
+    if (hits.length < 2) continue;
+    if (new Set(hits.map(c => singles.get(c))).size > 1) {
+      risky.push(`class="${el[1]}": ` + hits.map(c => `.${c}=${singles.get(c)}`).join(' vs '));
+    }
+  }
+  assert.deepEqual(json(risky), [], risky.join(' | '));
+
+  /* and the drawer specifically must be hidden by a rule that outranks .rail */
+  assert.match(flat, /\.dock\s*>\s*\.dock-body\s*\{[^}]*display\s*:\s*none/);
+  return `${singles.size} single-class display rules, no order-dependent clashes`;
+});
+
 let passed = 0;
 for (const item of cases) {
   try {

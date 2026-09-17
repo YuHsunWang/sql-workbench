@@ -107,7 +107,10 @@ button{font:inherit;color:inherit;cursor:pointer}
 }
 .dock-tab:hover{border-color:var(--accent);color:var(--accent-ink)}
 .dock-tab[aria-expanded="true"]{border-color:var(--accent);color:var(--accent-ink);background:var(--accent-soft)}
-.dock-body{
+/* 注意：抽屜同時掛著 .rail，而 .rail 在後面也設了 display:flex。
+   權重一樣的話後面那條會贏，抽屜就永遠關不起來 —— 所以這裡一定要寫成
+   .dock > .dock-body，比單一個 class 更明確。 */
+.dock > .dock-body{
   position:absolute;left:52px;top:0;width:min(306px,calc(100vw - 76px));
   max-height:min(78vh,660px);overflow-y:auto;overscroll-behavior:contain;
   display:none;
