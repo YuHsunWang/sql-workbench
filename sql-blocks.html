@@ -2345,7 +2345,7 @@ function renderQuick(){
           '<button class="qx" data-qedit="'+i+'" aria-label="改這組">✎</button>'+
           '<button class="qx" data-qdel="'+i+'" aria-label="刪掉這組">×</button>'+
         '</div>').join('')+'</div>'
-    : '<p class="hint" style="margin:0">還沒有濾網。按下面的「新增濾網」加一組。</p>';
+    : '<p class="hint" style="margin:0">還沒有濾網。按下面的「新增一組」加一組。</p>';
 }
 
 function showForm(i){
@@ -2623,7 +2623,7 @@ function buildSteps(){
   const tables = state.nodes.filter(n=>n.type === 'table' && state.schema[n.table]);
   if(tables.length) steps.push({
     title:'來源',
-    cap:'先看原料。這是資料庫裡本來就長這樣的表，<strong>一列就是一筆紀錄</strong>。後面每一步都只是把這些列搬來搬去。',
+    cap:'先看原料。<strong>欄位是你 schema 裡真的有的，列是編出來的示意資料</strong>。後面每一步都只是把這些列搬來搬去。',
     render: box => tables.forEach((t,i)=>{
       if(i) box.appendChild(mark('＋'));
       const s = state.schema[t.table];
@@ -2809,7 +2809,7 @@ function buildSteps(){
     const R = evalNode(out);
     if(R.cols.length) steps.push({
       title:'完成',
-      cap:'這就是右邊那段 SQL 跑出來的東西。<strong>改上面任何一個步驟，SQL 和這張表會同時跟著變。</strong>',
+      cap:'這是下面那段 SQL 跑在<strong>示意資料</strong>上的樣子。<strong>改上面任何一個步驟，SQL 和這張表會同時跟著變。</strong>',
       render: box => box.appendChild(miniTable('最終結果', R, {tint:(r,i)=>TINTS[i % TINTS.length]}))
     });
   }
@@ -2889,7 +2889,10 @@ function renderStage(){
   flow.innerHTML = '';
   try { s.render(flow); }
   catch(err){ flow.innerHTML = '<p class="empty">這一步畫不出來，先檢查步驟有沒有接好。</p>'; }
-  document.getElementById('foot').textContent = '這些數字是真的算出來的，不是假圖 —— 就是右邊那段 SQL 會回給你的結果。';
+  /* 這裡不能說「這就是 SQL 會回給你的結果」—— 資料是編的，數字不是真的。
+     真正成立的只有一件事：每一步的算法跟 SQL 一樣。 */
+  document.getElementById('foot').textContent =
+    '資料是示意的，這台工具自己編的，不是你資料庫裡的數字。這裡示範的是每一步「怎麼算」，換成真資料算法一樣。';
   document.getElementById('btn-prev').disabled = i === 0;
   document.getElementById('btn-next').disabled = i === steps.length - 1;
 }

@@ -1124,6 +1124,24 @@ test('notes: a table step shows its Chinese name unless told otherwise', () => {
   return `${labelled}/${Object.keys(schema).length} tables carry a Chinese name`;
 });
 
+/* The step-through runs the real pipeline, but over rows this tool invented.
+   It once told the user "這就是 SQL 會回給你的結果", which is not true of any
+   number on that screen. Whatever the wording becomes, the footer shown under
+   every step has to say the data is illustrative. */
+test('honesty: the step-through says its data is made up', () => {
+  const html = fs.readFileSync(new URL('../sql-blocks.html', import.meta.url), 'utf8');
+  const foot = /getElementById\('foot'\)\.textContent\s*=\s*([\s\S]{0,300}?);/.exec(html);
+  assert.ok(foot, "the footer text could not be found");
+  assert.match(foot[1], /示意|編的|編出來/, 'the footer must say the rows are invented');
+  assert.doesNotMatch(foot[1], /不是假圖|會回給你的結果/, 'and must not claim they are real');
+
+  /* and the first step, which introduces the table, says the same */
+  const first = /cap:\s*'先看原料[^']*'/.exec(html);
+  assert.ok(first, 'the opening caption could not be found');
+  assert.match(first[0], /示意|編出來/, 'the opening caption must not present the rows as real');
+  return 'footer and opening caption both state the rows are illustrative';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {
