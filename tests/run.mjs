@@ -790,15 +790,29 @@ test('quick: code ranges expand as fixed-width strings', () => {
   assert.deepEqual(json(api.codeRange('A0', 'A9')), ['A0','A1','A2','A3','A4','A5','A6','A7','A8','A9']);
   assert.equal(api.codeRange('27', '34').length, 8);
 
-  const sizes = Object.fromEntries(api.QUICK.map(q => [q.label, q.codes.length]));
+  const sizes = Object.fromEntries(api.QUICK_DEFAULT.map(q => [q.label, api.quickCodes(q).length]));
   assert.deepEqual(json(sizes), {泛鮮食:34, 飲料:8, 香菸:1, 計算營收:15});
   return `泛鮮食=34 飲料=8 香菸=1 營收排除=15`;
+});
+
+/* The shorthand is what the analyst actually types, commas, ideographic commas,
+   full stops and all — it has to survive being pasted in as written. */
+test('quick: the shorthand accepts the separators people really type', () => {
+  const asTyped = api.parseCodes('02-22，A0-A9，B2. B5. B6');
+  assert.equal(asTyped.length, 34);
+  assert.deepEqual(json(asTyped.slice(0, 2)), ['02', '03']);
+  assert.deepEqual(json(asTyped.slice(-3)), ['B2', 'B5', 'B6']);
+  /* duplicates collapse, quotes are tolerated, blanks ignored */
+  assert.deepEqual(json(api.parseCodes("'58', 58 ,, 58")), ['58']);
+  /* a lone value that is not a range stays exactly as written */
+  assert.deepEqual(json(api.parseCodes('X1')), ['X1']);
+  return `"02-22，A0-A9，B2. B5. B6" → 34 codes; duplicates collapsed`;
 });
 
 test('quick: every code reaches the SQL quoted, even the numeric-looking ones', () => {
   const schema = {t:{label:'', cols:[{name:'kind_code', ch:'品番代號', type:'VARCHAR'}],
                      rows:[['02'], ['22'], ['58']]}};
-  for (const q of api.QUICK) {
+  for (const q of api.QUICK_DEFAULT) {
     installGraph(api, {
       nodes:[{id:'t', type:'table', table:'t'},
              {id:'f', type:'filter', col:q.col, op:q.op, val:api.quickVal(q)},
@@ -807,7 +821,7 @@ test('quick: every code reaches the SQL quoted, even the numeric-looking ones', 
     }, schema);
     api.state.dialect = 'mssql';
     const sql = api.buildSQL();
-    q.codes.forEach(code => {
+    api.quickCodes(q).forEach(code => {
       assert.match(sql, new RegExp(`'${code}'`), `${q.label}: ${code} must stay quoted`);
     });
     assert.doesNotMatch(sql, /\((\s*\d+\s*,)/, `${q.label}: no bare numeric code`);

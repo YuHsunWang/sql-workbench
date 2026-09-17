@@ -117,13 +117,26 @@ button{font:inherit;color:inherit;cursor:pointer}
 
 /* 快速濾網 */
 .quick{display:flex;flex-direction:column;gap:5px}
-.quick button{
-  display:flex;align-items:baseline;gap:8px;width:100%;text-align:left;cursor:pointer;
+.qrow{display:flex;gap:4px}
+.qgo{
+  display:flex;align-items:baseline;gap:8px;flex:1;min-width:0;text-align:left;cursor:pointer;
   background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:7px 9px;
 }
-.quick button:hover{border-color:var(--f-narrow);background:var(--accent-soft)}
-.quick b{font-family:var(--ui);font-weight:700;font-size:12px;color:var(--ink)}
-.quick i{font-style:normal;font-size:10.5px;color:var(--ink-3);font-family:var(--mono);margin-left:auto}
+.qgo:hover{border-color:var(--f-narrow);background:var(--accent-soft)}
+.qgo b{font-family:var(--ui);font-weight:700;font-size:12px;color:var(--ink);overflow-wrap:anywhere}
+.qgo i{font-style:normal;font-size:10.5px;color:var(--ink-3);font-family:var(--mono);margin-left:auto;flex:none}
+.qx{
+  flex:none;width:26px;cursor:pointer;color:var(--ink-3);font-size:13px;line-height:1;
+  background:var(--surface);border:1px solid var(--line);border-radius:9px;
+}
+.qx:hover{border-color:var(--drop);color:var(--drop)}
+.qacts{display:flex;gap:6px;margin-top:8px}
+.qacts .btn{flex:1;font-size:11.5px;padding:6px 8px}
+.qform{display:flex;flex-direction:column;gap:7px;margin-top:9px;
+  padding:10px;border:1px dashed var(--line);border-radius:10px}
+.qform label{display:flex;flex-direction:column;gap:3px;
+  font-family:var(--ui);font-weight:700;font-size:10.5px;letter-spacing:.06em;color:var(--ink-3)}
+.qform .qacts{margin-top:2px}
 .panel{
   background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
   box-shadow:var(--shadow-s);overflow:hidden;
@@ -448,10 +461,26 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
 
       <div class="dock-body rail" data-drawer="blocks">
       <section class="panel">
-        <div class="phead"><h2>快速濾網</h2><span class="sub">常用品番</span></div>
+        <div class="phead"><h2>快速濾網</h2><span class="sub" id="q-count"></span></div>
         <div class="pbody">
           <div id="quick"></div>
-          <p class="hint">點一下就變成一塊<b>篩選</b>積木，接在選中的那塊後面。<br>代號清單會直接寫進去，之後可以自己改。</p>
+          <div class="qacts">
+            <button class="btn ghost" id="q-new">＋ 新增濾網</button>
+            <button class="btn ghost" id="q-reset" title="回到內建的四組">回復預設</button>
+          </div>
+          <form class="qform" id="q-form" hidden>
+            <label>名稱<input id="q-label" placeholder="例如 泛鮮食" spellcheck="false"></label>
+            <label>欄位<input id="q-col" placeholder="kind_code" spellcheck="false"></label>
+            <label>條件<select id="q-op"></select></label>
+            <label>代號／值<input id="q-src" placeholder="02-22, A0-A9, B2, B5, B6" spellcheck="false"></label>
+            <p class="hint" id="q-preview"></p>
+            <div class="qacts">
+              <button class="btn" type="submit">存起來</button>
+              <button class="btn ghost" type="button" id="q-cancel">取消</button>
+            </div>
+          </form>
+          <p class="hint">點一下就變成一塊<b>篩選</b>積木，接在選中的那塊後面。<br>
+            範圍可以寫成 <code>02-22</code>，會自動展開成每一個代號。存在這台瀏覽器裡。</p>
         </div>
       </section>
       <section class="panel">
@@ -2076,28 +2105,117 @@ function codeRange(a, b){
     for(let i = a.charCodeAt(1); i <= b.charCodeAt(1); i++) out.push(a.charAt(0) + String.fromCharCode(i));
   return out;
 }
-const QUICK = [
-  {label:'泛鮮食', col:'kind_code', op:'IN',
-   codes:codeRange('02','22').concat(codeRange('A0','A9'), ['B2','B5','B6']),
-   note:'02-22 A0-A9 B2/5/6'},
-  {label:'飲料',   col:'kind_code', op:'IN',     codes:codeRange('27','34'), note:'27-34'},
-  {label:'香菸',   col:'kind_code', op:'IN',     codes:['58'],               note:'58'},
-  {label:'計算營收', col:'kind_code', op:'NOT IN',
-   codes:['00','80','81','89','91','92','93','94','95','96','98','99','X1','T1','Z1'],
-   note:'扣掉非營收'}
+/* 「02-22, A0-A9, B2. B5. B6」這種隨手寫法通通吃得下：
+   逗號、頓號、分號、空白、句點都當分隔，X-Y 展開成範圍。 */
+function parseCodes(text){
+  const seen = [];
+  String(text == null ? '' : text).replace(/[，、;；.]/g, ',').split(/[,\s]+/).forEach(part=>{
+    const t = part.trim().replace(/^['"]|['"]$/g, '');
+    if(!t) return;
+    const m = /^([A-Za-z0-9]+)[-－~～]([A-Za-z0-9]+)$/.exec(t);
+    const range = m ? codeRange(m[1], m[2]) : [];
+    (range.length ? range : [t]).forEach(c=>{ if(seen.indexOf(c) < 0) seen.push(c); });
+  });
+  return seen;
+}
+
+const QUICK_DEFAULT = [
+  {label:'泛鮮食',   col:'kind_code', op:'IN',     src:'02-22, A0-A9, B2, B5, B6'},
+  {label:'飲料',     col:'kind_code', op:'IN',     src:'27-34'},
+  {label:'香菸',     col:'kind_code', op:'IN',     src:'58'},
+  {label:'計算營收', col:'kind_code', op:'NOT IN', src:'00, 80, 81, 89, 91-96, 98, 99, X1, T1, Z1'}
 ];
-const quickVal = q => q.codes.map(c=>"'"+c+"'").join(', ');
+const isList = op => op === 'IN' || op === 'NOT IN';
+const quickCodes = q => parseCodes(q.src);
+const quickVal = q => isList(q.op) ? quickCodes(q).map(c=>"'"+c+"'").join(', ') : String(q.src).trim();
 
-document.getElementById('quick').innerHTML = '<div class="quick">'+QUICK.map((q,i)=>
-  '<button data-q="'+i+'" title="'+q.col+' '+q.op+' ('+q.codes.length+' 個代號)">'+
-  '<b>'+q.label+'</b><i>'+q.note+'</i></button>').join('')+'</div>';
+let QUICK = (function(){
+  try {
+    const saved = JSON.parse(localStorage.getItem('sqlblocks.quick') || 'null');
+    if(Array.isArray(saved)) return saved;
+  } catch(err){}
+  return QUICK_DEFAULT.map(q=>Object.assign({}, q));
+})();
+function saveQuick(){
+  try { localStorage.setItem('sqlblocks.quick', JSON.stringify(QUICK)); } catch(err){}
+}
 
-document.getElementById('quick').addEventListener('click', e=>{
-  const b = e.target.closest('[data-q]');
-  if(!b) return;
-  const q = QUICK[Number(b.dataset.q)];
+const quickBox = document.getElementById('quick');
+const qForm = document.getElementById('q-form');
+const qOp = document.getElementById('q-op');
+let qEdit = null;                       /* 正在改第幾條；null = 新增 */
+
+qOp.innerHTML = FILTER_OPS.map(o=>opt(o, 'IN')).join('');
+
+function renderQuick(){
+  document.getElementById('q-count').textContent = QUICK.length + ' 組';
+  quickBox.innerHTML = QUICK.length
+    ? '<div class="quick">'+QUICK.map((q,i)=>
+        '<div class="qrow">'+
+          '<button class="qgo" data-q="'+i+'" title="'+esc(q.col+' '+q.op+' '+q.src)+'">'+
+            '<b>'+esc(q.label)+'</b><i>'+esc(isList(q.op) ? quickCodes(q).length+' 個代號' : q.op)+'</i></button>'+
+          '<button class="qx" data-qedit="'+i+'" aria-label="改這組">✎</button>'+
+          '<button class="qx" data-qdel="'+i+'" aria-label="刪掉這組">×</button>'+
+        '</div>').join('')+'</div>'
+    : '<p class="hint" style="margin:0">還沒有濾網。按下面的「新增濾網」加一組。</p>';
+}
+
+function showForm(i){
+  qEdit = i;
+  const q = i == null ? {label:'', col:'kind_code', op:'IN', src:''} : QUICK[i];
+  document.getElementById('q-label').value = q.label;
+  document.getElementById('q-col').value = q.col;
+  qOp.value = q.op;
+  document.getElementById('q-src').value = q.src;
+  qForm.hidden = false;
+  previewQuick();
+  document.getElementById('q-label').focus();
+}
+function previewQuick(){
+  const op = qOp.value, src = document.getElementById('q-src').value;
+  const box = document.getElementById('q-preview');
+  document.getElementById('q-src').disabled = !needsVal(op);
+  if(!needsVal(op)){ box.textContent = '這個條件不用填值。'; return; }
+  if(!isList(op)){ box.textContent = '會變成：' + (src.trim() || '（還沒填）'); return; }
+  const codes = parseCodes(src);
+  box.textContent = codes.length
+    ? '展開成 '+codes.length+' 個：'+codes.slice(0,8).join(', ')+(codes.length > 8 ? ' …' : '')
+    : '還沒填代號。範圍可以寫 02-22。';
+}
+
+quickBox.addEventListener('click', e=>{
+  const del = e.target.closest('[data-qdel]');
+  if(del){ QUICK.splice(Number(del.dataset.qdel), 1); saveQuick(); renderQuick(); qForm.hidden = true; return; }
+  const ed = e.target.closest('[data-qedit]');
+  if(ed){ showForm(Number(ed.dataset.qedit)); return; }
+  const go = e.target.closest('[data-q]');
+  if(!go) return;
+  const q = QUICK[Number(go.dataset.q)];
   addNode('filter', {col:q.col, op:q.op, val:quickVal(q)});
 });
+
+document.getElementById('q-new').addEventListener('click', ()=>showForm(null));
+document.getElementById('q-cancel').addEventListener('click', ()=>{ qForm.hidden = true; qEdit = null; });
+document.getElementById('q-reset').addEventListener('click', ()=>{
+  QUICK = QUICK_DEFAULT.map(q=>Object.assign({}, q));
+  saveQuick(); renderQuick(); qForm.hidden = true;
+});
+qOp.addEventListener('change', previewQuick);
+document.getElementById('q-src').addEventListener('input', previewQuick);
+qForm.addEventListener('submit', e=>{
+  e.preventDefault();
+  const op = qOp.value;
+  const q = {
+    label: document.getElementById('q-label').value.trim() || '沒取名',
+    col:   document.getElementById('q-col').value.trim() || 'kind_code',
+    op:    op,
+    src:   needsVal(op) ? document.getElementById('q-src').value.trim() : ''
+  };
+  if(qEdit == null) QUICK.push(q); else QUICK[qEdit] = q;
+  saveQuick(); renderQuick();
+  qForm.hidden = true; qEdit = null;
+});
+renderQuick();
 
 document.getElementById('palette').innerHTML = GROUPS.map(g=>
   '<div class="fam" style="--fc:var(--f-'+g.f+')"><div class="fam-h"><b>'+g.label+'</b><i>'+g.note+'</i></div>'+
