@@ -875,6 +875,25 @@ test('css: no element depends on source order between two display rules', () => 
   return `${singles.size} single-class display rules, no order-dependent clashes`;
 });
 
+/* The stylesheet styles text fields as `input[type="text"]`, which does not
+   match a bare `<input>` even though the browser treats it as text. The quick
+   filter form shipped with three unstyled fields that way — no border, no
+   width, and the form looked broken. An input without a type is the bug. */
+test('html: every input declares its type, or the stylesheet skips it', () => {
+  const html = fs.readFileSync(new URL('../sql-blocks.html', import.meta.url), 'utf8');
+  const markup = html.slice(html.indexOf('</style>')).replace(/<script>[\s\S]*?<\/script>/g, '');
+  const bare = markup.match(/<input(?![^>]*\btype=)[^>]*>/g) || [];
+  assert.deepEqual(json(bare), []);
+
+  /* and each drawer tab has a body to open, or the tab does nothing */
+  const tabs = [...markup.matchAll(/dock-tab" data-drawer="(\w+)"/g)].map(m => m[1]);
+  const bodies = [...markup.matchAll(/dock-body rail" data-drawer="(\w+)"/g)].map(m => m[1]);
+  assert.deepEqual(json([...tabs].sort()), json([...bodies].sort()));
+  const style = /<style>([\s\S]*?)<\/style>/.exec(html)[1];
+  tabs.forEach(t => assert.match(style, new RegExp(`data-open="${t}"`), `${t} has no open rule`));
+  return `${tabs.length} drawers wired: ${tabs.join(', ')}`;
+});
+
 let passed = 0;
 for (const item of cases) {
   try {

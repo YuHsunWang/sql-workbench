@@ -99,7 +99,7 @@ button{font:inherit;color:inherit;cursor:pointer}
 /* 兩個抽屜各一個標籤，只有點才開 —— 滑過去就開太容易誤觸 */
 .dock{position:absolute;left:0;top:0;width:46px;z-index:40;display:flex;flex-direction:column;gap:10px}
 .dock-tab{
-  width:46px;height:128px;flex:none;cursor:pointer;
+  width:46px;height:116px;flex:none;cursor:pointer;
   background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
   box-shadow:var(--shadow-s);color:var(--ink-2);
   font-family:var(--ui);font-weight:700;font-size:11.5px;letter-spacing:.14em;
@@ -116,6 +116,7 @@ button{font:inherit;color:inherit;cursor:pointer}
   display:none;
 }
 .dock[data-open="blocks"] > .dock-body[data-drawer="blocks"],
+.dock[data-open="quick"]  > .dock-body[data-drawer="quick"],
 .dock[data-open="tables"] > .dock-body[data-drawer="tables"]{display:flex}
 
 /* 快速濾網 */
@@ -460,22 +461,23 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
 
     <div class="dock" id="dock" data-open="">
       <button class="dock-tab" data-drawer="blocks" aria-expanded="false" title="點一下開關">積木</button>
+      <button class="dock-tab" data-drawer="quick"  aria-expanded="false" title="點一下開關">常用操作</button>
       <button class="dock-tab" data-drawer="tables" aria-expanded="false" title="點一下開關">資料表</button>
 
-      <div class="dock-body rail" data-drawer="blocks">
+      <div class="dock-body rail" data-drawer="quick">
       <section class="panel">
-        <div class="phead"><h2>快速濾網</h2><span class="sub" id="q-count"></span></div>
+        <div class="phead"><h2>常用操作</h2><span class="sub" id="q-count"></span></div>
         <div class="pbody">
           <div id="quick"></div>
           <div class="qacts">
-            <button class="btn ghost" id="q-new">＋ 新增濾網</button>
+            <button class="btn ghost" id="q-new">＋ 新增一組</button>
             <button class="btn ghost" id="q-reset" title="回到內建的四組">回復預設</button>
           </div>
           <form class="qform" id="q-form" hidden>
-            <label>名稱<input id="q-label" placeholder="例如 泛鮮食" spellcheck="false"></label>
-            <label>欄位<input id="q-col" placeholder="kind_code" spellcheck="false"></label>
+            <label>名稱<input type="text" id="q-label" placeholder="例如 泛鮮食" spellcheck="false"></label>
+            <label>欄位<input type="text" id="q-col" placeholder="kind_code" spellcheck="false"></label>
             <label>條件<select id="q-op"></select></label>
-            <label>代號／值<input id="q-src" placeholder="02-22, A0-A9, B2, B5, B6" spellcheck="false"></label>
+            <label>代號／值<input type="text" id="q-src" placeholder="02-22, A0-A9, B2, B5, B6" spellcheck="false"></label>
             <p class="hint" id="q-preview"></p>
             <div class="qacts">
               <button class="btn" type="submit">存起來</button>
@@ -486,6 +488,9 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
             範圍可以寫成 <code>02-22</code>，會自動展開成每一個代號。存在這台瀏覽器裡。</p>
         </div>
       </section>
+      </div>
+
+      <div class="dock-body rail" data-drawer="blocks">
       <section class="panel">
         <div class="phead"><h2>積木</h2><span class="sub">10 種</span></div>
         <div class="pbody">
