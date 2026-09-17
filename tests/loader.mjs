@@ -44,7 +44,9 @@ function element() {
   });
 }
 
-export function loadApp() {
+/* `stored` seeds localStorage before the app boots, so a test can start it the
+   way a returning user's browser would — including with corrupt saved data. */
+export function loadApp(stored = {}) {
   const html = fs.readFileSync(new URL('../sql-blocks.html', import.meta.url), 'utf8');
   const match = html.match(/<script>([\s\S]*?)<\/script>/);
   if (!match) throw new Error('sql-blocks.html script not found');
@@ -63,7 +65,10 @@ export function loadApp() {
   const context = {
     console,
     document,
-    localStorage: { getItem() { return null; }, setItem() {} },
+    localStorage: {
+      getItem(key) { return Object.prototype.hasOwnProperty.call(stored, key) ? stored[key] : null; },
+      setItem(key, value) { stored[key] = String(value); },
+    },
     navigator: { clipboard: { async writeText() {} } },
     setTimeout() { return 0; }, clearTimeout() {},
   };
@@ -77,7 +82,8 @@ export function loadApp() {
     'q', 'tableRef', 'limHead', 'limTail', 'chainOrder',
     'demoSchema', 'sampleValue', 'joinLayout',
     'isSnapped', 'snapFor', 'snapLayout', 'settleLayout', 'nodeBox', 'SNAP_GAP',
-    'QUICK', 'QUICK_DEFAULT', 'codeRange', 'parseCodes', 'quickCodes', 'quickVal',
+    'QUICK', 'QUICK_DEFAULT', 'codeRange', 'parseCodes', 'readCodes', 'expandRange',
+    'validQuick', 'quickCodes', 'quickVal', 'noteManifest', 'applyNotes', 'chainOf',
     'nodeSummary', 'removeNode', 'addNode', 'viewCenter',
   ];
   const marker = '})();';

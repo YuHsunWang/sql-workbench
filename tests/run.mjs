@@ -872,6 +872,20 @@ test('css: no element depends on source order between two display rules', () => 
 
   /* and the drawer specifically must be hidden by a rule that outranks .rail */
   assert.match(flat, /\.dock\s*>\s*\.dock-body\s*\{[^}]*display\s*:\s*none/);
+
+  /* An element written `hidden` is hidden by the browser's own stylesheet, which
+     ANY author display rule outranks. The import dialog is `hidden` and its class
+     sets display:flex, so without a [hidden] rule it covers the whole page from
+     the first paint. The published page gets that rule from the platform; the
+     file has to carry its own. */
+  for (const el of markup.matchAll(/<[^>]*\bhidden\b[^>]*>/g)) {
+    const cls = /class="([^"]+)"/.exec(el[0]);
+    if (!cls) continue;
+    const styled = cls[1].trim().split(/\s+/).filter(c => singles.has(c));
+    if (!styled.length) continue;
+    assert.match(flat, /\[hidden\]\s*\{[^}]*display\s*:\s*none/,
+      `${cls[1]} is hidden but .${styled[0]} sets display — a [hidden] rule is required`);
+  }
   return `${singles.size} single-class display rules, no order-dependent clashes`;
 });
 
@@ -992,6 +1006,94 @@ test('add: a quick operation carries its name onto the canvas', () => {
   assert.equal(api.state.edges.some(e => e.from === 't' && e.to === step.id), true);
   assert.equal(api.state.edges.some(e => e.from === step.id && e.to === 'o'), true);
   return `note="${step.note}", spliced between the table and 結果`;
+});
+
+/* A range the tool cannot expand used to become a single literal code: "22-02"
+   went into the SQL as the string '22-02' and "9-11" expanded to 9,10,11 with no
+   leading zero. Both look fine and query the wrong rows, which is exactly the
+   failure this app exists to prevent — so a range it cannot expand must say so. */
+test('codes: a range that cannot be expanded is refused, not reinterpreted', () => {
+  const bad = input => {
+    const r = api.readCodes(input);
+    assert.equal(r.errs.length, 1, `${input} should be rejected, got ${JSON.stringify(r.codes)}`);
+    assert.deepEqual(json(r.codes), [], `${input} must contribute no codes`);
+    return r.errs[0];
+  };
+  assert.match(bad('9-11'), /長度不一樣/);
+  assert.match(bad('22-02'), /小的要寫在前面/);
+  assert.match(bad('A9-A11'), /長度不一樣/);
+  assert.match(bad('A1-B9'), /只有最後一碼可以變/);
+
+  /* a huge range is refused rather than expanded — it used to freeze the page */
+  const started = performance.now();
+  assert.match(bad('00000-99999'), /範圍太大/);
+  assert.equal(performance.now() - started < 200, true, 'refusing must be instant');
+
+  /* quoting is how a code containing a hyphen is written */
+  assert.deepEqual(json(api.readCodes("'A1-A2'").codes), ['A1-A2']);
+  /* and the good cases still expand */
+  assert.deepEqual(json(api.readCodes('02-04, A0-A2').codes), ['02', '03', '04', 'A0', 'A1', 'A2']);
+  return 'bad ranges rejected with a reason; quoted hyphens kept; huge range instant';
+});
+
+/* One corrupt entry in browser storage used to throw on startup, which bricks
+   the whole tool for a user who cannot see or clear localStorage. */
+test('codes: corrupt saved filters are dropped, not fatal', () => {
+  assert.equal(api.validQuick(null), false);
+  assert.equal(api.validQuick({}), false);
+  assert.equal(api.validQuick({label:'a', col:'b', src:'c', op:'NOPE'}), false);
+  assert.equal(api.validQuick({label:'a', col:'b', src:'c', op:'IN'}), true);
+
+  /* the part that actually bricks the tool: booting with that data in storage */
+  const good = {label:'我的', col:'kind_code', op:'IN', src:'02-04'};
+  const stored = {'sqlblocks.quick': JSON.stringify([null, good, {label:'x'}, 7])};
+  let booted;
+  try { booted = loadApp(stored); }
+  catch (error) { assert.fail(`corrupt storage must not stop startup: ${error?.message}`); }
+  assert.deepEqual(json(booted.QUICK), json([good]), 'only the valid entry survives');
+  /* and the cleaned list is written back, so it cannot bite again */
+  assert.deepEqual(json(JSON.parse(stored['sqlblocks.quick'])), json([good]));
+  return 'boots from [null, valid, partial, 7] keeping only the valid one';
+});
+
+/* Deleting a JOIN healed the chain from its first input, leaving SQL that still
+   ran but had silently lost an entire table — more dangerous than a broken link. */
+test('delete: a two-input step does not pick a side to keep', () => {
+  const col = name => ({name, ch:'', type:'INT'});
+  const schema = {l:{label:'', cols:[col('id')], rows:[[1]]}, r:{label:'', cols:[col('id')], rows:[[1]]}};
+  installGraph(api, {
+    nodes:[{id:'l', type:'table', table:'l'}, {id:'r', type:'table', table:'r'},
+           {id:'j', type:'join', joinType:'INNER', keys:[{left:'id', right:'id', lfn:'', rfn:''}]},
+           {id:'o', type:'output'}],
+    edges:[{from:'l', to:'j', port:0}, {from:'r', to:'j', port:1}, {from:'j', to:'o', port:0}],
+  }, schema);
+  api.removeNode('j');
+  assert.deepEqual(json(api.state.edges), [], 'neither side may be silently promoted');
+  assert.match(api.buildSQL(), /^--/, 'an unfinished graph must not produce runnable SQL');
+  return 'JOIN removal leaves the link open instead of dropping a table';
+});
+
+/* SQL is the only portable form this tool has. A note that lives only on the
+   canvas is gone the moment the query is shared. */
+test('notes: a note survives the trip out to SQL and back', () => {
+  const schema = {t:{label:'', cols:[{name:'kind_code', ch:'', type:'VARCHAR'}], rows:[['02']]}};
+  installGraph(api, {
+    nodes:[{id:'t', type:'table', table:'t'},
+           {id:'f', type:'filter', col:'kind_code', op:'IN', val:"'02'", note:'計算營收'},
+           {id:'o', type:'output'}],
+    edges:[{from:'t', to:'f', port:0}, {from:'f', to:'o', port:0}],
+  }, schema);
+  const sql = api.buildSQL();
+  assert.match(sql, /sqlblocks-notes filter#1=計算營收/, 'the note stays readable in the SQL');
+  const back = api.astToGraph(api.parseSQLText(sql));
+  assert.equal(back.nodes.find(n => n.type === 'filter').note, '計算營收');
+
+  /* a manifest that does not match the query's shape is ignored outright —
+     a note on the wrong step is worse than no note */
+  const wrong = '/* sqlblocks-notes groupby#9=別的 */\n' + sql.split('\n').slice(1).join('\n');
+  const stray = api.astToGraph(api.parseSQLText(wrong));
+  assert.equal(stray.nodes.some(n => n.note), false);
+  return 'note round-trips readable; a mismatched manifest is ignored';
 });
 
 let passed = 0;

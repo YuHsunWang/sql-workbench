@@ -94,6 +94,9 @@ button{font:inherit;color:inherit;cursor:pointer}
 
 /* ---------- layout ---------- */
 /* 左欄改成浮動抽屜：平常只留一條窄邊，畫布因此寬了快 300px */
+/* hidden 就該真的不見。作者樣式會蓋過瀏覽器預設的 display:none，
+   反解視窗就是這樣一載入就蓋住整頁的。 */
+[hidden]{display:none!important}
 .work{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 340px;
   gap:14px;align-items:start;padding-left:46px}
 /* 兩個抽屜各一個標籤，只有點才開 —— 滑過去就開太容易誤觸 */
@@ -141,6 +144,7 @@ button{font:inherit;color:inherit;cursor:pointer}
 .qform label{display:flex;flex-direction:column;gap:3px;
   font-family:var(--ui);font-weight:700;font-size:10.5px;letter-spacing:.06em;color:var(--ink-3)}
 .qform .qacts{margin-top:2px}
+.qform .hint.bad{color:var(--drop);font-weight:600}
 .panel{
   background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
   box-shadow:var(--shadow-s);overflow:hidden;
@@ -537,7 +541,7 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
           <summary>貼上你自己的 schema</summary>
           <textarea id="ddl" spellcheck="false" placeholder="CREATE TABLE orders (&#10;  order_id INT,&#10;  amount DECIMAL(10,2)&#10;);"></textarea>
           <button class="btn" id="btn-parse" style="margin-top:8px;width:100%">解析並載入</button>
-          <p class="hint" id="parse-msg">讀得懂一般的 <code>CREATE TABLE</code>。因為沒有真資料，會自動編幾列示範資料給動畫用。</p>
+          <p class="hint" id="parse-msg">讀得懂一般的 <code>CREATE TABLE</code>。因為沒有真資料，會自動編幾列示範資料給逐步檢視用。</p>
         </details>
       </section>
       </div>
@@ -839,7 +843,7 @@ function joinKeys(n){
 }
 /* 右邊如果有跟左邊撞名的非 key 欄位，改名成 x_2、x_3。不改名的話 SQL Server
    的 CTE 會因為欄名重複直接報錯，而且下游的 WHERE 也分不出指的是哪一邊。
-   動畫和 SQL 共用這一份，才不會兩邊各算各的。 */
+   逐步檢視和 SQL 共用這一份，才不會兩邊各算各的。 */
 function joinLayout(Lcols, Rcols, dropNames){
   const used = new Set(Lcols);
   const keep = [];
@@ -1215,18 +1219,24 @@ function condSQL(n){
   return q(n.col)+' '+n.op+' '+lit(n.val);
 }
 
-function chainOrder(){
-  const out = state.nodes.find(n=>n.type === 'output');
+/* 任何一張圖的執行順序。反解回來的圖也用同一套走法，
+   註記才會貼回同一個步驟上，而不是靠猜的。 */
+function chainOf(nodes, edges){
+  const byId = {};
+  nodes.forEach(n=>{ byId[n.id] = n; });
+  const out = nodes.find(n=>n.type === 'output');
   if(!out) return [];
   const order = [], seen = new Set();
   (function walk(n){
     if(!n || seen.has(n.id)) return;
     seen.add(n.id);
-    inEdges(n.id).forEach(e=>walk(nodeById(e.from)));
+    edges.filter(e=>e.to === n.id).sort((a,b)=>(a.port||0) - (b.port||0))
+         .forEach(e=>walk(byId[e.from]));
     if(n.type !== 'table' && n.type !== 'output') order.push(n);
   })(out);
   return order;
 }
+function chainOrder(){ return chainOf(state.nodes, state.edges); }
 
 function graphIssue(last){
   const colour = new Map(), next = new Map();
@@ -1266,6 +1276,37 @@ function graphIssue(last){
 const CTE_BASE = {join:'joined', union:'unioned', case:'tagged', derive:'derived',
                   window:'windowed', select:'picked', filter:'filtered', distinct:'deduped',
                   sort:'sorted', groupby:'grouped'};
+
+/* ---- 註記跟著 SQL 走 ----
+   SQL 是這個工具唯一帶得走的格式。註記只活在畫布上的話，一貼出去就沒了，
+   別人看到的又是一長串代號。所以在最前面放一行工具自己的註解帶著它。
+   標成「第幾個某型別的步驟」，不是位置編號，順序變動才不會貼錯人。 */
+function noteTags(nodes){
+  const seen = {}, out = [];
+  nodes.forEach(n=>{ seen[n.type] = (seen[n.type] || 0) + 1; out.push(n.type + '#' + seen[n.type]); });
+  return out;
+}
+/* 只跳脫會弄壞這行註解的字元，中文原樣留著 —— 這行是給人看的 */
+const encNote = s => String(s).replace(/[%*/= \t\r\n]/g,
+  c => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
+function noteManifest(nodes){
+  const tags = noteTags(nodes);
+  const items = nodes.map((n, i)=> n.note ? tags[i] + '=' + encNote(n.note) : null).filter(Boolean);
+  return items.length ? '/* sqlblocks-notes ' + items.join(' ') + ' */\n' : '';
+}
+function applyNotes(nodes, sql){
+  const m = /\/\*\s*sqlblocks-notes\s+([^*]*)\*\//.exec(String(sql || ''));
+  if(!m) return;
+  const want = {};
+  m[1].trim().split(/\s+/).forEach(pair=>{
+    const at = pair.indexOf('=');
+    if(at > 0) want[pair.slice(0, at)] = decodeURIComponent(pair.slice(at + 1));
+  });
+  const tags = noteTags(nodes);
+  /* 形狀對不上就一個都不貼 —— 貼錯步驟比沒有註記更糟 */
+  if(Object.keys(want).some(t=>tags.indexOf(t) < 0)) return;
+  nodes.forEach((n, i)=>{ if(want[tags[i]] !== undefined) n.note = want[tags[i]]; });
+}
 
 function buildSQL(){
   const out = state.nodes.find(n=>n.type === 'output');
@@ -1395,7 +1436,7 @@ function buildSQL(){
     if(sql) parts.push(names[n.id]+' AS (\n'+sql+'\n)');
   });
 
-  let out_sql = '';
+  let out_sql = noteManifest(chainOrder());
   if(parts.length) out_sql += 'WITH ' + parts.join(',\n') + '\n';
   if(tailSort){
     const lim = Number(tailSort.limit) || 0;
@@ -2054,7 +2095,7 @@ function renderInspector(){
 
   if(n.type === 'output'){
     const r = evalNode(n);
-    h += '<p class="note" style="margin-top:0">最後結果：<b>'+r.rows.length+'</b> 列、<b>'+r.cols.length+'</b> 欄。<br>SQL 就在下面，動畫在最底下。</p>';
+    h += '<p class="note" style="margin-top:0">最後結果：<b>'+r.rows.length+'</b> 列、<b>'+r.cols.length+'</b> 欄。<br>SQL 和逐步檢視都在下面。</p>';
   }
 
   /* 註記：常用操作會自動填上名字，也可以自己寫，寫什麼畫布上就顯示什麼 */
@@ -2120,7 +2161,10 @@ inspector.addEventListener('click', e=>{
 function removeNode(id){
   const n = nodeById(id);
   if(!n || n.type === 'output') return;
-  const from = srcOf(id, 0);
+  /* 只有剛好一個來源才自動接回去。JOIN／UNION 有兩個來源，隨便挑一邊接
+     會留下一段跑得動、卻少了一整張表的 SQL —— 那比斷線危險得多。 */
+  const ins = state.edges.filter(e=>e.to === id);
+  const from = ins.length === 1 ? nodeById(ins[0].from) : null;
   const outs = state.edges.filter(e=>e.from === id);
   state.edges = state.edges.filter(e=>e.from !== id && e.to !== id);
   if(from) outs.forEach(e=>{
@@ -2198,27 +2242,50 @@ document.getElementById('schema-list').addEventListener('click', e=>{
 /* ---- 快速濾網 ----
    品番是固定兩碼的字串。02-22 這種範圍一律展開成完整清單，不用 BETWEEN ——
    '02' 前面的 0 一旦被當成數字就會變成 2，範圍的意思整個跑掉。 */
-function codeRange(a, b){
+const MAX_CODES = 2000;     /* 再多就不是人要打的東西了，展開會把整頁卡死 */
+
+/* 展開一個範圍。展不開就說清楚為什麼 —— 靜默當成一般代號，
+   使用者會拿到一份看起來正常、數字卻是錯的報表。 */
+function expandRange(a, b){
+  const no = why => ({codes:[], why:why});
+  if(a.length !== b.length)
+    return no('兩邊長度不一樣（'+a+' 是 '+a.length+' 碼，'+b+' 是 '+b.length+' 碼）');
+  const digits = /^\d+$/.test(a) && /^\d+$/.test(b);
+  const from = digits ? Number(a) : a.charCodeAt(a.length - 1);
+  const to   = digits ? Number(b) : b.charCodeAt(b.length - 1);
+  if(!digits && a.slice(0, -1) !== b.slice(0, -1))
+    return no('只有最後一碼可以變（'+a+' 和 '+b+' 前面不一樣）');
+  if(to < from) return no('小的要寫在前面（你寫的是 '+a+'-'+b+'）');
+  if(to - from + 1 > MAX_CODES) return no('範圍太大（'+(to - from + 1)+' 個），最多 '+MAX_CODES+' 個');
+  const head = digits ? '' : a.slice(0, -1);
   const out = [];
-  if(/^\d+$/.test(a) && /^\d+$/.test(b))
-    for(let i = Number(a); i <= Number(b); i++) out.push(String(i).padStart(a.length, '0'));
-  else if(a.charAt(0) === b.charAt(0))            /* A0-A9 這種：頭一碼固定，尾碼遞增 */
-    for(let i = a.charCodeAt(1); i <= b.charCodeAt(1); i++) out.push(a.charAt(0) + String.fromCharCode(i));
-  return out;
+  for(let i = from; i <= to; i++)
+    out.push(digits ? String(i).padStart(a.length, '0') : head + String.fromCharCode(i));
+  return {codes:out, why:''};
 }
+const codeRange = (a, b) => expandRange(a, b).codes;
 /* 「02-22, A0-A9, B2. B5. B6」這種隨手寫法通通吃得下：
    逗號、頓號、分號、空白、句點都當分隔，X-Y 展開成範圍。 */
-function parseCodes(text){
-  const seen = [];
+function readCodes(text){
+  const codes = [], errs = [], seen = new Set();
+  const add = c => { if(!seen.has(c)){ seen.add(c); codes.push(c); } };
   String(text == null ? '' : text).replace(/[，、;；.]/g, ',').split(/[,\s]+/).forEach(part=>{
-    const t = part.trim().replace(/^['"]|['"]$/g, '');
+    const raw = part.trim();
+    if(!raw) return;
+    const quoted = /^(['"]).*\1$/.test(raw);
+    const t = quoted ? raw.slice(1, -1) : raw;
     if(!t) return;
-    const m = /^([A-Za-z0-9]+)[-－~～]([A-Za-z0-9]+)$/.exec(t);
-    const range = m ? codeRange(m[1], m[2]) : [];
-    (range.length ? range : [t]).forEach(c=>{ if(seen.indexOf(c) < 0) seen.push(c); });
+    /* 加了引號就是字面值 —— 代號本身帶連字號時要有辦法表示 */
+    if(quoted || !/[-－~～]/.test(t)){ add(t); return; }
+    const m = /^([A-Za-z0-9]+)\s*[-－~～]\s*([A-Za-z0-9]+)$/.exec(t);
+    if(!m){ errs.push(t + '：看不懂的範圍寫法。代號本身有連字號的話請加引號'); return; }
+    const r = expandRange(m[1], m[2]);
+    if(r.codes.length) r.codes.forEach(add);
+    else errs.push(t + '：' + r.why);
   });
-  return seen;
+  return {codes:codes, errs:errs};
 }
+const parseCodes = text => readCodes(text).codes;
 
 const QUICK_DEFAULT = [
   {label:'泛鮮食',   col:'kind_code', op:'IN',     src:'02-22, A0-A9, B2, B5, B6'},
@@ -2230,10 +2297,22 @@ const isList = op => op === 'IN' || op === 'NOT IN';
 const quickCodes = q => parseCodes(q.src);
 const quickVal = q => isList(q.op) ? quickCodes(q).map(c=>"'"+c+"'").join(', ') : String(q.src).trim();
 
+/* 瀏覽器裡存的東西可能是舊版的、被手動改壞的、或只壞一半。
+   逐筆檢查，壞的丟掉 —— 一筆壞資料不該讓整個工具打不開。 */
+function validQuick(q){
+  return !!q && typeof q === 'object'
+    && typeof q.label === 'string' && typeof q.col === 'string'
+    && typeof q.src === 'string' && FILTER_OPS.indexOf(q.op) >= 0;
+}
 let QUICK = (function(){
   try {
     const saved = JSON.parse(localStorage.getItem('sqlblocks.quick') || 'null');
-    if(Array.isArray(saved)) return saved;
+    if(Array.isArray(saved)){
+      const good = saved.filter(validQuick);
+      if(good.length !== saved.length)
+        try { localStorage.setItem('sqlblocks.quick', JSON.stringify(good)); } catch(err){}
+      return good;                       /* 空陣列 = 使用者自己刪光的，尊重它 */
+    }
   } catch(err){}
   return QUICK_DEFAULT.map(q=>Object.assign({}, q));
 })();
@@ -2278,9 +2357,11 @@ function previewQuick(){
   document.getElementById('q-src').disabled = !needsVal(op);
   if(!needsVal(op)){ box.textContent = '這個條件不用填值。'; return; }
   if(!isList(op)){ box.textContent = '會變成：' + (src.trim() || '（還沒填）'); return; }
-  const codes = parseCodes(src);
-  box.textContent = codes.length
-    ? '展開成 '+codes.length+' 個：'+codes.slice(0,8).join(', ')+(codes.length > 8 ? ' …' : '')
+  const r = readCodes(src);
+  box.classList.toggle('bad', r.errs.length > 0);
+  if(r.errs.length){ box.textContent = '這裡不對：' + r.errs.join('；'); return; }
+  box.textContent = r.codes.length
+    ? '展開成 '+r.codes.length+' 個：'+r.codes.slice(0,8).join(', ')+(r.codes.length > 8 ? ' …' : '')
     : '還沒填代號。範圍可以寫 02-22。';
 }
 
@@ -2307,6 +2388,12 @@ document.getElementById('q-src').addEventListener('input', previewQuick);
 qForm.addEventListener('submit', e=>{
   e.preventDefault();
   const op = qOp.value;
+  /* 看不懂的範圍不准存起來 —— 存進去以後就再也沒人會發現了 */
+  if(isList(op) && readCodes(document.getElementById('q-src').value).errs.length){
+    previewQuick();
+    document.getElementById('q-src').focus();
+    return;
+  }
   const q = {
     label: document.getElementById('q-label').value.trim() || '沒取名',
     col:   document.getElementById('q-col').value.trim() || 'kind_code',
@@ -2391,7 +2478,7 @@ document.getElementById('btn-parse').addEventListener('click', ()=>{
   const out = mk('output', 640, 120, {});
   Object.keys(found).slice(0,2).forEach((t,i)=>mk('table', 26, 40 + i*174, {table:t}));
   state.sel = null;
-  msg.innerHTML = '讀到 <b>'+Object.keys(found).length+'</b> 張表。示範資料是自動編的，只給動畫用。';
+  msg.innerHTML = '讀到 <b>'+Object.keys(found).length+'</b> 張表。示範資料是自動編的，只給逐步檢視用。';
   msg.style.color = 'var(--accent-ink)';
   renderSchema();
   state.step = 0;
@@ -2487,7 +2574,7 @@ function fallbackGen(c){
 
 /* 一個英文欄名只挑一次產生器，之後別張表都得照用 —— 中文名和猜出來的型別
    只有第一次分類時算數。不鎖的話 trans_detail 的 tx_seq 是 '067'、
-   promo_dtl 的是 1，JOIN 動畫一列都配不到。 */
+   promo_dtl 的是 1，JOIN 在逐步檢視裡一列都配不到。 */
 const SAMPLE_GEN = new Map();
 function sampleGen(c){
   const key = String(c.name).toLowerCase();
@@ -3179,7 +3266,7 @@ function parseSQLText(text){
   const stmt = parseStatement();
   eatOp(';');
   if(at().t !== 'eof') warn.push('第一段 SELECT 後面還有東西，只反解了第一段');
-  return {stmt:stmt, warn:warn};
+  return {stmt:stmt, warn:warn, src:text};
 }
 
 /* ON 裡包了函數的話，記下是哪一種轉換 */
@@ -3276,7 +3363,7 @@ function astToGraph(parsed){
     if(t && perTable[t] && perTable[t].indexOf(r.col) < 0) perTable[t].push(r.col);
   });
   if(refs.some(r=>!r.tbl) && srcTables.length > 1)
-    warn.push('有些欄位沒寫表名（像 amount 而不是 o.amount），猜不到它屬於哪張表 — 動畫的示範資料可能少幾欄');
+    warn.push('有些欄位沒寫表名（像 amount 而不是 o.amount），猜不到它屬於哪張表 — 逐步檢視的示範資料可能少幾欄');
 
   function knownCols(src){
     if(!src || src.kind !== 'table') return null;
@@ -3452,7 +3539,7 @@ function astToGraph(parsed){
   conn(finalNode, out);
 
   /* 已知的表沿用真欄位，但示範資料改用這段查詢裡出現的值 —— 不然篩選會篩掉全部，
-     動畫一片空白。沒見過的表才反推欄位。 */
+     逐步檢視一片空白。沒見過的表才反推欄位。 */
   const tableNames = Object.keys(tables);
   const schema = Object.assign({}, state.schema);
   const madeUp = [];
@@ -3470,6 +3557,7 @@ function astToGraph(parsed){
     madeUp.push(key);
   });
 
+  applyNotes(chainOf(nodes, edges), parsed.src);   /* 把 SQL 帶回來的註記貼回步驟上 */
   layoutGraph(nodes, edges);
   return {nodes:nodes, edges:edges, schema:schema, warn:warn, uid:uid, madeUp:madeUp};
 }
@@ -3601,7 +3689,7 @@ function applyStatement(idx){
     graph.nodes.filter(n=>n.type === 'table').length+' 張表。畫布已經換好了。';
   if(graph.madeUp.length)
     html += '<br>這幾張表不在你的 schema 裡：<code>'+graph.madeUp.join('</code>、<code>')+
-            '</code>。欄位是從 SQL 反推的，資料是編的，只給動畫用。';
+            '</code>。欄位是從 SQL 反推的，資料是編的，只給逐步檢視用。';
   html += '</div>';
   if(graph.warn.length){
     const uniq = graph.warn.filter((w,i)=>graph.warn.indexOf(w) === i);
