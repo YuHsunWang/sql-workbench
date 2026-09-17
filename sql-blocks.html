@@ -337,7 +337,7 @@ input[type="number"]{max-width:88px}
 .dnote code{font-family:var(--mono)}
 
 /* ---------- stage ---------- */
-.stage{margin-top:14px}
+.stage{margin-top:0}
 .steps{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:10px 12px;border-bottom:1px solid var(--line-soft)}
 .sdot{
   border:1px solid var(--line);background:var(--surface);border-radius:20px;
@@ -424,8 +424,12 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
 @media (prefers-reduced-motion: reduce){
   *{animation-duration:.001s!important;transition-duration:.001s!important}
 }
+/* SQL 跟步驟排在一起：看得到程式碼，也看得到那一步的資料 */
+.below{display:grid;grid-template-columns:minmax(0,420px) minmax(0,1fr);gap:14px;
+  align-items:start;margin-top:14px}
 @media (max-width:1100px){
   .work{grid-template-columns:minmax(0,1fr)}
+  .below{grid-template-columns:minmax(0,1fr)}
   .canvas{height:430px}
 }
 @media (max-width:480px){
@@ -453,7 +457,6 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
       <button class="btn ghost" id="btn-adv">進階範例</button>
       <button class="btn" id="btn-import">↩ 貼 SQL 反解</button>
       <button class="btn" id="btn-copy">複製 SQL</button>
-      <button class="btn primary" id="btn-play">▶ 播放動畫</button>
     </div>
   </header>
 
@@ -534,35 +537,38 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
         <div class="phead"><h2>積木設定</h2><span class="sub" id="insp-kind"></span></div>
         <div class="pbody" id="inspector"></div>
       </section>
-      <section class="panel">
-        <div class="phead"><h2>產生的 SQL</h2>
-          <select id="dialect" aria-label="SQL 方言">
-            <option value="mysql">MySQL</option>
-            <option value="postgres">PostgreSQL</option>
-            <option value="mssql">SQL Server</option>
-            <option value="oracle">Oracle</option>
-          </select>
-        </div>
-        <pre class="sqlbox" id="sql"></pre>
-        <div class="dopt"><label><input type="checkbox" id="quote-all"> 識別字一律加引號（貼進挑剔的工具時比較保險）</label></div>
-        <p class="dnote" id="dnote"></p>
-      </section>
     </div>
   </div>
 
-  <section class="panel stage">
-    <div class="steps" id="steps">
-      <div class="sctl">
-        <button class="btn ghost" id="btn-prev">‹ 上一步</button>
-        <button class="btn ghost" id="btn-next">下一步 ›</button>
+  <div class="below">
+    <section class="panel">
+      <div class="phead"><h2>產生的 SQL</h2>
+        <select id="dialect" aria-label="SQL 方言">
+          <option value="mysql">MySQL</option>
+          <option value="postgres">PostgreSQL</option>
+          <option value="mssql">SQL Server</option>
+          <option value="oracle">Oracle</option>
+        </select>
       </div>
-    </div>
-    <div class="stage-body">
-      <div class="caption" id="caption"></div>
-      <div class="flow" id="flow"></div>
-      <p class="foot" id="foot"></p>
-    </div>
-  </section>
+      <pre class="sqlbox" id="sql"></pre>
+      <div class="dopt"><label><input type="checkbox" id="quote-all"> 識別字一律加引號（貼進挑剔的工具時比較保險）</label></div>
+      <p class="dnote" id="dnote"></p>
+    </section>
+
+    <section class="panel stage">
+      <div class="steps" id="steps">
+        <div class="sctl">
+          <button class="btn ghost" id="btn-prev">‹ 上一步</button>
+          <button class="btn ghost" id="btn-next">下一步 ›</button>
+        </div>
+      </div>
+      <div class="stage-body">
+        <div class="caption" id="caption"></div>
+        <div class="flow" id="flow"></div>
+        <p class="foot" id="foot"></p>
+      </div>
+    </section>
+  </div>
 
 </div>
 
@@ -1446,7 +1452,11 @@ function nodeSummary(n){
     case 'filter': {
       const v = String(n.val == null ? '' : n.val);
       const shown = v.length > 22 ? v.slice(0, 22)+'…' : v;
-      return '<code>'+n.col+' '+n.op+(needsVal(n.op) ? ' '+shown : '')+'</code>';
+      const line = '<code>'+n.col+' '+n.op+(needsVal(n.op) ? ' '+shown : '')+'</code>';
+      /* 空的 IN 清單會把整批資料篩光，但看起來只是「還沒填」—— 直接講明 */
+      const emptyIn = (n.op === 'IN' || n.op === 'NOT IN') && !inListRaw(n.val).length;
+      return line + (emptyIn ? '<br><span class="warn">清單是空的，'+
+        (n.op === 'IN' ? '一列都不會留下' : '不會篩掉任何一列')+'</span>' : '');
     }
     case 'distinct': {
       const s = evalNode(srcOf(n.id,0)), d = evalNode(n);
@@ -1464,7 +1474,11 @@ function nodeSummary(n){
     case 'groupby':return '依 <code>'+(n.keys.join(', ')||'—')+'</code><br>算 '+n.aggs.length+' 個數字';
   }
   const r = evalNode(n);
-  return r.rows.length ? r.rows.length+' 列 · '+r.cols.length+' 欄' : '還沒接上來源';
+  if(r.rows.length) return r.rows.length+' 列 · '+r.cols.length+' 欄';
+  /* 接上了卻是 0 列，跟根本沒接是兩回事 —— 講錯會讓人去找不存在的斷線 */
+  return inEdges(n.id).length
+    ? '<span class="warn">0 列</span>（有接上，但前面把資料篩光了）'
+    : '還沒接上來源';
 }
 
 function renderNodes(){
@@ -2286,7 +2300,6 @@ document.getElementById('btn-parse').addEventListener('click', ()=>{
     msg.style.color = 'var(--drop)';
     return;
   }
-  stop();
   setSrcLabel('');
   state.schema = found;
   resetGraph();
@@ -2685,7 +2698,7 @@ function renderStage(){
     b.className = 'sdot';
     b.setAttribute('aria-current', k === i ? 'true' : 'false');
     b.textContent = (k+1) + '  ' + st.title;
-    b.addEventListener('click', ()=>{ stop(); state.step = k; renderStage(); });
+    b.addEventListener('click', ()=>{ state.step = k; renderStage(); });
     bar.appendChild(b);
   });
   bar.appendChild(ctl);
@@ -2701,24 +2714,8 @@ function renderStage(){
   document.getElementById('btn-next').disabled = i === steps.length - 1;
 }
 
-function stop(){
-  if(state.timer){ clearTimeout(state.timer); state.timer = null; }
-  document.getElementById('btn-play').textContent = '▶ 播放動畫';
-}
-function play(){
-  if(state.timer){ stop(); return; }
-  state.step = 0; renderStage();
-  document.getElementById('btn-play').textContent = '❚❚ 停';
-  const tick = ()=>{
-    if(state.step >= state.steps.length - 1){ stop(); return; }
-    state.step++; renderStage();
-    state.timer = setTimeout(tick, 2400);
-  };
-  state.timer = setTimeout(tick, 1600);
-}
-document.getElementById('btn-play').addEventListener('click', play);
-document.getElementById('btn-prev').addEventListener('click', ()=>{ stop(); state.step--; renderStage(); });
-document.getElementById('btn-next').addEventListener('click', ()=>{ stop(); state.step++; renderStage(); });
+document.getElementById('btn-prev').addEventListener('click', ()=>{ state.step--; renderStage(); });
+document.getElementById('btn-next').addEventListener('click', ()=>{ state.step++; renderStage(); });
 document.getElementById('btn-copy').addEventListener('click', async e=>{
   const b = e.currentTarget;
   try { await navigator.clipboard.writeText(buildSQL()); b.textContent = '已複製'; }
@@ -2733,7 +2730,6 @@ function settleLayout(){
   renderNodes();       /* 有些積木長高了，接點位置要用新高度重算 */
 }
 function loadPreset(fn){
-  stop();
   setSrcLabel('');
   state.schema = demoSchema();
   fn();
@@ -3491,7 +3487,6 @@ function applyStatement(idx){
     parseOut.innerHTML = renderParseError(err, text);
     return;
   }
-  stop();
   setSrcLabel(stmts.length > 1 ? '第 '+(idx+1)+'/'+stmts.length+' 段 · '+oneLine(text) : '來自貼上的 SQL');
   renderPicker(idx);
   state.schema = graph.schema;

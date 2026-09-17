@@ -894,6 +894,36 @@ test('html: every input declares its type, or the stylesheet skips it', () => {
   return `${tabs.length} drawers wired: ${tabs.join(', ')}`;
 });
 
+/* The 結果 block said 還沒接上來源 whenever it held zero rows, which sends the
+   user hunting for a disconnected wire that is not there. A connected block
+   that filtered everything away is a different problem with a different fix,
+   and an empty IN list — the usual cause — now says so on the filter itself. */
+test('summary: zero rows and no source are told apart', () => {
+  const schema = {t:{label:'', cols:[{name:'kind_code', ch:'', type:'VARCHAR'}], rows:[['02'], ['58']]}};
+  const graph = (filterVal, connectOutput) => ({
+    nodes:[{id:'t', type:'table', table:'t'},
+           {id:'f', type:'filter', col:'kind_code', op:'IN', val:filterVal},
+           {id:'o', type:'output'}],
+    edges:[{from:'t', to:'f', port:0}].concat(connectOutput ? [{from:'f', to:'o', port:0}] : []),
+  });
+
+  installGraph(api, graph("'02'", true), schema);
+  assert.match(api.nodeSummary(api.state.nodes[2]), /1 列/);
+
+  /* connected, but the empty IN list keeps nothing */
+  installGraph(api, graph('', true), schema);
+  const starved = api.nodeSummary(api.state.nodes[2]);
+  assert.match(starved, /0 列/);
+  assert.doesNotMatch(starved, /還沒接上來源/);
+  /* and the filter block names itself as the cause */
+  assert.match(api.nodeSummary(api.state.nodes[1]), /清單是空的/);
+
+  /* genuinely unconnected still says so */
+  installGraph(api, graph("'02'", false), schema);
+  assert.match(api.nodeSummary(api.state.nodes[2]), /還沒接上來源/);
+  return 'rows / filtered-to-zero / unconnected all read differently';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {
