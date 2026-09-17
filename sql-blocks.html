@@ -93,9 +93,31 @@ button{font:inherit;color:inherit;cursor:pointer}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
 
 /* ---------- layout ---------- */
-.work{display:grid;grid-template-columns:276px minmax(0,1fr) 340px;gap:14px;align-items:start}
-.work.narrow{grid-template-columns:minmax(0,1fr) 340px}
-.work.narrow > .rail:first-child{display:none}
+/* 左欄改成浮動抽屜：平常只留一條窄邊，畫布因此寬了快 300px */
+.work{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 340px;
+  gap:14px;align-items:start;padding-left:46px}
+/* 只跟畫布差不多高就好 —— 整頁高的話滑鼠經過左邊就會誤觸 */
+.dock{position:absolute;left:0;top:0;width:46px;height:min(100%,560px);z-index:40}
+.dock-tab{
+  width:46px;height:100%;cursor:pointer;
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+  box-shadow:var(--shadow-s);color:var(--ink-2);
+  font-family:var(--ui);font-weight:700;font-size:11px;letter-spacing:.14em;
+  writing-mode:vertical-rl;text-orientation:mixed;padding:14px 0;
+}
+.dock-tab:hover{border-color:var(--accent);color:var(--accent-ink)}
+.dock.pinned .dock-tab{border-color:var(--accent);color:var(--accent-ink);background:var(--accent-soft)}
+.dock-body{
+  position:absolute;left:52px;top:0;width:min(306px,calc(100vw - 76px));
+  max-height:min(78vh,660px);overflow-y:auto;overscroll-behavior:contain;
+  opacity:0;pointer-events:none;transform:translateX(-10px);
+  transition:opacity .16s ease,transform .16s ease;
+}
+/* 滑過去、釘住、或正從裡面拖積木出來時，都要展開 */
+.dock:hover > .dock-body,
+.dock.pinned > .dock-body,
+.dock.dragging > .dock-body{opacity:1;pointer-events:auto;transform:none}
+@media (prefers-reduced-motion:reduce){ .dock-body{transition:none} }
 .panel{
   background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
   box-shadow:var(--shadow-s);overflow:hidden;
@@ -380,8 +402,7 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
   *{animation-duration:.001s!important;transition-duration:.001s!important}
 }
 @media (max-width:1100px){
-  .work,.work.narrow{grid-template-columns:minmax(0,1fr)}
-  .work.narrow > .rail:first-child{display:flex}
+  .work{grid-template-columns:minmax(0,1fr)}
   .canvas{height:430px}
 }
 @media (max-width:480px){
@@ -415,7 +436,9 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
 
   <div class="work">
 
-    <div class="rail">
+    <div class="dock" id="dock">
+      <button class="dock-tab" id="dock-tab" aria-expanded="false" title="滑過來打開，點一下釘住">積木 ・ 資料表</button>
+      <div class="dock-body rail">
       <section class="panel">
         <div class="phead"><h2>積木</h2><span class="sub">10 種</span></div>
         <div class="pbody">
@@ -437,13 +460,13 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
           <p class="hint" id="parse-msg">讀得懂一般的 <code>CREATE TABLE</code>。因為沒有真資料，會自動編幾列示範資料給動畫用。</p>
         </details>
       </section>
-
+      </div>
     </div>
 
     <section class="panel">
       <div class="phead"><h2>畫布</h2>
         <button class="mini" id="btn-tidy" style="margin-left:auto">整理版面</button>
-        <button class="mini" id="btn-rail">收合左欄</button>
+        <button class="mini" id="btn-rail">釘住左欄</button>
         <span class="srcbadge" id="src-label" hidden></span>
         <span class="sub" id="node-count"></span>
       </div>
@@ -1689,9 +1712,14 @@ document.addEventListener('dragstart', e=>{
   if(pal)      dragNew = {kind:'block', v:pal.dataset.t};
   else if(tbl) dragNew = {kind:'table', v:tbl.dataset.addTable};
   else return;
+  dock.classList.add('dragging');        /* 拖到一半左欄不能收掉 */
   if(e.dataTransfer){ e.dataTransfer.effectAllowed = 'copy'; e.dataTransfer.setData('text/plain', dragNew.v); }
 });
-document.addEventListener('dragend', ()=>{ dragNew = null; canvas.classList.remove('drop-on'); });
+document.addEventListener('dragend', ()=>{
+  dragNew = null;
+  canvas.classList.remove('drop-on');
+  dock.classList.remove('dragging');
+});
 canvas.addEventListener('dragover', e=>{
   if(!dragNew) return;
   e.preventDefault();
@@ -2546,11 +2574,18 @@ document.getElementById('btn-tidy').addEventListener('click', ()=>{
   canvas.scrollTo({left:0, top:0, behavior:'smooth'});
   refresh();
 });
-document.getElementById('btn-rail').addEventListener('click', e=>{
-  const hidden = document.querySelector('.work').classList.toggle('narrow');
-  e.currentTarget.textContent = hidden ? '展開左欄' : '收合左欄';
-  requestAnimationFrame(()=>{ renderNodes(); drawWires(); });
-});
+/* 左欄抽屜：滑過去自己展開（純 CSS），點一下釘住不收 */
+const dock = document.getElementById('dock');
+const btnRail = document.getElementById('btn-rail');
+function setPinned(on){
+  dock.classList.toggle('pinned', on);
+  document.getElementById('dock-tab').setAttribute('aria-expanded', on ? 'true' : 'false');
+  btnRail.textContent = on ? '放開左欄' : '釘住左欄';
+  try { localStorage.setItem('sqlblocks.dockPinned', on ? '1' : '0'); } catch(err){}
+}
+document.getElementById('dock-tab').addEventListener('click', ()=>setPinned(!dock.classList.contains('pinned')));
+btnRail.addEventListener('click', ()=>setPinned(!dock.classList.contains('pinned')));
+try { if(localStorage.getItem('sqlblocks.dockPinned') === '1') setPinned(true); } catch(err){}
 document.getElementById('btn-basic').addEventListener('click', ()=>loadPreset(presetBasic));
 document.getElementById('btn-adv').addEventListener('click', ()=>loadPreset(presetAdvanced));
 
