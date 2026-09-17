@@ -1142,6 +1142,38 @@ test('honesty: the step-through says its data is made up', () => {
   return 'footer and opening caption both state the rows are illustrative';
 });
 
+/* Chaining JOINs works, but each one used to list every column of both sides:
+   two 30-column tables produced a 70-line SELECT list, and a third table pushed
+   it past 170 lines — correct SQL nobody can read. The left side is never
+   dropped or renamed, so it goes across whole; the right side still has to be
+   spelled out because its key columns are removed and collisions are aliased. */
+test('join: chained joins work and do not spell out the left side', () => {
+  const sql = 'SELECT a.deal_time, b.store_nm, c.fm_name, a.sale_amt\n' +
+    'FROM analytic.trans_detail a\n' +
+    'JOIN analytic.m_org_last b ON a.ostore_no = b.ostore_no\n' +
+    'JOIN analytic.m_cmdt_offline c ON a.fm_code = c.fm_code';
+  api.state.dialect = 'mssql';
+  const graph = graphFromSQL(api, sql);
+
+  assert.equal(graph.nodes.filter(n => n.type === 'join').length, 2, 'two joins, chained');
+  assert.equal(api.evalNode(graph.nodes.find(n => n.type === 'output')).rows.length > 0, true,
+    'the step-through must actually produce rows');
+
+  const generated = api.buildSQL();
+  assert.equal((generated.match(/a\.\*/g) || []).length, 2, 'each join carries its left side whole');
+  assert.doesNotMatch(generated, /a\.deal_time,/, 'the left side is not spelled out');
+  /* the right side stays explicit — its key column is dropped and fdp_upt collides */
+  assert.match(generated, /b\.fdp_upt AS fdp_upt_2/);
+  assert.doesNotMatch(generated, /b\.\*/, 'the right side cannot be taken whole');
+  assert.equal(generated.split('\n').length < 100, true,
+    `a three-table join must stay readable, got ${generated.split('\n').length} lines`);
+
+  /* and it still means the same thing coming back */
+  const shape = g => JSON.stringify(g.nodes.map(({x, y, id, ...rest}) => rest));
+  assert.equal(shape(api.astToGraph(api.parseSQLText(generated))), shape(graph));
+  return `2 chained joins, ${generated.split('\n').length} lines, round-trips`;
+});
+
 let passed = 0;
 for (const item of cases) {
   try {

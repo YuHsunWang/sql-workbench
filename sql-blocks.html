@@ -1365,7 +1365,10 @@ function buildSQL(){
       const Lc = evalNode(L).cols, Rc = evalNode(R).cols;
       const ks = joinKeys(n).filter(k=>k.left && k.right);
       const lay = joinLayout(Lc, Rc, new Set(ks.map(k=>k.right)));
-      const sel = Lc.map(c=>'a.'+q(c)).concat(lay.keep.map(k=>
+      /* 左邊整批帶過去 —— 左邊的欄位不會被丟掉也不會改名，一欄一欄列出來的話，
+         兩張寬表一 JOIN 就是七十行沒人讀得完的清單。
+         右邊沒辦法這樣：key 欄要拿掉、撞名的要改名，只能一欄一欄寫。 */
+      const sel = ['a.*'].concat(lay.keep.map(k=>
         'b.'+q(k.src) + (k.name !== k.src ? ' AS '+q(k.name) : '')));
       const on = ks.length
         ? ks.map(k=>castSQL(k.lfn, 'a.'+q(k.left))+' = '+castSQL(k.rfn, 'b.'+q(k.right))).join('\n   AND ')
