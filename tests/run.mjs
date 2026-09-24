@@ -1403,6 +1403,54 @@ test('OR editing: a plain filter offers the OR button', () => {
   return 'plain filter panel has ＋ 或';
 });
 
+/* region counts as drawn: [text class, number] in region order */
+const vennCounts = html => [...html.matchAll(/class="(vin|vout)">(\d+)</g)].map(m => [m[1], Number(m[2])]);
+
+test('Venn: OR shows the union with the real per-region counts', () => {
+  const graph = graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20 OR inv_rank <= 20');
+  installGraph(api, graph, orData);
+  const f = graph.nodes.find(n => n.type === 'filter');
+  const html = api.orVenn(f, api.evalNode(graph.nodes[0]));
+  /* regions 1 (only ①), 2 (only ②), 3 (both): rows 1, 2 and 4 — all kept */
+  assert.deepEqual(vennCounts(html), [['vin',1], ['vin',1], ['vin',1]]);
+  assert.match(html, /都沒中 1</);
+  assert.match(html, /同時中第①、②組：1 列/);
+  assert.match(html, /第①組：<code>member_rank &lt;= 20<\/code>/);
+
+  api.orAddGroup(f, ['id']);
+  Object.assign(f.any[2][0], {col:'id', op:'=', val:'3'});
+  const three = api.orVenn(f, api.evalNode(graph.nodes[0]));
+  assert.equal(vennCounts(three).length, 7, 'three sets draw seven regions');
+  assert.match(three, /都沒中 0</);
+
+  api.orAddGroup(f, ['id']);
+  assert.equal(api.orVenn(f, api.evalNode(graph.nodes[0])), '', 'four groups do not fit a Venn');
+  api.state.sel = f.id;
+  api.renderInspector();
+  assert.match(api.inspector.innerHTML, /超過 3 組，文氏圖畫不下/);
+  return 'union shaded, counts 1/1/1 + 1 outside, 3 sets = 7 regions, 4 sets fall back';
+});
+
+test('Venn: JOIN shades the overlap for INNER and the left circle for LEFT', () => {
+  const graph = graphFromSQL(api, 'SELECT * FROM l INNER JOIN r ON l.k = r.k');
+  installGraph(api, graph, {
+    l:{cols:[{name:'k'},{name:'a'}], rows:[[1,'x'],[2,'y'],[3,'z']]},
+    r:{cols:[{name:'k'},{name:'b'}], rows:[[2,'p'],[3,'q'],[3,'q2'],[9,'w']]},
+  });
+  const join = graph.nodes.find(n => n.type === 'join');
+  /* regions: left-only 1 row, right-only 1 row, overlap = 2 left rows */
+  assert.deepEqual(vennCounts(api.joinPairsVenn(join)), [['vout',1], ['vout',1], ['vin',2]]);
+  assert.match(api.joinPairsVenn(join), /交集/);
+  join.joinType = 'LEFT';
+  assert.deepEqual(vennCounts(api.joinPairsVenn(join)), [['vin',1], ['vout',1], ['vin',2]]);
+  assert.match(api.joinPairsVenn(join), /對得上：左表 2 列、右表 3 列/);
+  assert.match(api.joinPairsVenn(join), /左表：<code>l<\/code>/);
+  api.state.sel = join.id;
+  api.renderInspector();
+  assert.match(api.inspector.innerHTML, /哪些列會留下[\s\S]*class="venn"/);
+  return 'INNER shades 3 only; LEFT shades 1 and 3; legend names the tables';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {

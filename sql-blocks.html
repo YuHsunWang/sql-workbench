@@ -29,6 +29,8 @@
   --body:'Noto Sans TC','Archivo',system-ui,sans-serif;
   --mono:'IBM Plex Mono',ui-monospace,'SFMono-Regular',Menlo,monospace;
   --tint0:#2C5F8A; --tint1:#C9781F; --tint2:#6A4FA0; --tint3:#2F7D4F; --tint4:#A23E6B; --tint5:#8A6F1E;
+  /* 文氏圖的圈圈：跑過 CVD／對比檢查的一組，深色模式另有自己的一組 */
+  --set1:#1F6FB2; --set2:#C9781F; --set3:#6A4FA0;
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
@@ -42,6 +44,7 @@
     --shadow-s:0 1px 2px rgba(0,0,0,.35);
     --shadow-m:0 1px 2px rgba(0,0,0,.3),0 10px 26px rgba(0,0,0,.35);
     --tint0:#5FA8E0; --tint1:#E3A55C; --tint2:#A98EDB; --tint3:#6FC98D; --tint4:#E08AB3; --tint5:#CFBB55;
+    --set1:#4A94D0; --set2:#C4843E; --set3:#957ACB;
   }
 }
 :root[data-theme="dark"]{
@@ -55,6 +58,7 @@
   --shadow-s:0 1px 2px rgba(0,0,0,.35);
   --shadow-m:0 1px 2px rgba(0,0,0,.3),0 10px 26px rgba(0,0,0,.35);
   --tint0:#5FA8E0; --tint1:#E3A55C; --tint2:#A98EDB; --tint3:#6FC98D; --tint4:#E08AB3; --tint5:#CFBB55;
+  --set1:#4A94D0; --set2:#C4843E; --set3:#957ACB;
 }
 
 *{box-sizing:border-box}
@@ -367,6 +371,22 @@ input[type="number"]{max-width:88px}
 .orbtn{width:100%;font-size:11px;padding:3px 6px;margin-bottom:4px}
 .orsep{display:flex;align-items:center;gap:6px;font-size:10.5px;font-weight:700;color:var(--ink-3);margin:4px 0}
 .orsep::before,.orsep::after{content:"";flex:1;border-top:1px dashed var(--line-soft)}
+/* 文氏圖：線是圈圈的顏色，字一律用文字色 */
+.venn{border:1px solid var(--line);border-radius:10px;background:var(--surface);padding:10px 12px 8px;max-width:340px;box-shadow:var(--shadow-s)}
+.venn svg{display:block;width:100%;height:auto;font-family:var(--ui)}
+.venn .vframe{fill:none;stroke:var(--line);stroke-dasharray:4 3}
+.venn .vkeep{fill:var(--accent-soft)}
+.venn .vring{fill:none;stroke-width:2}
+.venn .vtag{font-size:11px;font-weight:700;fill:var(--surface);text-anchor:middle}
+.venn .vin{font-size:14px;font-weight:700;fill:var(--ink);text-anchor:middle}
+.venn .vout{font-size:12px;fill:var(--ink-3);text-anchor:middle}
+.venn .vspot{cursor:help}
+.venn .vspot:hover .vin,.venn .vspot:hover .vout{text-decoration:underline}
+.vlegend{display:flex;flex-direction:column;gap:3px;margin-top:6px;font-size:11.5px;color:var(--ink-2)}
+.vlegend i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:0}
+.vlegend .vkeepdot{border-radius:3px;background:var(--accent-soft);border:1px solid var(--line)}
+.vlegend code{font-family:var(--mono);font-size:11px;color:var(--ink);word-break:break-all}
+.vcap{margin:6px 0 0;font-size:11.5px;line-height:1.55;color:var(--ink-2)}
 .agg{display:flex;gap:6px;margin-bottom:7px;align-items:center}
 .sec{font-family:var(--ui);font-weight:700;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);margin:14px 0 7px}
 .sec:first-child{margin-top:0}
@@ -2122,6 +2142,8 @@ function renderInspector(){
       h += '<p class="note">有套轉換。<b>注意：</b>欄位被函數包住後，資料庫多半用不到那個索引，大表會變慢。<br>可以的話在來源就存好對得上的欄位。</p>';
     else
       h += '<p class="note">兩邊型別對不上時用右邊的下拉轉一下。<br>例如 <code>deal_time</code> 是「2024-03-01 08:30」，要跟 <code>deal_date</code> 對就選<b>轉日期</b>。</p>';
+    const jv = joinPairsVenn(n);
+    if(jv) h += '<div class="sec">哪些列會留下</div>' + jv;
   }
 
   if(n.type === 'union'){
@@ -2164,6 +2186,7 @@ function renderInspector(){
          tests.map((f, i)=>'第 '+(i+1)+' 組中 '+S.rows.filter(f).length).join('、')+
          (n.any.length > 2 ? '，同時中好幾組 ' : '，兩組都中 ')+multi+'。'+
          (multi ? '<br>同時中的列只留一次，所以不是直接相加。' : '')+'</p>';
+    h += n.any.length <= 3 ? orVenn(n, S) : '<p class="note">超過 3 組，文氏圖畫不下 —— 看逐步檢視裡每列的 ✓/✗。</p>';
     if(up && up.type === 'groupby')
       h += '<p class="note">這塊接在 GROUP BY 後面 —— 這就是 <code>HAVING</code> 在做的事。</p>';
   }
@@ -2884,6 +2907,9 @@ function buildSteps(){
           box.appendChild(miniTable('左表', L, {tint:r=>col.get(keyL(r)), drop: n.joinType === 'INNER' ? (r=>!rset.has(keyL(r))) : (()=>false)}));
           box.appendChild(mark('⨝'));
           box.appendChild(miniTable('右表', R, {tint:r=>col.get(keyR(r)), drop:r=>!lset.has(keyR(r))}));
+          const d = document.createElement('div');
+          d.innerHTML = joinVenn(n, L, R, keyL, keyR);
+          box.appendChild(d);
         }
       });
       const J = evalNode(n);
@@ -3001,6 +3027,8 @@ function buildSteps(){
           const marked = {cols:S.cols.concat(tests.map((f, i)=>'第'+tag(i)+'組')),
                           rows:S.rows.map(r=>r.concat(tests.map(f=>f(r) ? '✓' : '✗')))};
           box.appendChild(miniTable('篩選中（任一組 ✓ 就留）', marked, {drop:r=>!keep(r)}));
+          const v = orVenn(n, S);
+          if(v){ const d = document.createElement('div'); d.innerHTML = v; box.appendChild(d); }
         }
       });
     }
@@ -3060,6 +3088,107 @@ function buildSteps(){
   return steps;
 }
 
+/* ---- 文氏圖：一個圈是「中了某個條件的列」（或某張表的列），塗了底色的地方會留下來 ----
+   區塊用位元表示：第 1 個圈是 1、第 2 個是 2、第 3 個是 4；3 = 同時在 1 和 2 裡 */
+let vennSeq = 0;
+const SET_COLORS = ['var(--set1)', 'var(--set2)', 'var(--set3)'];
+const SET_TAGS = ['①', '②', '③'];
+const VENN = {
+  2: {h:156, circles:[[114,80,56],[186,80,56]], tags:[[70,34],[230,34]],
+      spots:{1:[88,84], 2:[212,84], 3:[150,84]}},
+  3: {h:204, circles:[[122,78,52],[178,78,52],[150,126,52]], tags:[[78,36],[222,36],[100,172]],
+      spots:{1:[100,66], 2:[200,66], 4:[150,156], 3:[150,54], 5:[122,118], 6:[178,118], 7:[150,100]}}
+};
+/* o = {sets:[{name, text}], count:區塊 => 列數, keep:區塊 => 留不留, tip:區塊 => 說明,
+        outside:都沒中的列數（沒有就不畫外框）, caption} */
+function vennHTML(o){
+  const k = o.sets.length, L = VENN[k];
+  if(!L) return '';
+  const id = 'venn' + (++vennSeq), W = 300, all = (1 << k) - 1;
+  const circle = (c, extra) => '<circle cx="'+c[0]+'" cy="'+c[1]+'" r="'+c[2]+'"'+(extra || '')+'/>';
+  let defs = '', fill = '', marks = '', spots = '';
+  L.circles.forEach((c, i)=>{ defs += '<clipPath id="'+id+'c'+i+'">'+circle(c)+'</clipPath>'; });
+  for(let m = 1; m <= all; m++){
+    if(!o.keep(m)) continue;
+    /* 這一塊 = 在 m 裡的圈都要包到（一層層 clip），不在 m 裡的圈要挖掉（mask） */
+    let hole = '<mask id="'+id+'m'+m+'"><rect width="'+W+'" height="'+L.h+'" fill="#fff"/>';
+    L.circles.forEach((c, i)=>{ if(!(m & (1 << i))) hole += circle(c, ' fill="#000"'); });
+    defs += hole + '</mask>';
+    let shape = '<rect width="'+W+'" height="'+L.h+'" class="vkeep" mask="url(#'+id+'m'+m+')"/>';
+    L.circles.forEach((c, i)=>{ if(m & (1 << i)) shape = '<g clip-path="url(#'+id+'c'+i+')">'+shape+'</g>'; });
+    fill += shape;
+  }
+  L.circles.forEach((c, i)=>{
+    marks += circle(c, ' class="vring" style="stroke:'+SET_COLORS[i]+'"');
+    const t = L.tags[i];
+    marks += '<circle cx="'+t[0]+'" cy="'+t[1]+'" r="9" style="fill:'+SET_COLORS[i]+'"/>'+
+             '<text x="'+t[0]+'" y="'+(t[1] + 4)+'" class="vtag">'+(i + 1)+'</text>';
+  });
+  for(let m = 1; m <= all; m++){
+    const p = L.spots[m];
+    spots += '<g class="vspot"><title>'+esc(o.tip(m))+'</title><circle cx="'+p[0]+'" cy="'+p[1]+'" r="15" fill="transparent"/>'+
+             '<text x="'+p[0]+'" y="'+(p[1] + 4)+'" class="'+(o.keep(m) ? 'vin' : 'vout')+'">'+o.count(m)+'</text></g>';
+  }
+  const frame = o.outside === undefined ? '' :
+    '<rect x="1" y="1" width="'+(W - 2)+'" height="'+(L.h - 2)+'" rx="8" class="vframe"/>'+
+    '<g class="vspot"><title>一組都沒中：'+o.outside+' 列，會被丟掉</title>'+
+    '<text x="'+(W - 10)+'" y="'+(L.h - 10)+'" class="vout" style="text-anchor:end">都沒中 '+o.outside+'</text></g>';
+  const legend = o.sets.map((s, i)=>
+    '<div><i style="background:'+SET_COLORS[i]+'"></i>'+SET_TAGS[i]+' '+esc(s.name)+
+    (s.text ? '：<code>'+esc(s.text)+'</code>' : '')+'</div>').join('');
+  return '<div class="venn"><svg viewBox="0 0 '+W+' '+L.h+'" role="img" aria-label="'+esc(o.caption)+'">'+
+         '<defs>'+defs+'</defs>'+frame+fill+marks+spots+'</svg>'+
+         '<div class="vlegend">'+legend+'<div><i class="vkeepdot"></i>有底色 = 會留下來</div></div>'+
+         '<p class="vcap">'+o.caption+'</p></div>';
+}
+/* OR 篩選的文氏圖：每組一個圈，留下的是聯集 */
+function orVenn(n, S){
+  if(!isOrFilter(n) || n.any.length > 3) return '';
+  const tests = n.any.map(b=>condTest({op:'OR', any:[b]}, S.cols));
+  const maskOf = r => tests.reduce((m, f, i)=>m | (f(r) ? 1 << i : 0), 0);
+  const tally = {};
+  S.rows.forEach(r=>{ const m = maskOf(r); tally[m] = (tally[m] || 0) + 1; });
+  const names = m => [0, 1, 2].filter(i=>m & (1 << i)).map(i=>SET_TAGS[i]).join('、');
+  const only = m => n.any.length > 1 && m !== (1 << n.any.length) - 1;
+  return vennHTML({
+    sets:n.any.map((b, i)=>({name:'第'+SET_TAGS[i]+'組', text:condText({op:'OR', any:[b]})})),
+    count:m => tally[m] || 0,
+    keep:m => m > 0,
+    outside:tally[0] || 0,
+    tip:m => (only(m) ? '只中' : '同時中') + '第' + names(m) + '組：' + (tally[m] || 0) + ' 列',
+    caption:'OR 留下的是所有圈圈蓋到的地方（聯集）。重疊的地方同一列只算一次，所以留下的列數不是各組相加。'
+  });
+}
+/* JOIN 的文氏圖：左表、右表各一個圈，重疊 = 對得上 */
+function joinVenn(n, L, R, keyL, keyR){
+  const lset = new Set(L.rows.map(keyL)), rset = new Set(R.rows.map(keyR));
+  const lHit = L.rows.filter(r=>rset.has(keyL(r))).length, rHit = R.rows.filter(r=>lset.has(keyR(r))).length;
+  const count = {1:L.rows.length - lHit, 2:R.rows.length - rHit, 3:lHit};
+  const left = n.joinType === 'LEFT';
+  return vennHTML({
+    sets:[0, 1].map(i=>{
+      const src = srcOf(n.id, i);
+      return {name:i ? '右表' : '左表', text:src && src.type === 'table' ? src.table : ''};
+    }),
+    count:m => count[m],
+    keep:m => m === 3 || (left && m === 1),
+    tip:m => m === 3 ? '對得上：左表 '+lHit+' 列、右表 '+rHit+' 列' :
+             m === 1 ? '左表對不上的 '+count[1]+' 列'+(left ? '：LEFT 照樣留下，右邊的欄位補 NULL' : '：INNER 會丟掉') :
+                       '右表對不上的 '+count[2]+' 列：不管 INNER 或 LEFT 都不會出現',
+    caption: left
+      ? 'LEFT JOIN 留下整個左圈：對得上的接上右表，對不上的右邊補 NULL。'
+      : 'INNER JOIN 只留兩圈重疊的地方（交集）：兩邊都對得上才留下。'
+  });
+}
+/* 屬性面板用：跟逐步檢視用同一套配對方式算 */
+function joinPairsVenn(n){
+  const L = evalNode(srcOf(n.id,0)), R = evalNode(srcOf(n.id,1));
+  const pairs = joinKeys(n).map(k=>({l:L.cols.indexOf(k.left), r:R.cols.indexOf(k.right)}))
+    .filter(x=>x.l >= 0 && x.r >= 0);
+  if(!pairs.length || !L.rows.length || !R.rows.length) return '';
+  return joinVenn(n, L, R, row=>pairs.map(x=>String(row[x.l])).join(' ∥ '),
+                           row=>pairs.map(x=>String(row[x.r])).join(' ∥ '));
+}
 function mark(ch){
   const d = document.createElement('div');
   d.className = 'arrow'; d.textContent = ch;
