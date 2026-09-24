@@ -1296,6 +1296,113 @@ test('OR: HAVING and NOT BETWEEN become OR filters', () => {
   return 'HAVING OR kept; NOT BETWEEN keeps 0 and 4';
 });
 
+/* the graph as it stands must be what its own SQL parses back into */
+function stableSQL() {
+  const {nodes, edges, uid} = api.state;
+  const steps = () => api.chainOrder().map(n => n.type + (n.type === 'filter' ? ':' + n.op : '')).join(' > ');
+  const generated = api.buildSQL(), before = steps();
+  const back = api.astToGraph(api.parseSQLText(generated));
+  api.state.nodes = back.nodes; api.state.edges = back.edges;
+  try {
+    assert.equal(steps(), before, 'same steps after reparsing');
+    assert.equal(api.buildSQL(), generated, 'same SQL after reparsing');
+  } finally {
+    Object.assign(api.state, {nodes, edges, uid});
+  }
+  return generated;
+}
+const orData = {r:{cols:[{name:'id'},{name:'member_rank'},{name:'inv_rank'}],
+                   rows:[[1,5,90],[2,90,5],[3,90,90],[4,1,1]]}};
+
+test('OR editing: a plain filter grows a second group and round-trips', () => {
+  api.state.dialect = 'postgres';
+  const graph = graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20');
+  installGraph(api, graph, orData);
+  const f = graph.nodes.find(n => n.type === 'filter');
+  api.orFromPlain(f, ['id','member_rank','inv_rank']);
+  assert.equal(api.isOrFilter(f), true);
+  assert.equal(f.any.length, 2);
+  Object.assign(f.any[1][0], {col:'inv_rank', op:'<=', val:'20'});
+  assert.match(stableSQL(), /WHERE member_rank <= 20 OR inv_rank <= 20/);
+  const out = api.evalNode(graph.nodes.find(n => n.type === 'output'));
+  assert.deepEqual(json(out.rows.map(r => r[0])), [1,2,4]);
+
+  api.orAddCond(f, 1, ['id','member_rank','inv_rank']);
+  Object.assign(f.any[1][1], {col:'member_rank', op:'>', val:'50'});
+  api.orAddGroup(f, ['id','member_rank','inv_rank']);
+  Object.assign(f.any[2][0], {col:'id', op:'=', val:'3'});
+  assert.match(stableSQL(), /WHERE member_rank <= 20 OR \(inv_rank <= 20 AND member_rank > 50\) OR id = 3/);
+  return 'plain → 2 groups → AND inside a group → 3 groups, SQL stable';
+});
+
+test('OR editing: shrinking to one group collapses or splits into a chain', () => {
+  let graph = graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20 OR inv_rank <= 20');
+  installGraph(api, graph, orData);
+  let f = graph.nodes.find(n => n.type === 'filter');
+  assert.deepEqual(json(api.orDelTerm(f, 0, 0)), []);
+  assert.equal(api.isOrFilter(f), false);
+  assert.deepEqual([f.col, f.op, f.val], ['inv_rank', '<=', 20]);
+  assert.equal('any' in f, false);
+  assert.match(stableSQL(), /WHERE inv_rank <= 20\n/);
+
+  graph = graphFromSQL(api, 'SELECT * FROM r WHERE id = 9 OR (member_rank <= 20 AND inv_rank <= 20)');
+  installGraph(api, graph, orData);
+  f = graph.nodes.find(n => n.type === 'filter');
+  const made = api.orDelTerm(f, 0, 0);
+  assert.equal(made.length, 1);
+  const filters = api.chainOrder().filter(n => n.type === 'filter');
+  assert.deepEqual(json(filters.map(n => [n.col, n.op, n.val])), [['member_rank','<=',20], ['inv_rank','<=',20]]);
+  assert.match(stableSQL(), /WHERE member_rank <= 20\n    AND inv_rank <= 20/);
+  const out = api.evalNode(api.state.nodes.find(n => n.type === 'output'));
+  assert.deepEqual(json(out.rows.map(r => r[0])), [4]);
+
+  /* the last group being a nested OR becomes the node itself */
+  graph = graphFromSQL(api, 'SELECT * FROM r WHERE id = 9 OR ((id = 1 OR id = 2) AND inv_rank > 0)');
+  installGraph(api, graph, orData);
+  f = graph.nodes.find(n => n.type === 'filter');
+  api.orDelTerm(f, 0, 0);
+  assert.equal(api.isOrFilter(f), true);
+  assert.equal(f.any.length, 2);
+  stableSQL();
+  return 'one condition → plain filter; AND group → two chained filters; nested OR kept';
+});
+
+test('OR view: the block, inspector and step-through spell out the groups', () => {
+  const graph = graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20 OR inv_rank <= 20');
+  installGraph(api, graph, orData);
+  const f = graph.nodes.find(n => n.type === 'filter');
+  const summary = api.nodeSummary(f);
+  assert.match(summary, /member_rank &lt;= 20<\/code><div class="orsep">或<\/div><code>inv_rank &lt;= 20/);
+
+  api.state.sel = f.id;
+  api.renderInspector();
+  const panel = api.inspector.innerHTML;
+  assert.match(panel, /第 1 組[\s\S]*第 2 組/);
+  assert.match(panel, /data-ob="1" data-oc="0" data-f="col"/);
+  assert.match(panel, /data-or-group/);
+  assert.match(panel, /4 列 → <b>留 3 列<\/b>：第 1 組中 2、第 2 組中 2，兩組都中 1/);
+
+  const step = api.buildSteps().find(s => s.title === 'WHERE');
+  const box = {children:[], appendChild(c) { this.children.push(c); return c; }};
+  step.render(box);
+  const table = box.children[0].innerHTML;
+  assert.match(table, /第①組<\/th><th>第②組/);
+  assert.equal((table.match(/class="r drop"/g) || []).length, 1, 'only the row missing both groups is struck');
+
+  for (let i = 0; i < 3; i++) api.orAddGroup(f, ['id']);
+  assert.match(api.nodeSummary(f), /…還有 3 組$/);
+  return 'block shows 或 between groups; panel counts overlap; step-through marks ✓/✗';
+});
+
+test('OR editing: a plain filter offers the OR button', () => {
+  const graph = graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20');
+  installGraph(api, graph, orData);
+  api.state.sel = graph.nodes.find(n => n.type === 'filter').id;
+  api.renderInspector();
+  assert.match(api.inspector.innerHTML, /data-to-or/);
+  return 'plain filter panel has ＋ 或';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {

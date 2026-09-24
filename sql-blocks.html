@@ -356,6 +356,17 @@ input[type="number"]{max-width:88px}
 .branch{display:flex;align-items:center;gap:6px;margin-bottom:7px;font-family:var(--mono);font-size:11.5px;color:var(--ink-3)}
 .branch .x{border:none;background:none;color:var(--ink-3);padding:0 2px;font-size:15px;line-height:1}
 .branch .x:hover{color:var(--drop)}
+/* OR 篩選：一組一個框，組跟組之間一條「或」 */
+.orgrp{border:1px solid var(--line-soft);border-radius:8px;padding:7px 8px 4px}
+.orhead{font-size:10.5px;color:var(--ink-3);margin-bottom:6px}
+.orcond select,.orcond input{min-width:0;flex:1}
+.orcond select[data-f="col"]{flex:2}
+.orcond select[data-f="op"]{flex:0 0 68px}
+.orand{font-size:10.5px;color:var(--ink-3);margin:-3px 0 4px 2px}
+.orchip{flex:1;white-space:normal;word-break:break-all}
+.orbtn{width:100%;font-size:11px;padding:3px 6px;margin-bottom:4px}
+.orsep{display:flex;align-items:center;gap:6px;font-size:10.5px;font-weight:700;color:var(--ink-3);margin:4px 0}
+.orsep::before,.orsep::after{content:"";flex:1;border-top:1px dashed var(--line-soft)}
 .agg{display:flex;gap:6px;margin-bottom:7px;align-items:center}
 .sec{font-family:var(--ui);font-weight:700;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);margin:14px 0 7px}
 .sec:first-child{margin-top:0}
@@ -1592,8 +1603,14 @@ function nodeSummary(n){
     }
     case 'filter': {
       if(isOrFilter(n)){
-        const t = condText(n);
-        return '<code>'+esc(t.length > 40 ? t.slice(0, 40)+'…' : t)+'</code>';
+        /* 一組一行，組跟組之間寫「或」；太多組就折起來 */
+        const line = b => {
+          const t = b.map(c=>isOrFilter(c) ? '('+condText(c)+')' : condText(c)).join(' 且 ');
+          return '<code>'+esc(t.length > 30 ? t.slice(0, 30)+'…' : t)+'</code>';
+        };
+        const shown = n.any.length > 3 ? n.any.slice(0, 2) : n.any;
+        return shown.map(line).join('<div class="orsep">或</div>') +
+               (n.any.length > shown.length ? '<div class="orsep">或</div>…還有 '+(n.any.length - shown.length)+' 組' : '');
       }
       const v = String(n.val == null ? '' : n.val);
       const shown = v.length > 22 ? v.slice(0, 22)+'…' : v;
@@ -2117,8 +2134,36 @@ function renderInspector(){
 
   if(n.type === 'filter' && isOrFilter(n)){
     const up = srcOf(n.id, 0);
-    h += '<p class="note">這塊是從 SQL 反解來的 <code>OR</code> 條件，任何一邊成立就留下：<br><code>'+esc(condText(n))+'</code>'+
-         '<br>要改條件請改 SQL 再反解一次。</p>';
+    h += '<div class="sec">條件（任一組成立就留下）</div>';
+    n.any.forEach((b, bi)=>{
+      if(bi) h += '<div class="orsep">或</div>';
+      h += '<div class="orgrp"><div class="orhead">第 '+(bi+1)+' 組'+(b.length > 1 ? '（每個都要成立）' : '')+'</div>';
+      b.forEach((c, ci)=>{
+        const at = ' data-ob="'+bi+'" data-oc="'+ci+'"';
+        const kill = '<button class="x" data-or-del="'+bi+'.'+ci+'" aria-label="刪掉這個條件">×</button>';
+        if(ci) h += '<div class="orand">且</div>';
+        if(isOrFilter(c)){
+          /* 括號裡又一組 OR：面板只編兩層，更深的照原樣留著 */
+          h += '<div class="branch"><code class="orchip" title="要改這段請改 SQL 再反解">('+esc(condText(c))+')</code>'+kill+'</div>';
+          return;
+        }
+        h += '<div class="branch orcond"><select'+at+' data-f="col">'+
+             (avail.indexOf(c.col) < 0 ? opt(c.col, c.col) : '')+avail.map(x=>colOpt(x, c.col)).join('')+'</select>'+
+             '<select'+at+' data-f="op">'+FILTER_OPS.map(o=>opt(o, c.op)).join('')+'</select>'+
+             (needsVal(c.op) ? '<input type="text"'+at+' data-f="val" value="'+esc(c.val)+'">' : '')+kill+'</div>';
+      });
+      h += '<button class="btn ghost orbtn" data-or-and="'+bi+'">＋ 且（這組再加一個條件）</button></div>';
+    });
+    h += '<button class="btn ghost" data-or-group style="width:100%;margin-top:6px">＋ 或（多一組）</button>';
+    /* 每組各中幾列、同時中好幾組的有幾列 —— OR 不是把各組加起來 */
+    const S = up ? evalNode(up) : {cols:[], rows:[]};
+    const tests = n.any.map(b=>condTest({op:'OR', any:[b]}, S.cols));
+    const hits = S.rows.map(r=>tests.filter(f=>f(r)).length);
+    const kept = hits.filter(k=>k > 0).length, multi = hits.filter(k=>k > 1).length;
+    h += '<p class="note">現在：'+S.rows.length+' 列 → <b>留 '+kept+' 列</b>：'+
+         tests.map((f, i)=>'第 '+(i+1)+' 組中 '+S.rows.filter(f).length).join('、')+
+         (n.any.length > 2 ? '，同時中好幾組 ' : '，兩組都中 ')+multi+'。'+
+         (multi ? '<br>同時中的列只留一次，所以不是直接相加。' : '')+'</p>';
     if(up && up.type === 'groupby')
       h += '<p class="note">這塊接在 GROUP BY 後面 —— 這就是 <code>HAVING</code> 在做的事。</p>';
   }
@@ -2133,6 +2178,7 @@ function renderInspector(){
            (!inList(n.val).length ? '<br><b style="color:var(--drop)">清單是空的：IN 永遠不成立，NOT IN 永遠成立。</b>' : '')+'</p>';
     if(n.op === 'LIKE' || n.op === 'NOT LIKE')
       h += '<p class="note"><code>%</code> = 任意長度，<code>_</code> = 剛好一個字。<br><code>台%</code> 是「開頭是台」，<code>%北%</code> 是「中間有北」。</p>';
+    h += '<button class="btn ghost" data-to-or style="width:100%;margin-top:4px">＋ 或（符合另一個條件也留下）</button>';
     if(up && up.type === 'groupby')
       h += '<p class="note">這塊接在 GROUP BY 後面 —— 這就是 <code>HAVING</code> 在做的事。<br>因為上一步已經變成一個 CTE，用 <code>WHERE</code> 就夠了，不用 <code>HAVING</code>。</p>';
   }
@@ -2255,6 +2301,7 @@ inspector.addEventListener('change', e=>{
     n.keys[Number(t.dataset.k)][f] = v;
     delete n.leftCol; delete n.rightCol;
   }
+  else if(t.dataset.ob !== undefined) n.any[Number(t.dataset.ob)][Number(t.dataset.oc)][f] = v;
   else if(t.dataset.b !== undefined) n.branches[Number(t.dataset.b)][f] = (f === 'val') ? Number(v) : v;
   else if(t.dataset.a !== undefined) n.aggs[Number(t.dataset.a)][f] = v;
   else if(f === 'all') n.all = (v === 'x');
@@ -2278,6 +2325,15 @@ inspector.addEventListener('click', e=>{
   if(t.hasAttribute('data-no-cols')){ n.cols = []; refresh(); return; }
   if(t.hasAttribute('data-add-branch')){ n.branches.push({op:'>=', val:0, then:'新類別'}); refresh(); return; }
   if(t.dataset.delBranch !== undefined){ n.branches.splice(Number(t.dataset.delBranch),1); refresh(); return; }
+  if(t.hasAttribute('data-to-or')){ orFromPlain(n, colsInto(n.id)); refresh(); return; }
+  if(t.hasAttribute('data-or-group')){ orAddGroup(n, colsInto(n.id)); refresh(); return; }
+  if(t.dataset.orAnd !== undefined){ orAddCond(n, Number(t.dataset.orAnd), colsInto(n.id)); refresh(); return; }
+  if(t.dataset.orDel !== undefined){
+    const ix = t.dataset.orDel.split('.').map(Number);
+    const made = orDelTerm(n, ix[0], ix[1]);
+    if(made.length){ renderNodes(); made.forEach(m=>refit(m.id)); }   /* 拆出來的步驟貼齊前一塊 */
+    refresh(); return;
+  }
   if(t.hasAttribute('data-add-key')){
     const L = colsInto(n.id,0), R = colsInto(n.id,1);
     n.keys = joinKeys(n).concat([{left:L[0] || '', right:R[0] || '', lfn:'', rfn:''}]);
@@ -2314,6 +2370,45 @@ function removeNode(id){
   renderNodes();
   outs.forEach(e=>refit(e.to));          /* 接回去之後把缺口補起來 */
   refresh();
+}
+/* ---- OR 篩選的編輯：any 是好幾組，每組裡的條件用 AND 串 ---- */
+const blankCond = (cols, col) => ({col:col || cols[0] || '', op:'=', val:''});
+/* 一般篩選多開一組，原本的條件變成第 1 組 */
+function orFromPlain(n, cols){
+  const first = {col:n.col, op:n.op, val:n.val};
+  if(n.str) first.str = true;
+  delete n.col; delete n.val; delete n.str;
+  n.op = 'OR';
+  n.any = [[first], [blankCond(cols, first.col)]];
+}
+function orAddGroup(n, cols){ n.any.push([blankCond(cols)]); }
+function orAddCond(n, bi, cols){ n.any[bi].push(blankCond(cols, (n.any[bi][0] || {}).col)); }
+/* 刪一個條件；組刪空了就整組拿掉。回傳拆出來的新步驟（見 settleOr） */
+function orDelTerm(n, bi, ci){
+  n.any[bi].splice(ci, 1);
+  if(!n.any[bi].length) n.any.splice(bi, 1);
+  return settleOr(n);
+}
+/* 只剩一組就不是 OR 了：一個條件變回一般篩選，好幾個條件拆成一塊接一塊 ——
+   跟反解同一段 SQL 畫出來的一樣，SQL 和圖來回才不會變形 */
+function settleOr(n){
+  if(!isOrFilter(n) || n.any.length > 1) return [];
+  const only = (n.any[0] || []).slice();
+  delete n.any;
+  const head = only.shift() || blankCond(colsInto(n.id));
+  if(isOrFilter(head)){ n.op = 'OR'; n.any = head.any; }
+  else { n.col = head.col; n.op = head.op; n.val = head.val; if(head.str) n.str = true; else delete n.str; }
+  const made = [];
+  let prev = n;
+  only.forEach(c=>{
+    const m = Object.assign({id:'n'+(++state.uid), type:'filter', x:prev.x + 164 + SNAP_GAP, y:prev.y}, JSON.parse(JSON.stringify(c)));
+    state.nodes.forEach(o=>{ if(o !== prev && o.x >= prev.x + 140) o.x += 164 + SNAP_GAP; });
+    state.edges.filter(e=>e.from === prev.id).forEach(e=>{ e.from = m.id; });
+    state.nodes.push(m);
+    state.edges.push({from:prev.id, to:m.id, port:0});
+    made.push(m); prev = m;
+  });
+  return made;
 }
 function toggle(arr, v){ const i = arr.indexOf(v); if(i >= 0) arr.splice(i,1); else arr.push(v); }
 function prune(n){
@@ -2898,7 +2993,15 @@ function buildSteps(){
               ? '只留下 <code>'+esc(condText(n))+'</code> 的列 —— <code>OR</code> 是<strong>任何一邊成立</strong>就留下，其他丟掉。'
               : '只留下 '+opWords(n)+' 的列，其他丟掉。')+
             (s0 && s0.type === 'groupby' ? '<br>接在 GROUP BY 後面時，這其實就是 <code>HAVING</code> 在做的事。' : ''),
-        render: box => box.appendChild(miniTable('篩選中', S, {drop:r=>!keep(r)}))
+        render: box => {
+          if(!isOrFilter(n)){ box.appendChild(miniTable('篩選中', S, {drop:r=>!keep(r)})); return; }
+          /* 每一列補上各組中了沒，一眼看出為什麼留、為什麼丟 */
+          const tests = n.any.map(b=>condTest({op:'OR', any:[b]}, S.cols));
+          const tag = i => i < 10 ? '①②③④⑤⑥⑦⑧⑨⑩'[i] : '#'+(i+1);
+          const marked = {cols:S.cols.concat(tests.map((f, i)=>'第'+tag(i)+'組')),
+                          rows:S.rows.map(r=>r.concat(tests.map(f=>f(r) ? '✓' : '✗')))};
+          box.appendChild(miniTable('篩選中（任一組 ✓ 就留）', marked, {drop:r=>!keep(r)}));
+        }
       });
     }
 
@@ -3138,8 +3241,10 @@ document.getElementById('btn-adv').addEventListener('click', ()=>loadPreset(pres
    9. REFRESH
    ============================================================ */
 function refresh(keepInspector){
-  const focusKey = keepInspector && document.activeElement && document.activeElement.dataset
-    ? document.activeElement.dataset.f : null;
+  /* OR 篩選有好幾個同名欄位，要連第幾組第幾個一起記，焦點才回得到原位 */
+  const ds = keepInspector && document.activeElement && document.activeElement.dataset;
+  const focusKey = ds && ds.f ? '[data-f="'+ds.f+'"]'+
+    (ds.ob !== undefined ? '[data-ob="'+ds.ob+'"][data-oc="'+ds.oc+'"]' : '') : null;
   renderNodes();
   drawWires();
   if(!keepInspector) renderInspector();
@@ -3150,7 +3255,7 @@ function refresh(keepInspector){
   renderStage();
   if(keepInspector) renderInspector();
   if(focusKey){
-    const back = inspector.querySelector('[data-f="'+focusKey+'"]');
+    const back = inspector.querySelector(focusKey);
     if(back) back.focus();
   }
 }
