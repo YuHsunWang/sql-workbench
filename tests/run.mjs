@@ -1222,6 +1222,80 @@ test('tidy: chained joins lay out without overlapping', () => {
   return report.join(', ') + '; branch costs exactly one wire';
 });
 
+test('OR: a WHERE with OR keeps both sides instead of dropping the tail', () => {
+  const sql = 'SELECT * FROM r WHERE r.member_rank <= 20 OR r.inv_rank <= 20';
+  const parsed = api.parseSQLText(sql);
+  assert.equal(parsed.warn.some(w => /OR/.test(w)), false, 'no OR-dropped warning');
+  const graph = graphFromSQL(api, sql);
+  const filters = graph.nodes.filter(n => n.type === 'filter');
+  assert.equal(filters.length, 1);
+  assert.deepEqual(json(filters[0].any.map(b => b.map(c => [c.col, c.op, c.val]))),
+    [[['member_rank','<=',20]], [['inv_rank','<=',20]]]);
+  installGraph(api, graph, {
+    r:{cols:[{name:'id'},{name:'member_rank'},{name:'inv_rank'}],
+       rows:[[1,5,90],[2,90,5],[3,90,90],[4,1,1]]},
+  });
+  const out = api.evalNode(graph.nodes.find(n => n.type === 'output'));
+  assert.deepEqual(json(out.rows.map(r => r[0])), [1,2,4]);
+  const generated = roundTrip(sql);
+  assert.match(generated, /WHERE member_rank <= 20 OR inv_rank <= 20/);
+  return 'one OR filter, rows 1/2/4 kept, round-trips';
+});
+
+test('OR: parentheses and AND precedence are kept', () => {
+  const sql = 'SELECT * FROM t WHERE a >= 1 AND (b = 2 OR c = 3) AND d = 4';
+  const graph = graphFromSQL(api, sql);
+  const filters = graph.nodes.filter(n => n.type === 'filter');
+  assert.deepEqual(json(filters.map(n => n.op)), ['>=', 'OR', '=']);
+  installGraph(api, graph, {
+    t:{cols:[{name:'id'},{name:'a'},{name:'b'},{name:'c'},{name:'d'}],
+       rows:[[1,1,2,0,4],[2,1,0,3,4],[3,1,0,0,4],[4,0,2,3,4],[5,1,2,3,0]]},
+  });
+  const out = api.evalNode(graph.nodes.find(n => n.type === 'output'));
+  assert.deepEqual(json(out.rows.map(r => r[0])), [1,2]);
+  const generated = roundTrip(sql);
+  assert.match(generated, /a >= 1\n    AND \(b = 2 OR c = 3\)\n    AND d = 4/);
+
+  /* without parentheses AND binds first: a = 1 OR (b = 2 AND c = 3) */
+  const loose = graphFromSQL(api, 'SELECT * FROM t WHERE a = 1 OR b = 2 AND c = 3');
+  const orNode = loose.nodes.find(n => n.type === 'filter');
+  assert.deepEqual(json(orNode.any.map(b => b.map(c => c.col))), [['a'], ['b','c']]);
+  assert.match(roundTrip('SELECT * FROM t WHERE a = 1 OR b = 2 AND c = 3'),
+    /WHERE a = 1 OR \(b = 2 AND c = 3\)/);
+
+  /* nested groups and a flattened a OR (b OR c) */
+  const nested = graphFromSQL(api, 'SELECT * FROM t WHERE (a = 1 AND (b = 2 OR c = 3)) OR (d = 4 OR a = 9)');
+  const top = nested.nodes.find(n => n.type === 'filter');
+  assert.equal(top.any.length, 3);
+  assert.equal(top.any[0][1].op, 'OR');
+  roundTrip('SELECT * FROM t WHERE (a = 1 AND (b = 2 OR c = 3)) OR (d = 4 OR a = 9)');
+  return 'AND (b OR c) AND, precedence, nesting all round-trip';
+});
+
+test('OR: parentheses around an expression still parse as an expression', () => {
+  const graph = graphFromSQL(api, 'SELECT * FROM t WHERE (x) > 3 OR (y = 1)');
+  const f = graph.nodes.find(n => n.type === 'filter');
+  assert.deepEqual(json(f.any.map(b => b.map(c => [c.col, c.op]))), [[['x','>']], [['y','=']]]);
+  const err = sqlError('SELECT * FROM t WHERE (a = 1 OR b = )');
+  assert.equal(err.pos > 'SELECT * FROM t WHERE (a = 1 OR b'.length, true, 'error points inside the group');
+  return '(x) > 3 is an expression; broken group reports inside it';
+});
+
+test('OR: HAVING and NOT BETWEEN become OR filters', () => {
+  const graph = graphFromSQL(api,
+    'SELECT city, COUNT(*) AS n FROM t GROUP BY city HAVING COUNT(*) >= 5 OR city = \'台北\'');
+  const having = graph.nodes.filter(n => n.type === 'filter');
+  assert.equal(having.length, 1);
+  assert.equal(having[0].op, 'OR');
+  const nb = graphFromSQL(api, 'SELECT * FROM t WHERE x NOT BETWEEN 1 AND 3');
+  const f = nb.nodes.find(n => n.type === 'filter');
+  assert.deepEqual(json(f.any.map(b => b.map(c => [c.col, c.op, c.val]))), [[['x','<',1]], [['x','>',3]]]);
+  installGraph(api, nb, {t:{cols:[{name:'x'}], rows:[[0],[1],[2],[3],[4]]}});
+  assert.deepEqual(json(api.evalNode(nb.nodes.find(n => n.type === 'output')).rows), [[0],[4]]);
+  assert.match(api.buildSQL(), /WHERE x < 1 OR x > 3/);
+  return 'HAVING OR kept; NOT BETWEEN keeps 0 and 4';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {

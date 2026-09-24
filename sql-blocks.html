@@ -643,8 +643,8 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
       </div>
       <div id="stmt-pick"></div>
       <div id="parse-out"></div>
-      <p class="supported">看得懂：<code>WITH</code> · <code>SELECT</code> · <code>DISTINCT</code> · <code>FROM</code> · 子查詢 · <code>JOIN … ON</code> · <code>WHERE</code>（用 AND 串）· <code>BETWEEN</code> · <code>IN</code> · <code>LIKE</code> · <code>IS NULL</code> · <code>CASE WHEN</code> · 四則運算 · 聚合函數 · <code>GROUP BY</code> · <code>HAVING</code> · 視窗函數 <code>OVER</code> · <code>UNION</code> · <code>ORDER BY</code> · <code>LIMIT</code> / <code>TOP</code> / <code>FETCH FIRST</code>。<br>
-      看不懂：<code>OR</code>、<code>EXISTS</code>、<code>IN (SELECT …)</code>、相關子查詢、<code>PIVOT</code>。碰到會直接告訴你卡在第幾行第幾個字。</p>
+      <p class="supported">看得懂：<code>WITH</code> · <code>SELECT</code> · <code>DISTINCT</code> · <code>FROM</code> · 子查詢 · <code>JOIN … ON</code> · <code>WHERE</code>（AND / OR / 括號）· <code>BETWEEN</code> · <code>IN</code> · <code>LIKE</code> · <code>IS NULL</code> · <code>CASE WHEN</code> · 四則運算 · 聚合函數 · <code>GROUP BY</code> · <code>HAVING</code> · 視窗函數 <code>OVER</code> · <code>UNION</code> · <code>ORDER BY</code> · <code>LIMIT</code> / <code>TOP</code> / <code>FETCH FIRST</code>。<br>
+      看不懂：<code>EXISTS</code>、<code>IN (SELECT …)</code>、相關子查詢、<code>PIVOT</code>。碰到會直接告訴你卡在第幾行第幾個字。</p>
     </div>
   </div>
 </div>
@@ -956,9 +956,8 @@ function evalNode(node, ctx){
   }
 
   case 'filter': {
-    const s = S(), i = s.cols.indexOf(node.col);
-    if(i < 0) return {cols:s.cols, rows:[]};
-    return {cols:s.cols, rows:s.rows.filter(r=>cmp(r[i], node.op, node.val))};
+    const s = S();
+    return {cols:s.cols, rows:s.rows.filter(condTest(node, s.cols))};
   }
 
   case 'select': {
@@ -1148,6 +1147,33 @@ function cmp(v, op, target){
   }
   return false;
 }
+/* 有 OR 的篩選：{op:'OR', any:[支, 支…]}，每一支是用 AND 串的條件，
+   條件本身可以是一般的 {col, op, val}，也可以再是一組 OR（括號） */
+const isOrFilter = n => !!n && n.op === 'OR' && Array.isArray(n.any);
+function condLeaves(n){
+  if(!isOrFilter(n)) return [n];
+  const out = [];
+  n.any.forEach(b=>b.forEach(t=>condLeaves(t).forEach(x=>out.push(x))));
+  return out;
+}
+/* 回傳判斷一列留不留的函數；欄位找不到就一列都不留，跟單一條件時一樣 */
+function condTest(n, cols){
+  if(isOrFilter(n)){
+    const bs = n.any.map(b=>b.map(t=>condTest(t, cols)));
+    return r => bs.some(b=>b.every(f=>f(r)));
+  }
+  const i = cols.indexOf(n.col);
+  if(i < 0) return () => false;
+  return r => cmp(r[i], n.op, n.val);
+}
+/* 給畫面看的條件文字，a >= 1 AND (b = 2 OR c = 3) 這種寫法 */
+function condText(n){
+  if(!isOrFilter(n)) return n.col+' '+n.op+(needsVal(n.op) ? ' '+n.val : '');
+  return n.any.map(b=>{
+    const s = b.map(t=>isOrFilter(t) ? '('+condText(t)+')' : condText(t)).join(' AND ');
+    return b.length > 1 && n.any.length > 1 ? '('+s+')' : s;
+  }).join(' OR ');
+}
 function aggregate(a, group, cols){
   if(a.fn === 'COUNT' && (a.col === '*' || !a.col)) return group.length;
   const i = cols.indexOf(a.col);
@@ -1240,6 +1266,11 @@ const strLit = v => "'"+String(v).replace(/\\/g, state.dialect === 'mysql' ? '\\
 const lit = v => isNum(v) ? String(numish(v)) : strLit(v);
 function operand(v, cols){ return cols.indexOf(v) >= 0 ? q(v) : (isNum(v) ? String(Number(v)) : lit(v)); }
 function condSQL(n){
+  /* AND 比 OR 先結合，本來不用括號；多支時還是包起來，看的人才不用記優先順序 */
+  if(isOrFilter(n)) return n.any.map(b=>{
+    const s = b.map(t=>isOrFilter(t) ? '('+condSQL(t)+')' : condSQL(t)).join(' AND ');
+    return b.length > 1 ? '('+s+')' : s;
+  }).join(' OR ');
   if(!needsVal(n.op)) return q(n.col)+' '+n.op;
   if(n.str) return q(n.col)+' '+n.op+' '+strLit(n.val);
   if(n.op === 'IN' || n.op === 'NOT IN'){
@@ -1299,8 +1330,9 @@ function graphIssue(last){
       let projected = s;
       while(projected && ['filter','distinct','sort'].indexOf(projected.type) >= 0)
         projected = srcOf(projected.id, 0);
-      if(projected && projected.type === 'select' && cols.indexOf(n.col) < 0)
-        return META[n.type].label+' 引用了上一步已沒有的欄位 '+n.col+'。';
+      const gone = condLeaves(n).find(c=>cols.indexOf(c.col) < 0);
+      if(projected && projected.type === 'select' && gone)
+        return META[n.type].label+' 引用了上一步已沒有的欄位 '+gone.col+'。';
     }
     return '';
   }
@@ -1439,14 +1471,15 @@ function buildSQL(){
       const conds = [];
       let walk = n, base = s0;
       for(;;){
-        conds.unshift(condSQL(walk));
+        conds.unshift(walk);
         const up = srcOf(walk.id, 0);
         if(up && up.type === 'filter' && absorbed[up.id]) walk = up;
         else { base = up; break; }
       }
       const inh = inheritedCols(walk);
       if(inh) base = realSource(walk);
-      sql = '  SELECT '+(inh ? list(inh.map(q), 9) : '*')+'\n  FROM '+ref(base)+'\n  WHERE '+conds.join('\n    AND ');
+      sql = '  SELECT '+(inh ? list(inh.map(q), 9) : '*')+'\n  FROM '+ref(base)+'\n  WHERE '+
+        conds.map(c=>isOrFilter(c) && conds.length > 1 ? '('+condSQL(c)+')' : condSQL(c)).join('\n    AND ');
 
     } else if(n.type === 'select'){
       /* 照使用者選的欄位原樣寫出來。就算執行引擎認不得某個欄名也不要退回
@@ -1558,6 +1591,10 @@ function nodeSummary(n){
       return (n.all ? 'UNION ALL' : 'UNION（去重）') + (bad ? '<br><span class="warn">欄位數不一樣（'+a+' vs '+b+'）</span>' : '');
     }
     case 'filter': {
+      if(isOrFilter(n)){
+        const t = condText(n);
+        return '<code>'+esc(t.length > 40 ? t.slice(0, 40)+'…' : t)+'</code>';
+      }
       const v = String(n.val == null ? '' : n.val);
       const shown = v.length > 22 ? v.slice(0, 22)+'…' : v;
       const line = '<code>'+n.col+' '+n.op+(needsVal(n.op) ? ' '+shown : '')+'</code>';
@@ -2078,7 +2115,15 @@ function renderInspector(){
          (a && b && a !== b ? '<br><b style="color:var(--drop)">現在兩邊欄位數不一樣（'+a+' vs '+b+'），多的會被切掉。</b>' : '')+'</p>';
   }
 
-  if(n.type === 'filter'){
+  if(n.type === 'filter' && isOrFilter(n)){
+    const up = srcOf(n.id, 0);
+    h += '<p class="note">這塊是從 SQL 反解來的 <code>OR</code> 條件，任何一邊成立就留下：<br><code>'+esc(condText(n))+'</code>'+
+         '<br>要改條件請改 SQL 再反解一次。</p>';
+    if(up && up.type === 'groupby')
+      h += '<p class="note">這塊接在 GROUP BY 後面 —— 這就是 <code>HAVING</code> 在做的事。</p>';
+  }
+
+  if(n.type === 'filter' && !isOrFilter(n)){
     const up = srcOf(n.id, 0);
     h += '<div class="rowf"><label>欄位</label><select data-f="col">'+avail.map(c=>colOpt(c, n.col)).join('')+'</select></div>';
     h += '<div class="rowf"><label>條件</label><select data-f="op" style="max-width:108px">'+FILTER_OPS.map(o=>opt(o, n.op)).join('')+
@@ -2846,12 +2891,14 @@ function buildSteps(){
     }
 
     if(n.type === 'filter'){
-      const i = S.cols.indexOf(n.col);
+      const keep = condTest(n, S.cols);
       steps.push({
         title:'WHERE',
-        cap:'只留下 '+opWords(n)+' 的列，其他丟掉。'+
+        cap:(isOrFilter(n)
+              ? '只留下 <code>'+esc(condText(n))+'</code> 的列 —— <code>OR</code> 是<strong>任何一邊成立</strong>就留下，其他丟掉。'
+              : '只留下 '+opWords(n)+' 的列，其他丟掉。')+
             (s0 && s0.type === 'groupby' ? '<br>接在 GROUP BY 後面時，這其實就是 <code>HAVING</code> 在做的事。' : ''),
-        render: box => box.appendChild(miniTable('篩選中', S, {drop:r=>!cmp(r[i], n.op, n.val)}))
+        render: box => box.appendChild(miniTable('篩選中', S, {drop:r=>!keep(r)}))
       });
     }
 
@@ -3187,15 +3234,7 @@ function parseSQLText(text){
     if(t.t === 'word' && (t.quoted || !isStop())) { p++; return keepQuoted(t); }
     return null;
   }
-  function skipToClause(){
-    let depth = 0;
-    while(at().t !== 'eof'){
-      if(isOp('(')) depth++;
-      else if(isOp(')')){ if(depth === 0) return; depth--; }
-      else if(depth === 0 && ['GROUP','ORDER','HAVING','LIMIT','UNION','FETCH'].indexOf(up(at())) >= 0) return;
-      p++;
-    }
-  }
+
 
   function parseStatement(){
     const ctes = [];
@@ -3410,11 +3449,37 @@ function parseSQLText(text){
     const op = take().v;
     return {kind:'cmp', left:l, op:op, right:parseExpr()};
   }
+  /* 條件：AND 比 OR 先結合，括號可以改順序。回傳用 AND 串起來的清單，
+     清單裡的一項可以是 {kind:'or', branches:[清單, 清單…]}，每一支又是用 AND 串的清單。 */
+  function parseCondAtom(list){
+    if(isOp('(')){
+      const save = p, nw = warn.length;
+      try {
+        p++;
+        const inner = parseConds();
+        needOp(')');
+        inner.forEach(c=>list.push(c));           /* (a AND b) 外面本來就是 AND，攤平就好 */
+        return;
+      } catch(err){
+        if(!err || !err.sqlErr) throw err;
+        /* 括號其實是運算式的一部分，像 (a + b) > 3 —— 退回去當一般條件讀 */
+        p = save; warn.length = nw;
+        try { list.push(parseCond()); return; }
+        catch(err2){ throw (err2 && err2.sqlErr && err2.pos >= err.pos) ? err2 : err; }
+      }
+    }
+    list.push(parseCond());
+  }
   function parseConds(){
-    const list = [parseCond()];
-    while(eatKw('AND')) list.push(parseCond());
-    if(isKw('OR')){ warn.push('條件裡的 OR 畫不出來，從 OR 開始的部分被忽略了'); skipToClause(); }
-    return list;
+    const branches = [];
+    do {
+      const list = [];
+      do parseCondAtom(list); while(eatKw('AND'));
+      /* a OR (b OR c) 就是 a OR b OR c */
+      if(list.length === 1 && list[0].kind === 'or') list[0].branches.forEach(b=>branches.push(b));
+      else branches.push(list);
+    } while(eatKw('OR'));
+    return branches.length === 1 ? branches[0] : [{kind:'or', branches:branches}];
   }
 
   const stmt = parseStatement();
@@ -3471,13 +3536,19 @@ function astToGraph(parsed){
   }
   /* 一個條件可能要好幾個步驟：BETWEEN 就是 >= 和 <= 兩塊 */
   function condFilters(c){
+    /* 一整組 OR 放進同一塊篩選：any 裡每一支是用 AND 串的條件 */
+    if(c.kind === 'or')
+      return [{op:'OR', any:c.branches.map(b=>[].concat.apply([], b.map(condFilters)))}];
     const col = exprName(c.left);
     if(c.kind === 'between'){
-      if(c.neg){ warn.push('NOT BETWEEN 要用 OR 才畫得出來 — 這個條件被略過，畫面上的列會比實際多'); return []; }
       const lo = litOf(c.lo), hi = litOf(c.hi);
       noteHint(col, [lo, hi]);
-      warn.push('BETWEEN 被拆成兩個步驟（>= 和 <=）— 這就是它真正的意思');
       const q2 = e => e.kind === 'lit' && typeof e.v === 'string';
+      if(c.neg){
+        warn.push('NOT BETWEEN 被改寫成 < 或 >（OR）— 這就是它真正的意思');
+        return [{op:'OR', any:[[{col:col, op:'<', val:lo, str:q2(c.lo)}], [{col:col, op:'>', val:hi, str:q2(c.hi)}]]}];
+      }
+      warn.push('BETWEEN 被拆成兩個步驟（>= 和 <=）— 這就是它真正的意思');
       return [{col:col, op:'>=', val:lo, str:q2(c.lo)}, {col:col, op:'<=', val:hi, str:q2(c.hi)}];
     }
     if(c.kind === 'in'){
