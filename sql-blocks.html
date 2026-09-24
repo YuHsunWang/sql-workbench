@@ -377,6 +377,8 @@ input[type="number"]{max-width:88px}
 .venn .vframe{fill:none;stroke:var(--line);stroke-dasharray:4 3}
 .venn .vkeep{fill:var(--accent-soft)}
 .venn .vring{fill:none;stroke-width:2}
+.venn .vring.vfocus{stroke-width:3.5}
+.vlegend .vcur{color:var(--ink);font-weight:600}
 .venn .vtag{font-size:11px;font-weight:700;fill:var(--surface);text-anchor:middle}
 .venn .vin{font-size:14px;font-weight:700;fill:var(--ink);text-anchor:middle}
 .venn .vout{font-size:12px;fill:var(--ink-3);text-anchor:middle}
@@ -2206,6 +2208,14 @@ function renderInspector(){
       h += '<p class="note">這塊接在 GROUP BY 後面 —— 這就是 <code>HAVING</code> 在做的事。<br>因為上一步已經變成一個 CTE，用 <code>WHERE</code> 就夠了，不用 <code>HAVING</code>。</p>';
   }
 
+  if(n.type === 'filter'){
+    const chain = andChain(n);
+    if(chain.length > 3)
+      h += '<p class="note">這塊跟前後共 '+chain.length+' 塊篩選串在一起（AND），超過 3 塊文氏圖畫不下 —— 看逐步檢視每一關剩幾列。</p>';
+    else if(chain.length > 1)
+      h += '<div class="sec">跟前後的篩選一起看（AND）</div>' + andVenn(n);
+  }
+
   if(n.type === 'distinct'){
     const s = evalNode(srcOf(n.id,0)), d = evalNode(n);
     h += '<p class="note">沒有東西要設定。<br>整列<b>每一欄都一樣</b>才算重複。<br>現在：'+s.rows.length+' 列 → <b>'+d.rows.length+' 列</b>。</p>';
@@ -3020,7 +3030,12 @@ function buildSteps(){
               : '只留下 '+opWords(n)+' 的列，其他丟掉。')+
             (s0 && s0.type === 'groupby' ? '<br>接在 GROUP BY 後面時，這其實就是 <code>HAVING</code> 在做的事。' : ''),
         render: box => {
-          if(!isOrFilter(n)){ box.appendChild(miniTable('篩選中', S, {drop:r=>!keep(r)})); return; }
+          /* 跟前後的篩選一起看：這串 AND 走到這一關，交集剩多少 */
+          const addAnd = () => {
+            const av = andVenn(n, andChain(n).indexOf(n));
+            if(av){ const d = document.createElement('div'); d.innerHTML = av; box.appendChild(d); }
+          };
+          if(!isOrFilter(n)){ box.appendChild(miniTable('篩選中', S, {drop:r=>!keep(r)})); addAnd(); return; }
           /* 每一列補上各組中了沒，一眼看出為什麼留、為什麼丟 */
           const tests = n.any.map(b=>condTest({op:'OR', any:[b]}, S.cols));
           const tag = i => i < 10 ? '①②③④⑤⑥⑦⑧⑨⑩'[i] : '#'+(i+1);
@@ -3029,6 +3044,7 @@ function buildSteps(){
           box.appendChild(miniTable('篩選中（任一組 ✓ 就留）', marked, {drop:r=>!keep(r)}));
           const v = orVenn(n, S);
           if(v){ const d = document.createElement('div'); d.innerHTML = v; box.appendChild(d); }
+          addAnd();
         }
       });
     }
@@ -3119,7 +3135,7 @@ function vennHTML(o){
     fill += shape;
   }
   L.circles.forEach((c, i)=>{
-    marks += circle(c, ' class="vring" style="stroke:'+SET_COLORS[i]+'"');
+    marks += circle(c, ' class="vring'+(o.focus === i ? ' vfocus' : '')+'" style="stroke:'+SET_COLORS[i]+'"');
     const t = L.tags[i];
     marks += '<circle cx="'+t[0]+'" cy="'+t[1]+'" r="9" style="fill:'+SET_COLORS[i]+'"/>'+
              '<text x="'+t[0]+'" y="'+(t[1] + 4)+'" class="vtag">'+(i + 1)+'</text>';
@@ -3131,12 +3147,12 @@ function vennHTML(o){
   }
   const frame = o.outside === undefined ? '' :
     '<rect x="1" y="1" width="'+(W - 2)+'" height="'+(L.h - 2)+'" rx="8" class="vframe"/>'+
-    '<g class="vspot"><title>一組都沒中：'+o.outside+' 列，會被丟掉</title>'+
-    '<text x="'+(W - 10)+'" y="'+(L.h - 10)+'" class="vout" style="text-anchor:end">都沒中 '+o.outside+'</text></g>';
+    '<g class="vspot"><title>'+esc(o.outsideTip || '一組都沒中：'+o.outside+' 列，會被丟掉')+'</title>'+
+    '<text x="'+(W - 10)+'" y="'+(L.h - 10)+'" class="vout" style="text-anchor:end">'+(o.outsideLabel || '都沒中')+' '+o.outside+'</text></g>';
   const legend = o.sets.map((s, i)=>
-    '<div><i style="background:'+SET_COLORS[i]+'"></i>'+SET_TAGS[i]+' '+esc(s.name)+
-    (s.text ? '：<code>'+esc(s.text)+'</code>' : '')+'</div>').join('');
-  return '<div class="venn"><svg viewBox="0 0 '+W+' '+L.h+'" role="img" aria-label="'+esc(o.caption)+'">'+
+    '<div'+(o.focus === i ? ' class="vcur"' : '')+'><i style="background:'+SET_COLORS[i]+'"></i>'+SET_TAGS[i]+' '+esc(s.name)+
+    (s.text ? '：<code>'+esc(s.text)+'</code>' : '')+(o.focus === i ? '　← 這一塊' : '')+'</div>').join('');
+  return '<div class="venn"><svg viewBox="0 0 '+W+' '+L.h+'" role="img" aria-label="'+esc(o.caption.replace(/<[^>]+>/g, ''))+'">'+
          '<defs>'+defs+'</defs>'+frame+fill+marks+spots+'</svg>'+
          '<div class="vlegend">'+legend+'<div><i class="vkeepdot"></i>有底色 = 會留下來</div></div>'+
          '<p class="vcap">'+o.caption+'</p></div>';
@@ -3157,6 +3173,53 @@ function orVenn(n, S){
     outside:tally[0] || 0,
     tip:m => (only(m) ? '只中' : '同時中') + '第' + names(m) + '組：' + (tally[m] || 0) + ' 列',
     caption:'OR 留下的是所有圈圈蓋到的地方（聯集）。重疊的地方同一列只算一次，所以留下的列數不是各組相加。'
+  });
+}
+/* 一串接在一起的篩選 = WHERE … AND …（產生 SQL 時也是併成一個 WHERE）。
+   回傳整串，由上游往下游排 */
+function andChain(n){
+  const feeds = x => state.edges.filter(e=>e.from === x.id);
+  const chain = [n];
+  for(let up = srcOf(n.id, 0); up && up.type === 'filter' && feeds(up).length === 1; up = srcOf(up.id, 0))
+    chain.unshift(up);
+  for(let cur = n;;){
+    const outs = feeds(cur), next = outs.length === 1 ? nodeById(outs[0].to) : null;
+    if(!next || next.type !== 'filter') break;
+    chain.push(next); cur = next;
+  }
+  return chain;
+}
+/* AND 的文氏圖：每一塊篩選一個圈，全部都過的（交集）才留下。
+   upTo 給了就只算到第幾塊為止 —— 逐步檢視用，看得到交集一步步變小 */
+function andVenn(n, upTo){
+  const chain = andChain(n);
+  if(chain.length < 2 || chain.length > 3) return '';
+  const S = evalNode(srcOf(chain[0].id, 0));
+  const k = chain.length, all = (1 << k) - 1;
+  const stop = upTo === undefined ? k - 1 : upTo, need = (1 << (stop + 1)) - 1;
+  const tests = chain.map(f=>condTest(f, S.cols));
+  const tally = {};
+  S.rows.forEach(r=>{ const m = tests.reduce((m, f, i)=>m | (f(r) ? 1 << i : 0), 0); tally[m] = (tally[m] || 0) + 1; });
+  const names = m => [0, 1, 2].filter(i=>m & (1 << i)).map(i=>SET_TAGS[i]).join('、');
+  /* 一關一關過下來各剩幾列 */
+  let left = S.rows.slice();
+  const funnel = [S.rows.length + ' 列'].concat(tests.map((f, i)=>{
+    left = left.filter(f);
+    return i <= stop ? '過第' + SET_TAGS[i] + '關 ' + left.length + ' 列' : null;
+  }).filter(Boolean));
+  return vennHTML({
+    sets:chain.map((f, i)=>({name:'第' + SET_TAGS[i] + '關', text:condText(f)})),
+    focus:chain.indexOf(n),
+    count:m => tally[m] || 0,
+    keep:m => (m & need) === need,
+    outside:tally[0] || 0,
+    outsideLabel:'一關都沒過',
+    outsideTip:'一關都沒過：' + (tally[0] || 0) + ' 列，會被丟掉',
+    tip:m => (m === all ? '每一關都過' : '過了第' + names(m) + '關，其他沒過') + '：' + (tally[m] || 0) + ' 列',
+    caption:(stop < k - 1
+      ? '走到第' + SET_TAGS[stop] + '關：留下的是' + (stop ? '前 ' + (stop + 1) + ' 個圈都蓋到' : '第①圈蓋到') + '的地方。後面每多一關，底色就再縮小一圈。'
+      : 'AND 一關一關過，留下的是<strong>所有圈圈重疊</strong>的地方（交集）。順序換了結果也一樣。') +
+      '<br>' + funnel.join(' → ')
   });
 }
 /* JOIN 的文氏圖：左表、右表各一個圈，重疊 = 對得上 */

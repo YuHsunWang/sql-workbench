@@ -1451,6 +1451,50 @@ test('Venn: JOIN shades the overlap for INNER and the left circle for LEFT', () 
   return 'INNER shades 3 only; LEFT shades 1 and 3; legend names the tables';
 });
 
+test('Venn: chained filters shade the intersection, step by step', () => {
+  const graph = graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20 AND inv_rank <= 20');
+  installGraph(api, graph, orData);
+  const [a, b] = api.chainOrder().filter(n => n.type === 'filter');
+  assert.deepEqual(json(api.andChain(b).map(n => n.id)), [a.id, b.id]);
+  assert.deepEqual(json(api.andChain(a).map(n => n.id)), [a.id, b.id]);
+  /* rows: 1 only ①, 2 only ②, 3 neither, 4 both */
+  const full = api.andVenn(a);
+  assert.deepEqual(vennCounts(full), [['vout',1], ['vout',1], ['vin',1]], 'only the overlap is kept');
+  assert.match(full, /一關都沒過 1</);
+  assert.match(full, /4 列 → 過第①關 2 列 → 過第②關 1 列/);
+  assert.match(full, /class="vcur">[^]*第①關[^]*← 這一塊/);
+  const first = api.andVenn(a, 0);
+  assert.deepEqual(vennCounts(first), [['vin',1], ['vout',1], ['vin',1]], 'after ① the whole first circle is still in');
+  assert.doesNotMatch(first, /過第②關/);
+
+  const step = api.buildSteps().filter(s => s.title === 'WHERE')[0];
+  const box = {children:[], appendChild(c) { this.children.push(c); return c; }};
+  step.render(box);
+  assert.equal(box.children.length, 2);
+  assert.match(box.children[1].innerHTML, /走到第①關/);
+
+  api.state.sel = b.id;
+  api.renderInspector();
+  assert.match(api.inspector.innerHTML, /跟前後的篩選一起看（AND）[\s\S]*class="venn"/);
+  return 'chain found from either end; intersection shaded; step 1 shades circle ①; funnel 4→2→1';
+});
+
+test('Venn: a lone filter or a long chain draws no AND diagram', () => {
+  let graph = graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20');
+  installGraph(api, graph, orData);
+  const lone = graph.nodes.find(n => n.type === 'filter');
+  assert.equal(api.andVenn(lone), '');
+  graph = graphFromSQL(api, 'SELECT * FROM r WHERE id > 0 AND id > 1 AND id > 2 AND id > 3');
+  installGraph(api, graph, orData);
+  const f = graph.nodes.find(n => n.type === 'filter');
+  assert.equal(api.andChain(f).length, 4);
+  assert.equal(api.andVenn(f), '');
+  api.state.sel = f.id;
+  api.renderInspector();
+  assert.match(api.inspector.innerHTML, /共 4 塊篩選串在一起（AND），超過 3 塊文氏圖畫不下/);
+  return 'single filter: none; four chained: note instead';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {
