@@ -2,59 +2,59 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <style>
 :root{
-  --bg:#F2F5F3;
-  --surface:#FFFFFF;
-  --surface-2:#E9EEEB;
-  --line:#D3DCD8;
-  --line-soft:#E3EAE7;
-  --ink:#16211E;
-  --ink-2:#56675F;
-  --ink-3:#869891;
-  --accent:#0E8F80;
-  --accent-ink:#0A6F63;
-  --accent-soft:#D8EDE9;
-  /* block families — colour means what the block does to the table's shape */
-  --f-src:#3D7EA6;
-  --f-comb:#0E8F80;
-  --f-wide:#BE6A33;
-  --f-narrow:#A8446F;
-  --f-coll:#7156B5;
-  --f-out:#2E7D51;
-  --drop:#BE463D;
-  --grid-dot:#CFD9D4;
-  --shadow-s:0 1px 2px rgba(18,38,33,.07);
-  --shadow-m:0 1px 2px rgba(18,38,33,.06),0 10px 26px rgba(18,38,33,.08);
+  --bg:#F6F1E4;
+  --surface:#FFFDF8;
+  --surface-2:#ECE3CD;
+  --line:#DCD0AF;
+  --line-soft:#E9E1C8;
+  --ink:#1E1A12;
+  --ink-2:#5C543F;
+  --ink-3:#8C826A;
+  --accent:#1F6FB2;
+  --accent-ink:#175A92;
+  --accent-soft:#DCEAF6;
+  /* block families — colour is which "line" this step belongs to on the route map */
+  --f-src:#2C5F8A;
+  --f-comb:#1E7A6B;
+  --f-wide:#C9781F;
+  --f-narrow:#A23E6B;
+  --f-coll:#6A4FA0;
+  --f-out:#2F7D4F;
+  --drop:#B23A2E;
+  --grid-dot:#DED2AE;
+  --shadow-s:0 1px 2px rgba(30,24,14,.08);
+  --shadow-m:0 1px 2px rgba(30,24,14,.07),0 10px 26px rgba(30,24,14,.10);
   --r:10px;
   --ui:'Archivo','Noto Sans TC',system-ui,sans-serif;
   --body:'Noto Sans TC','Archivo',system-ui,sans-serif;
   --mono:'IBM Plex Mono',ui-monospace,'SFMono-Regular',Menlo,monospace;
-  --tint0:#3D7EA6; --tint1:#BE6A33; --tint2:#7156B5; --tint3:#2E7D51; --tint4:#A8446F; --tint5:#8A7A22;
+  --tint0:#2C5F8A; --tint1:#C9781F; --tint2:#6A4FA0; --tint3:#2F7D4F; --tint4:#A23E6B; --tint5:#8A6F1E;
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
-    --bg:#0E1514; --surface:#171F1D; --surface-2:#202B28;
-    --line:#2B3733; --line-soft:#232E2B;
-    --ink:#E2EAE7; --ink-2:#9AAAA5; --ink-3:#6B7B76;
-    --accent:#3ECFBB; --accent-ink:#5FDECB; --accent-soft:#17332F;
-    --f-src:#74B7DD; --f-comb:#3ECFBB; --f-wide:#E39C62;
-    --f-narrow:#E082AC; --f-coll:#A892E4; --f-out:#62C28E;
-    --drop:#E8776C; --grid-dot:#25312D;
+    --bg:#15120C; --surface:#1F1A12; --surface-2:#292118;
+    --line:#3C3323; --line-soft:#2C251A;
+    --ink:#F2EBD9; --ink-2:#B9AE93; --ink-3:#877D64;
+    --accent:#5FA8E0; --accent-ink:#89C2ED; --accent-soft:#1D3348;
+    --f-src:#5FA8E0; --f-comb:#4FBFA8; --f-wide:#E3A55C;
+    --f-narrow:#E08AB3; --f-coll:#A98EDB; --f-out:#6FC98D;
+    --drop:#E8776C; --grid-dot:#2A2419;
     --shadow-s:0 1px 2px rgba(0,0,0,.35);
     --shadow-m:0 1px 2px rgba(0,0,0,.3),0 10px 26px rgba(0,0,0,.35);
-    --tint0:#74B7DD; --tint1:#E39C62; --tint2:#A892E4; --tint3:#62C28E; --tint4:#E082AC; --tint5:#CFBB55;
+    --tint0:#5FA8E0; --tint1:#E3A55C; --tint2:#A98EDB; --tint3:#6FC98D; --tint4:#E08AB3; --tint5:#CFBB55;
   }
 }
 :root[data-theme="dark"]{
-  --bg:#0E1514; --surface:#171F1D; --surface-2:#202B28;
-  --line:#2B3733; --line-soft:#232E2B;
-  --ink:#E2EAE7; --ink-2:#9AAAA5; --ink-3:#6B7B76;
-  --accent:#3ECFBB; --accent-ink:#5FDECB; --accent-soft:#17332F;
-  --f-src:#74B7DD; --f-comb:#3ECFBB; --f-wide:#E39C62;
-  --f-narrow:#E082AC; --f-coll:#A892E4; --f-out:#62C28E;
-  --drop:#E8776C; --grid-dot:#25312D;
+  --bg:#15120C; --surface:#1F1A12; --surface-2:#292118;
+  --line:#3C3323; --line-soft:#2C251A;
+  --ink:#F2EBD9; --ink-2:#B9AE93; --ink-3:#877D64;
+  --accent:#5FA8E0; --accent-ink:#89C2ED; --accent-soft:#1D3348;
+  --f-src:#5FA8E0; --f-comb:#4FBFA8; --f-wide:#E3A55C;
+  --f-narrow:#E08AB3; --f-coll:#A98EDB; --f-out:#6FC98D;
+  --drop:#E8776C; --grid-dot:#2A2419;
   --shadow-s:0 1px 2px rgba(0,0,0,.35);
   --shadow-m:0 1px 2px rgba(0,0,0,.3),0 10px 26px rgba(0,0,0,.35);
-  --tint0:#74B7DD; --tint1:#E39C62; --tint2:#A892E4; --tint3:#62C28E; --tint4:#E082AC; --tint5:#CFBB55;
+  --tint0:#5FA8E0; --tint1:#E3A55C; --tint2:#A98EDB; --tint3:#6FC98D; --tint4:#E08AB3; --tint5:#CFBB55;
 }
 
 *{box-sizing:border-box}
@@ -97,10 +97,16 @@ button{font:inherit;color:inherit;cursor:pointer}
 /* hidden 就該真的不見。作者樣式會蓋過瀏覽器預設的 display:none，
    反解視窗就是這樣一載入就蓋住整頁的。 */
 [hidden]{display:none!important}
-.work{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 340px;
-  gap:14px;align-items:start;padding-left:46px}
-/* 兩個抽屜各一個標籤，只有點才開 —— 滑過去就開太容易誤觸 */
-.dock{position:absolute;left:0;top:0;width:46px;z-index:40;display:flex;flex-direction:column;gap:10px}
+.work{position:relative;display:grid;grid-template-columns:minmax(0,1fr);
+  gap:14px;align-items:start}
+/* 抽屜固定成畫布左邊自己一塊，佔真正的版面空間（不是浮在畫布上面），
+   一條 border-right 當界線 —— 方塊不可能拖進這塊，也不會被它蓋住 */
+.canvas-row{display:flex;align-items:stretch;min-height:0;flex:1}
+.dock{
+  position:relative;flex:none;width:62px;z-index:5;
+  display:flex;flex-direction:column;gap:10px;
+  padding:12px 8px;border-right:1px solid var(--line);background:var(--surface);
+}
 .dock-tab{
   width:46px;height:116px;flex:none;cursor:pointer;
   background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
@@ -114,7 +120,7 @@ button{font:inherit;color:inherit;cursor:pointer}
    權重一樣的話後面那條會贏，抽屜就永遠關不起來 —— 所以這裡一定要寫成
    .dock > .dock-body，比單一個 class 更明確。 */
 .dock > .dock-body{
-  position:absolute;left:52px;top:0;width:min(306px,calc(100vw - 76px));
+  position:absolute;left:100%;top:-12px;width:min(306px,calc(100vw - 92px));
   max-height:min(78vh,660px);overflow-y:auto;overscroll-behavior:contain;
   display:none;
 }
@@ -247,22 +253,38 @@ textarea{
 
 /* ---------- canvas ---------- */
 .canvas{
-  position:relative;height:clamp(430px,58vh,640px);overflow:auto;cursor:grab;
+  position:relative;flex:1;min-width:0;height:clamp(430px,58vh,640px);overflow:auto;cursor:grab;
   background-color:var(--bg);
   background-image:radial-gradient(var(--grid-dot) 1.2px, transparent 1.2px);
   background-size:19px 19px;background-position:-1px -1px;
   touch-action:none;
 }
+/* 最大化：畫布整塊蓋滿視窗，再按一次或 Esc 還原 */
+.panel.maxed{position:fixed;inset:12px;z-index:40;display:flex;flex-direction:column;max-width:none}
+.panel.maxed .canvas{flex:1;height:auto;min-height:0}
+/* 步驟設定改浮在畫布空白處，跟著選到的那塊走，不再佔一整欄 */
+.insp-float{
+  position:fixed;z-index:42;width:300px;max-width:calc(100vw - 32px);
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+  box-shadow:var(--shadow-m);overflow:hidden;
+  animation:inspIn .16s cubic-bezier(0.23,1,0.32,1) both;
+}
+@keyframes inspIn{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:none}}
+.insp-float .phead{padding:9px 10px 9px 12px}
+.insp-float #inspector{max-height:min(50vh,420px);overflow-y:auto}
+@media (prefers-reduced-motion: reduce){ .insp-float{animation:none} }
 .surface{position:relative;width:1150px;height:470px}
 .wires{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
-.wires path.wire{fill:none;stroke:var(--ink-3);stroke-width:2;stroke-linecap:round;opacity:.72}
+.wires path.wire{fill:none;stroke:var(--wc,var(--ink-3));stroke-width:2.4;stroke-linecap:round;opacity:.68}
 .wires path.hit{fill:none;stroke:transparent;stroke-width:14;pointer-events:stroke;cursor:pointer}
 .wires g.w:hover path.wire{stroke:var(--drop);opacity:1}
+.wires g.w.hot path.wire{opacity:1;stroke-width:2.8}
+.wires circle.pulse{fill:var(--wc,var(--accent))}
 .wires path.temp{fill:none;stroke:var(--accent);stroke-width:2;stroke-dasharray:5 5}
 
 .node{
   position:absolute;width:164px;
-  background:var(--surface);border:1.5px solid var(--line);border-radius:12px;
+  background:var(--surface);border:1.5px solid var(--line);border-left:4px solid var(--c);border-radius:14px;
   box-shadow:var(--shadow-m);cursor:grab;user-select:none;
   transition:border-color .15s,box-shadow .15s;
 }
@@ -364,7 +386,7 @@ input[type="number"]{max-width:88px}
 
 /* ---------- stage ---------- */
 .stage{margin-top:0}
-.steps{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:10px 12px;border-bottom:1px solid var(--line-soft)}
+.steps{position:relative;display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:10px 12px 14px;border-bottom:1px solid var(--line-soft)}
 .sdot{
   border:1px solid var(--line);background:var(--surface);border-radius:20px;
   padding:4px 11px;font-family:var(--ui);font-weight:600;font-size:11.5px;color:var(--ink-2);transition:.15s;
@@ -372,6 +394,12 @@ input[type="number"]{max-width:88px}
 .sdot[aria-current="true"]{background:var(--ink);border-color:var(--ink);color:var(--bg)}
 .sdot:hover{border-color:var(--ink-3)}
 .sctl{margin-left:auto;display:flex;gap:7px}
+/* 一小顆圓點，卡在目前這一站底下——按上一步/下一步時滑過去，像列車到站 */
+.sindicator{
+  position:absolute;left:0;bottom:5px;width:7px;height:7px;border-radius:50%;
+  background:var(--accent);transform:translateX(0);
+  transition:transform .22s cubic-bezier(0.23,1,0.32,1);pointer-events:none;
+}
 
 .stage-body{padding:16px 12px 18px;min-height:250px}
 .caption{display:flex;gap:11px;align-items:flex-start;margin-bottom:15px;max-width:66ch}
@@ -418,7 +446,7 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
 /* ---------- 反解 SQL 的視窗 ---------- */
 .overlay{
   position:fixed;inset:0;z-index:50;overflow:auto;
-  background:rgba(12,24,21,.55);
+  background:rgba(20,16,9,.6);
   display:flex;align-items:flex-start;justify-content:center;
   padding:calc(24px + env(safe-area-inset-top,0px)) 16px calc(24px + env(safe-area-inset-bottom,0px));
 }
@@ -488,81 +516,83 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
 
   <div class="work">
 
-    <div class="dock" id="dock" data-open="">
-      <button class="dock-tab" data-drawer="tables" aria-expanded="false" title="點一下開關">資料表</button>
-      <button class="dock-tab" data-drawer="blocks" aria-expanded="false" title="點一下開關">步驟</button>
-      <button class="dock-tab" data-drawer="quick"  aria-expanded="false" title="點一下開關">常用操作</button>
-
-      <div class="dock-body rail" data-drawer="quick">
-      <section class="panel">
-        <div class="phead"><h2>常用操作</h2><span class="sub" id="q-count"></span></div>
-        <div class="pbody">
-          <div id="quick"></div>
-          <div class="qacts">
-            <button class="btn ghost" id="q-new">＋ 新增一組</button>
-            <button class="btn ghost" id="q-reset" title="回到內建的四組">回復預設</button>
-          </div>
-          <form class="qform" id="q-form" hidden>
-            <label>名稱<input type="text" id="q-label" placeholder="例如 泛鮮食" spellcheck="false"></label>
-            <label>欄位<input type="text" id="q-col" placeholder="kind_code" spellcheck="false"></label>
-            <label>條件<select id="q-op"></select></label>
-            <label>代號／值<input type="text" id="q-src" placeholder="02-22, A0-A9, B2, B5, B6" spellcheck="false"></label>
-            <p class="hint" id="q-preview"></p>
-            <div class="qacts">
-              <button class="btn" type="submit">存起來</button>
-              <button class="btn ghost" type="button" id="q-cancel">取消</button>
-            </div>
-          </form>
-          <p class="hint">點一下就變成一個<b>篩選</b>步驟，接在選中的那個後面。<br>
-            範圍可以寫成 <code>02-22</code>，會自動展開成每一個代號。存在這台瀏覽器裡。</p>
-        </div>
-      </section>
-      </div>
-
-      <div class="dock-body rail" data-drawer="blocks">
-      <section class="panel">
-        <div class="phead"><h2>步驟</h2><span class="sub">10 種</span></div>
-        <div class="pbody">
-          <div id="palette"></div>
-          <p class="hint">顏色代表這個步驟<b>對表格做什麼</b>。<br><b>拖</b>到畫布放在你要的位置，或<b>點一下</b>自動接在選中的那塊後面。</p>
-        </div>
-      </section>
-      </div>
-
-      <div class="dock-body rail" data-drawer="tables">
-      <section class="panel">
-        <div class="phead"><h2>資料表</h2><span class="sub" id="tbl-count"></span></div>
-        <div class="pbody" style="padding-bottom:0">
-          <input type="text" class="search" id="tbl-search" placeholder="搜尋表名、中文名或欄位…" spellcheck="false">
-          <p class="hitcount" id="tbl-hits"></p>
-        </div>
-        <div class="pbody" id="schema-list" style="padding-top:0"></div>
-        <details class="imp">
-          <summary>貼上你自己的 schema</summary>
-          <textarea id="ddl" spellcheck="false" placeholder="CREATE TABLE orders (&#10;  order_id INT,&#10;  amount DECIMAL(10,2)&#10;);"></textarea>
-          <button class="btn" id="btn-parse" style="margin-top:8px;width:100%">解析並載入</button>
-          <p class="hint" id="parse-msg">讀得懂一般的 <code>CREATE TABLE</code>。因為沒有真資料，會自動編幾列示範資料給逐步檢視用。</p>
-        </details>
-      </section>
-      </div>
-    </div>
-
-    <section class="panel">
+    <section class="panel" id="canvas-panel">
       <div class="phead"><h2>畫布</h2>
         <button class="mini" id="btn-tidy" style="margin-left:auto">整理版面</button>
+        <button class="mini" id="btn-max">⤢ 最大化</button>
         <span class="srcbadge" id="src-label" hidden></span>
         <span class="sub" id="node-count"></span>
+      </div>
+      <div class="canvas-row">
+      <div class="dock" id="dock" data-open="">
+        <button class="dock-tab" data-drawer="tables" aria-expanded="false" title="點一下開關">資料表</button>
+        <button class="dock-tab" data-drawer="blocks" aria-expanded="false" title="點一下開關">步驟</button>
+        <button class="dock-tab" data-drawer="quick"  aria-expanded="false" title="點一下開關">常用操作</button>
+
+        <div class="dock-body rail" data-drawer="quick">
+        <section class="panel">
+          <div class="phead"><h2>常用操作</h2><span class="sub" id="q-count"></span></div>
+          <div class="pbody">
+            <div id="quick"></div>
+            <div class="qacts">
+              <button class="btn ghost" id="q-new">＋ 新增一組</button>
+              <button class="btn ghost" id="q-reset" title="回到內建的四組">回復預設</button>
+            </div>
+            <form class="qform" id="q-form" hidden>
+              <label>名稱<input type="text" id="q-label" placeholder="例如 泛鮮食" spellcheck="false"></label>
+              <label>欄位<input type="text" id="q-col" placeholder="kind_code" spellcheck="false"></label>
+              <label>條件<select id="q-op"></select></label>
+              <label>代號／值<input type="text" id="q-src" placeholder="02-22, A0-A9, B2, B5, B6" spellcheck="false"></label>
+              <p class="hint" id="q-preview"></p>
+              <div class="qacts">
+                <button class="btn" type="submit">存起來</button>
+                <button class="btn ghost" type="button" id="q-cancel">取消</button>
+              </div>
+            </form>
+            <p class="hint">點一下就變成一個<b>篩選</b>步驟，接在選中的那個後面。<br>
+              範圍可以寫成 <code>02-22</code>，會自動展開成每一個代號。存在這台瀏覽器裡。</p>
+          </div>
+        </section>
+        </div>
+
+        <div class="dock-body rail" data-drawer="blocks">
+        <section class="panel">
+          <div class="phead"><h2>步驟</h2><span class="sub">10 種</span></div>
+          <div class="pbody">
+            <div id="palette"></div>
+            <p class="hint">顏色代表這個步驟<b>對表格做什麼</b>。<br><b>拖</b>到畫布放在你要的位置，或<b>點一下</b>自動接在選中的那塊後面。</p>
+          </div>
+        </section>
+        </div>
+
+        <div class="dock-body rail" data-drawer="tables">
+        <section class="panel">
+          <div class="phead"><h2>資料表</h2><span class="sub" id="tbl-count"></span></div>
+          <div class="pbody" style="padding-bottom:0">
+            <input type="text" class="search" id="tbl-search" placeholder="搜尋表名、中文名或欄位…" spellcheck="false">
+            <p class="hitcount" id="tbl-hits"></p>
+          </div>
+          <div class="pbody" id="schema-list" style="padding-top:0"></div>
+          <details class="imp">
+            <summary>貼上你自己的 schema</summary>
+            <textarea id="ddl" spellcheck="false" placeholder="CREATE TABLE orders (&#10;  order_id INT,&#10;  amount DECIMAL(10,2)&#10;);"></textarea>
+            <button class="btn" id="btn-parse" style="margin-top:8px;width:100%">解析並載入</button>
+            <p class="hint" id="parse-msg">讀得懂一般的 <code>CREATE TABLE</code>。因為沒有真資料，會自動編幾列示範資料給逐步檢視用。</p>
+          </details>
+        </section>
+        </div>
       </div>
       <div class="canvas" id="canvas">
         <div class="surface" id="surface"><svg class="wires" id="wires"></svg></div>
       </div>
+      </div>
     </section>
 
-    <div class="rail">
-      <section class="panel">
-        <div class="phead"><h2>步驟設定</h2><span class="sub" id="insp-kind"></span></div>
-        <div class="pbody" id="inspector"></div>
-      </section>
+    <div class="insp-float" id="insp-float" hidden>
+      <div class="phead"><h2>步驟設定</h2><span class="sub" id="insp-kind"></span>
+        <button class="mini" id="insp-close">收起</button>
+      </div>
+      <div class="pbody" id="inspector"></div>
     </div>
   </div>
 
@@ -969,6 +999,10 @@ function evalNode(node, ctx){
   case 'derive': {
     const s = S(), li = s.cols.indexOf(node.left);
     if(li < 0) return s;
+    if(node.fn){
+      /* 示範資料算不出真正的函式結果，先照抄原始值——實際換算請看下面的 SQL */
+      return {cols: s.cols.concat([node.as]), rows: s.rows.map(r=>r.concat([r[li]]))};
+    }
     const ri = s.cols.indexOf(node.right);
     return {
       cols: s.cols.concat([node.as]),
@@ -992,7 +1026,7 @@ function evalNode(node, ctx){
     const oi = s.cols.indexOf(node.orderBy);
     const parts = new Map();
     s.rows.forEach((r,i)=>{
-      const k = pi.map(p=>String(r[p])).join(' ');
+      const k = pi.map(p=>String(r[p])).join('\u0000');
       if(!parts.has(k)) parts.set(k, []);
       parts.get(k).push(i);
     });
@@ -1386,8 +1420,11 @@ function buildSQL(){
             '\n  FROM '+ref(s0);
 
     } else if(n.type === 'derive'){
-      sql = '  SELECT *,\n    '+q(n.left)+' '+n.op+' '+operand(n.right, up)+' AS '+q(n.as)+
-            '\n  FROM '+ref(s0);
+      sql = n.fn
+        ? '  SELECT *,\n    '+n.fn+'('+(n.left === '*' ? '*' : q(n.left))+') AS '+q(n.as)+
+          '\n  FROM '+ref(s0)
+        : '  SELECT *,\n    '+q(n.left)+' '+n.op+' '+operand(n.right, up)+' AS '+q(n.as)+
+          '\n  FROM '+ref(s0);
 
     } else if(n.type === 'window'){
       const call = (n.fn === 'ROW_NUMBER' || n.fn === 'RANK' || n.fn === 'DENSE_RANK')
@@ -1535,7 +1572,9 @@ function nodeSummary(n){
     }
     case 'sort':   return '<code>'+n.by+' '+n.dir+'</code>'+(Number(n.limit)>0 ? '<br>只留前 '+n.limit+' 筆' : '');
     case 'case':   return '看 <code>'+n.col+'</code><br>分成 '+(n.branches.length+1)+' 類 → <code>'+n.as+'</code>';
-    case 'derive': return '<code>'+n.left+' '+n.op+' '+n.right+'</code><br>→ <code>'+n.as+'</code>';
+    case 'derive': return n.fn
+      ? '<code>'+n.fn+'('+n.left+')</code><br>→ <code>'+n.as+'</code>'
+      : '<code>'+n.left+' '+n.op+' '+n.right+'</code><br>→ <code>'+n.as+'</code>';
     case 'window': return '<code>'+n.fn+'</code><br>每個 <code>'+(n.partitionBy.join(',')||'全部')+'</code> 內排名';
     case 'select': {
       const avail = colsInto(n.id).length;
@@ -1802,10 +1841,18 @@ function refit(id){
 
 function drawWires(temp){
   let html = '';
+  let reduceMotion = false;
+  try { reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches; } catch(err){}
   state.edges.forEach((e,i)=>{
     if(isSnapped(e)) return;                          /* 貼在一起就不用線了 */
     const d = bez(portXY(e.from,'out',0), portXY(e.to,'in',e.port));
-    html += '<g class="w" data-i="'+i+'"><path class="hit" d="'+d+'"></path><path class="wire" d="'+d+'"></path></g>';
+    const from = nodeById(e.from);
+    const wc = from && META[from.type] ? META[from.type].c : 'var(--ink-3)';
+    const hot = !!(state.sel && (e.to === state.sel || e.from === state.sel));
+    /* 選到相關的那塊，讓一個小圓點沿線跑一次——像列車開向下一站 */
+    const dot = (hot && !reduceMotion)
+      ? '<circle class="pulse" r="3.6"><animateMotion dur="0.85s" repeatCount="1" fill="freeze" path="'+d+'"/></circle>' : '';
+    html += '<g class="w'+(hot ? ' hot' : '')+'" data-i="'+i+'" style="--wc:'+wc+'"><path class="hit" d="'+d+'"></path><path class="wire" d="'+d+'"></path>'+dot+'</g>';
   });
   if(temp) html += '<path class="temp" d="'+temp+'"></path>';
   wires.innerHTML = html;
@@ -1982,8 +2029,10 @@ const OPS = ['>=','>','<=','<','=','<>'];
 
 function renderInspector(){
   const n = nodeById(state.sel);
-  document.getElementById('insp-kind').textContent = n ? META[n.type].label : '';
-  if(!n){ inspector.innerHTML = '<p class="empty">點畫布上任何一個步驟，<br>這裡就會出現它的設定。</p>'; return; }
+  const floatEl = document.getElementById('insp-float');
+  if(!n){ floatEl.hidden = true; return; }
+  floatEl.hidden = false;
+  document.getElementById('insp-kind').textContent = META[n.type].label;
   const avail = colsInto(n.id);
   let h = '';
 
@@ -2074,7 +2123,12 @@ function renderInspector(){
     h += '<button class="btn ghost" data-add-branch style="width:100%;margin-top:4px">＋ 多一條規則</button>';
   }
 
-  if(n.type === 'derive'){
+  if(n.type === 'derive' && n.fn){
+    h += '<div class="rowf"><label>函式</label><input type="text" data-f="fn" value="'+esc(n.fn)+'" style="max-width:120px"></div>';
+    h += '<div class="rowf"><label>參數欄位</label><select data-f="left">'+opt('*', n.left)+avail.map(c=>colOpt(c, n.left)).join('')+'</select></div>';
+    h += '<div class="rowf"><label>新欄名</label><input type="text" data-f="as" value="'+esc(n.as)+'"></div>';
+    h += '<p class="note">這步只記錄「用了 <code>'+esc(n.fn)+'()</code>」這件事，列數不變。示範資料算不出真正結果，照抄原始值——實際換算的樣子看下面的 SQL。</p>';
+  } else if(n.type === 'derive'){
     h += '<div class="rowf"><label>左邊</label><select data-f="left">'+avail.map(c=>colOpt(c, n.left)).join('')+'</select></div>';
     h += '<div class="rowf"><label>運算</label><select data-f="op" style="max-width:64px">'+
       ['+','-','*','/'].map(o=>opt(o, n.op)).join('')+'</select>'+
@@ -2143,6 +2197,7 @@ function renderInspector(){
 
   if(n.type !== 'output') h += '<div class="delbar"><button class="btn ghost" data-del-node>刪掉這個步驟</button></div>';
   inspector.innerHTML = h;
+  requestAnimationFrame(positionInspector);
 }
 
 inspector.addEventListener('change', e=>{
@@ -2721,7 +2776,15 @@ function buildSteps(){
 
     if(n.type === 'derive'){
       const D = evalNode(n);
-      steps.push({
+      steps.push(n.fn ? {
+        title:'算欄位（函式）',
+        cap:'呼叫函式 <code>'+n.fn+'('+n.left+')</code>，結果存進新欄 <code>'+n.as+'</code>。列數不變；示範資料只是照抄原始值，真正的換算結果請看下面的 SQL。',
+        render: box => {
+          box.appendChild(miniTable('算之前', S));
+          box.appendChild(mark('→'));
+          box.appendChild(miniTable('算之後', D, {hi:D.cols.length - 1}));
+        }
+      } : {
         title:'算欄位',
         cap:'純算術，<strong>一列算一列</strong>：<code>'+n.left+' '+n.op+' '+n.right+'</code> 存進新欄 <code>'+n.as+'</code>。列數一點都沒變。',
         render: box => {
@@ -2902,7 +2965,10 @@ function renderStage(){
 
   const bar = document.getElementById('steps');
   const ctl = bar.querySelector('.sctl');
+  let dot = bar.querySelector('.sindicator');
+  if(!dot){ dot = document.createElement('span'); dot.className = 'sindicator'; }
   bar.innerHTML = '';
+  let activeBtn = null;
   steps.forEach((st, k)=>{
     const b = document.createElement('button');
     b.className = 'sdot';
@@ -2910,8 +2976,14 @@ function renderStage(){
     b.textContent = (k+1) + '  ' + st.title;
     b.addEventListener('click', ()=>{ state.step = k; renderStage(); });
     bar.appendChild(b);
+    if(k === i) activeBtn = b;
   });
+  bar.appendChild(dot);
   bar.appendChild(ctl);
+  /* 量完位置才能讓小圓點滑過去，不然第一幀量到的是 0 */
+  if(activeBtn) requestAnimationFrame(()=>{
+    dot.style.transform = 'translateX('+(activeBtn.offsetLeft + activeBtn.offsetWidth/2 - 3.5)+'px)';
+  });
 
   document.getElementById('caption').innerHTML =
     '<span class="num">STEP '+(i+1)+' / '+steps.length+'</span><p>'+s.cap+'</p>';
@@ -2956,6 +3028,47 @@ document.getElementById('btn-tidy').addEventListener('click', ()=>{
   settleLayout();
   canvas.scrollTo({left:0, top:0, behavior:'smooth'});
   refresh();
+});
+
+/* 步驟設定浮動面板：跟著選到的那塊擺在畫布空白處，捲動／縮放都要重新量 */
+const inspFloat = document.getElementById('insp-float');
+function positionInspector(){
+  if(inspFloat.hidden) return;
+  const cr = canvas.getBoundingClientRect();
+  const panelW = inspFloat.offsetWidth || 300, panelH = inspFloat.offsetHeight || 200;
+  const n = nodeById(state.sel);
+  const el = n && surface.querySelector('.node[data-id="'+n.id+'"]');
+  const nr = el ? el.getBoundingClientRect() : null;
+  const maxLeft = cr.right - panelW - 12, minLeft = cr.left + 12;
+  const maxTop  = Math.max(cr.top + 12, cr.bottom - panelH - 12), minTop = cr.top + 12;
+  let left = maxLeft, top = minTop;
+  if(nr){
+    const spaceRight = cr.right - nr.right, spaceLeft = nr.left - cr.left;
+    left = spaceRight >= panelW + 24 ? nr.right + 14
+         : spaceLeft  >= panelW + 24 ? nr.left - panelW - 14
+         : maxLeft;
+    top = nr.top;
+  }
+  inspFloat.style.left = Math.round(Math.min(Math.max(left, minLeft), maxLeft)) + 'px';
+  inspFloat.style.top  = Math.round(Math.min(Math.max(top, minTop), maxTop)) + 'px';
+}
+document.getElementById('insp-close').addEventListener('click', ()=>select(null));
+
+/* 畫布最大化：蓋滿視窗，再按一次或 Esc 還原。抽屜現在是畫布這塊裡面
+   真正的一欄（flex 子項），會跟著一起變大變小，不用另外算位置。 */
+const canvasPanel = document.getElementById('canvas-panel');
+const btnMax = document.getElementById('btn-max');
+canvas.addEventListener('scroll', positionInspector);
+window.addEventListener('resize', positionInspector);
+window.addEventListener('scroll', positionInspector, {passive:true});
+function setMax(on){
+  canvasPanel.classList.toggle('maxed', on);
+  btnMax.textContent = on ? '⤡ 還原' : '⤢ 最大化';
+  positionInspector();
+}
+btnMax.addEventListener('click', ()=>setMax(!canvasPanel.classList.contains('maxed')));
+document.addEventListener('keydown', e=>{
+  if(e.key === 'Escape' && canvasPanel.classList.contains('maxed')) setMax(false);
 });
 /* 左邊兩個抽屜：點標籤開關，一次只開一個。開著的狀態會記住 */
 const dock = document.getElementById('dock');
@@ -3333,6 +3446,8 @@ function exprName(e){
   if(e.kind === 'call'){
     /* CAST/TRIM/UPPER 這種包一層的，名字取裡面那個欄位 */
     if(['CAST','TRIM','UPPER','DATE','TRUNC'].indexOf(e.fn) >= 0 && e.args[0]) return exprName(e.args[0]);
+    /* CONVERT(type, expr, style) 的欄位是第二個參數，第一個是型別 */
+    if(e.fn === 'CONVERT' && e.args[1]) return exprName(e.args[1]);
     return e.fn.toLowerCase() + '_' + (e.args[0] ? exprName(e.args[0]) : 'x').replace('*','all');
   }
   if(e.kind === 'window') return e.fn.toLowerCase();
@@ -3500,6 +3615,17 @@ function astToGraph(parsed){
         cols = cols ? cols.concat([n.as]) : null;
       } else if(e.kind === 'window'){
         windows.push(it);
+      } else if(e.kind === 'call' && AGG_FNS.indexOf(e.fn) < 0){
+        /* CONVERT(type, expr, style) 的來源欄位是第二個參數，不是第一個（那是型別）；
+           其他函式（CAST/TRIM/UPPER…）都是第一個參數就是來源欄位。 */
+        const a0 = e.fn === 'CONVERT' ? e.args[1] : e.args[0];
+        const n = add('derive', {
+          fn: e.fn,
+          left: (!a0 || a0.kind === 'star') ? '*' : exprName(a0),
+          as: it.alias || exprName(e)
+        });
+        conn(cur, n); cur = n;
+        cols = cols ? cols.concat([n.as]) : null;
       }
     });
 
@@ -3785,3 +3911,5 @@ renderSchema();
 refresh();
 })();
 </script>
+
+</body></html>

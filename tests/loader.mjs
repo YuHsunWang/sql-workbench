@@ -59,7 +59,7 @@ export function loadApp(stored = {}) {
       return elements.get(id);
     },
     createElement() { return element(); },
-    addEventListener() {},
+    addEventListener() {}, requestAnimationFrame() { return 0; },
     elementFromPoint() { return null; },
   };
   const context = {
@@ -71,6 +71,7 @@ export function loadApp(stored = {}) {
     },
     navigator: { clipboard: { async writeText() {} } },
     setTimeout() { return 0; }, clearTimeout() {},
+    addEventListener() {}, requestAnimationFrame() { return 0; },
   };
   context.window = context;
   context.globalThis = context;
