@@ -1466,13 +1466,17 @@ function buildSQL(){
       /* 左邊整批帶過去 —— 左邊的欄位不會被丟掉也不會改名，一欄一欄列出來的話，
          兩張寬表一 JOIN 就是七十行沒人讀得完的清單。
          右邊沒辦法這樣：key 欄要拿掉、撞名的要改名，只能一欄一欄寫。 */
-      const sel = ['a.*'].concat(lay.keep.map(k=>
-        'b.'+q(k.src) + (k.name !== k.src ? ' AS '+q(k.name) : '')));
+      /* 別名平常用 a、b；表本身就叫 a 或 b 時換一組，不然 FROM b AS a 會把人看糊塗 */
+      const bare = [L, R].map(x=>(x && x.type === 'table' ? String(x.table) : ref(x)).toLowerCase());
+      const [A, B] = [['a','b'], ['l','r'], ['t1','t2'], ['lhs','rhs']]
+        .find(p=>p.every(x=>bare.indexOf(x) < 0)) || ['a','b'];
+      const sel = [A+'.*'].concat(lay.keep.map(k=>
+        B+'.'+q(k.src) + (k.name !== k.src ? ' AS '+q(k.name) : '')));
       const on = ks.length
-        ? ks.map(k=>castSQL(k.lfn, 'a.'+q(k.left))+' = '+castSQL(k.rfn, 'b.'+q(k.right))).join('\n   AND ')
+        ? ks.map(k=>castSQL(k.lfn, A+'.'+q(k.left))+' = '+castSQL(k.rfn, B+'.'+q(k.right))).join('\n   AND ')
         : '1 = 1 /* 還沒選 JOIN 條件 */';
       sql = '  SELECT '+list(sel, 9)+
-            '\n  FROM '+ref(L)+' AS a\n  '+n.joinType+' JOIN '+ref(R)+' AS b\n    ON '+on;
+            '\n  FROM '+ref(L)+' AS '+A+'\n  '+n.joinType+' JOIN '+ref(R)+' AS '+B+'\n    ON '+on;
 
     } else if(n.type === 'union'){
       const A = srcOf(n.id,0), B = srcOf(n.id,1);
@@ -2273,6 +2277,10 @@ function renderInspector(){
     h += '<div class="rowf"><label>參數欄位</label><select data-f="left">'+opt('*', n.left)+avail.map(c=>colOpt(c, n.left)).join('')+'</select></div>';
     h += '<div class="rowf"><label>新欄名</label><input type="text" data-f="as" value="'+esc(n.as)+'"></div>';
     h += '<p class="note">這步只記錄「用了 <code>'+esc(n.fn)+'()</code>」這件事，列數不變。示範資料算不出真正結果，照抄原始值——實際換算的樣子看下面的 SQL。</p>';
+    /* 換了函式名稱，原本的其他參數還在 —— 攤開給人看，要不要留由人決定 */
+    if(n.args || n.castAs)
+      h += '<p class="note">會寫成 <code>'+esc(fnCallSQL(n))+'</code>。<br>換了函式的話，其他參數不一定還用得上。'+
+           '<button class="btn ghost" data-drop-args style="width:100%;margin-top:6px">拿掉其他參數</button></p>';
   } else if(n.type === 'derive'){
     h += '<div class="rowf"><label>左邊</label><select data-f="left">'+avail.map(c=>colOpt(c, n.left)).join('')+'</select></div>';
     h += '<div class="rowf"><label>運算</label><select data-f="op" style="max-width:64px">'+
@@ -2403,6 +2411,7 @@ inspector.addEventListener('click', e=>{
   if(t.dataset.delAgg !== undefined){ n.aggs.splice(Number(t.dataset.delAgg),1); refresh(); return; }
   if(t.hasAttribute('data-del-node')){ removeNode(n.id); return; }
   if(t.hasAttribute('data-drop-more')){ delete n.more; refresh(); return; }
+  if(t.hasAttribute('data-drop-args')){ delete n.args; delete n.argAt; delete n.castAs; refresh(); return; }
 });
 
 /* 刪一個步驟就把它前後接回去 —— 中間空一截還要自己重拉，很煩。

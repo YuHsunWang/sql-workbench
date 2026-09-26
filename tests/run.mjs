@@ -87,17 +87,35 @@ test('regression: function arguments survive the round trip', () => {
   return 'COALESCE default, CAST type, CONVERT type and style all kept';
 });
 
+/* Renaming COALESCE to UPPER leaves UPPER(x, 0), which will not run. The extra
+   arguments stay (COALESCE -> IFNULL needs them) but one click drops them. */
+test('inspector: extra function arguments can be dropped after a rename', () => {
+  const app = loadApp();
+  const graph = graphFromSQL(app, 'SELECT COALESCE(x, 0) AS v FROM t');
+  const fn = graph.nodes.find(n => n.type === 'derive');
+  app.state.sel = fn.id;
+  fn.fn = 'UPPER';
+  assert.match(app.buildSQL(), /UPPER\(x, 0\)/);
+  const button = {hasAttribute: a => a === 'data-drop-args', dataset: {}};
+  app.document.getElementById('inspector').listeners.click({target: {closest: () => button}});
+  assert.match(app.buildSQL(), /UPPER\(x\) AS v/);
+  return 'UPPER(x, 0) -> UPPER(x) after 拿掉其他參數';
+});
+
 /* a RIGHT JOIN b keeps every row of b. Drawing it as a LEFT JOIN on the same
    sides kept every row of a instead — a different result with only a warning. */
 test('regression: RIGHT JOIN keeps the right side\'s rows', () => {
   const app = loadApp();
   const graph = graphFromSQL(app, 'SELECT * FROM a RIGHT JOIN b ON a.id = b.id');
   assert.equal(graph.warn.length, 0);
-  assert.match(app.buildSQL(), /FROM b AS a\s+LEFT JOIN a AS b/);
+  /* tables named a and b get other aliases — FROM b AS a reads backwards */
+  assert.match(app.buildSQL(), /FROM b AS l\s+LEFT JOIN a AS r\s+ON l\.id = r\.id/);
   const t = (name, ids) => ({label:'', cols:[{name:'id', type:'INT'}, {name:name+'_v', type:'INT'}], rows:ids.map(i=>[i, i*10])});
   app.state.schema = {a:t('a', [1, 2]), b:t('b', [2, 3])};
   const out = app.evalNode(graph.nodes.find(n => n.type === 'output'));
   assert.deepEqual(json(out.rows.map(r => r[out.cols.indexOf('id')]).sort()), [2, 3]);
+  graphFromSQL(app, 'SELECT * FROM orders JOIN customers ON orders.id = customers.id');
+  assert.match(app.buildSQL(), /FROM orders AS a\s+INNER JOIN customers AS b/);
   return 'a(1,2) RIGHT JOIN b(2,3) returns ids 2,3 via b LEFT JOIN a';
 });
 
