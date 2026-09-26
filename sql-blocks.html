@@ -3487,6 +3487,8 @@ function tokenize(sql){
         s += sql[j++];
       }
       if(j >= n) throw {sqlErr:true, msg:'識別字沒有結束', pos:i, got:c};
+      /* 名字會被直接畫進畫布、表格清單和逐步檢視的 HTML 裡，在入口就擋掉 */
+      if(/[<>&"']/.test(s)) throw {sqlErr:true, msg:'名稱裡不能有 < > & " \' 這些符號', pos:i, got:c};
       T.push({t:'word', v:s, quoted:true, p:i}); i = j+1; continue;
     }
     if(/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(sql[i+1] || ''))){

@@ -76,17 +76,23 @@ test('regression: SQL the steps would silently change is refused', () => {
   return `${Object.keys(refused).length} lossy shapes refused; single-op, TOP n, column ON still import`;
 });
 
-test('security: pasted names and warnings are shown as text, not HTML', () => {
+/* A pasted name reaches the canvas, the table list and the step-through as raw
+   HTML, so it has to be stopped before any of them render — not escaped in one. */
+test('security: a pasted name that carries HTML never reaches the page', () => {
   const app = loadApp();
   const doc = app.document;
-  const evil = '<img src=x onerror=alert(1)>';
-  doc.getElementById('sqlin').value = `SELECT * FROM "${evil}" ORDER BY a, b`;
-  doc.getElementById('do-parse').listeners.click();
-  const html = doc.getElementById('parse-out').innerHTML;
-  assert.match(html, /解析成功/);
-  assert.doesNotMatch(html, /<img/);
-  assert.match(html, /&lt;img/);
-  return 'table name escaped in the success message';
+  const before = JSON.stringify(app.state.nodes);
+  for (const name of ['"<img src=x onerror=alert(1)>"', '[x" onmouseover="alert(1)]', '`a&b`']) {
+    doc.getElementById('sqlin').value = `SELECT * FROM ${name}`;
+    doc.getElementById('do-parse').listeners.click();
+    const html = doc.getElementById('parse-out').innerHTML;
+    assert.match(html, /perr/);
+    assert.doesNotMatch(html, /<img|" onmouseover/);
+  }
+  assert.equal(JSON.stringify(app.state.nodes), before);
+  /* ordinary quoted names still import */
+  graphFromSQL(api, 'SELECT * FROM "Order Items" JOIN [dbo].[t 2] ON "Order Items".id = [t 2].id');
+  return 'HTML-bearing names refused before render; canvas untouched; plain quoted names import';
 });
 
 test('regression: linear filters collapse into one CTE', () => {
