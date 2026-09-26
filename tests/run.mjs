@@ -76,6 +76,53 @@ test('regression: SQL the steps would silently change is refused', () => {
   return `${Object.keys(refused).length} lossy shapes refused; single-op, TOP n, column ON still import`;
 });
 
+/* These used to come back as CAST(x), CONVERT(x), COALESCE(x) — SQL that either
+   will not run or means something else. Every argument has to survive. */
+test('regression: function arguments survive the round trip', () => {
+  for (const [sql, call] of [
+    ['SELECT COALESCE(x, 0) AS v FROM t', 'COALESCE(x, 0)'],
+    ['SELECT CAST(x AS DECIMAL(10,2)) AS v FROM t', 'CAST(x AS DECIMAL(10,2))'],
+    ['SELECT CONVERT(VARCHAR(8), x, 112) AS v FROM t', 'CONVERT(VARCHAR(8), x, 112)'],
+  ]) assert.ok(roundTrip(sql).includes(call), call);
+  return 'COALESCE default, CAST type, CONVERT type and style all kept';
+});
+
+/* a RIGHT JOIN b keeps every row of b. Drawing it as a LEFT JOIN on the same
+   sides kept every row of a instead — a different result with only a warning. */
+test('regression: RIGHT JOIN keeps the right side\'s rows', () => {
+  const app = loadApp();
+  const graph = graphFromSQL(app, 'SELECT * FROM a RIGHT JOIN b ON a.id = b.id');
+  assert.equal(graph.warn.length, 0);
+  assert.match(app.buildSQL(), /FROM b AS a\s+LEFT JOIN a AS b/);
+  const t = (name, ids) => ({label:'', cols:[{name:'id', type:'INT'}, {name:name+'_v', type:'INT'}], rows:ids.map(i=>[i, i*10])});
+  app.state.schema = {a:t('a', [1, 2]), b:t('b', [2, 3])};
+  const out = app.evalNode(graph.nodes.find(n => n.type === 'output'));
+  assert.deepEqual(json(out.rows.map(r => r[out.cols.indexOf('id')]).sort()), [2, 3]);
+  return 'a(1,2) RIGHT JOIN b(2,3) returns ids 2,3 via b LEFT JOIN a';
+});
+
+test('regression: every ORDER BY key is kept, in order', () => {
+  const generated = roundTrip('SELECT * FROM t ORDER BY x ASC, y DESC LIMIT 3');
+  assert.match(generated, /ORDER BY x ASC, y DESC/);
+  const app = loadApp();
+  const graph = graphFromSQL(app, 'SELECT * FROM t ORDER BY x ASC, y DESC');
+  assert.equal(graph.warn.length, 0);
+  app.state.schema = {t:{label:'', cols:[{name:'x', type:'INT'}, {name:'y', type:'INT'}], rows:[[1, 1], [2, 0], [1, 2]]}};
+  const out = app.evalNode(graph.nodes.find(n => n.type === 'output'));
+  assert.deepEqual(json(out.rows), [[1, 2], [1, 1], [2, 0]]);
+  assert.match(graphFromSQL(app, 'SELECT ROW_NUMBER() OVER (ORDER BY x, y) AS r FROM t').warn.join(), /視窗的 ORDER BY/);
+  return 'SQL keeps both keys; ties on x broken by y DESC; window extra keys warned';
+});
+
+test('security: pasted DDL column names are plain identifiers only', () => {
+  const app = loadApp();
+  app.document.getElementById('ddl').value = 'CREATE TABLE t (ok INT, a<img TEXT, b"x TEXT, c_2 INT);';
+  app.document.getElementById('btn-parse').listeners.click();
+  /* quotes are stripped from DDL names, so b"x becomes the harmless bx */
+  assert.deepEqual(json(app.state.schema.t.cols.map(c => c.name)), ['ok', 'bx', 'c_2']);
+  return 'kept ok, bx, c_2; dropped a<img';
+});
+
 /* A pasted name reaches the canvas, the table list and the step-through as raw
    HTML, so it has to be stopped before any of them render — not escaped in one. */
 test('security: a pasted name that carries HTML never reaches the page', () => {
