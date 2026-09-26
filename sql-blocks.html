@@ -3517,7 +3517,7 @@ function parseSQLText(text){
   const take = () => T[p++];
   const eatKw = w => isKw(w) ? (p++, true) : false;
   const eatOp = v => isOp(v) ? (p++, true) : false;
-  function fail(msg){ const t = at(); throw {sqlErr:true, msg:msg, pos:t.p, got:t.v}; }
+  function fail(msg, t){ t = t || at(); throw {sqlErr:true, msg:msg, pos:t.p, got:t.v}; }
   function needKw(w){ if(!eatKw(w)) fail('這裡應該要有 '+w); }
   function needOp(v){ if(!eatOp(v)) fail('這裡應該要有 '+v); }
   /* 來源有引號、而且拿掉引號會變樣的名字要記下來，產生 SQL 時才還得回去 */
@@ -3584,7 +3584,7 @@ function parseSQLText(text){
     needKw('SELECT');
     const distinct = eatKw('DISTINCT');
     let top = 0;
-    if(eatKw('TOP')){ top = Number(take().v) || 0; eatKw('PERCENT'); }
+    if(eatKw('TOP')){ top = Number(take().v) || 0; if(isKw('PERCENT')) fail('TOP … PERCENT 目前做不出對應的步驟（會變成固定筆數）'); }
     const items = [];
     do { items.push(parseItem()); } while(eatOp(','));
     const core = {distinct:distinct, top:top, items:items, from:null, joins:[], where:[], groupBy:[], having:[]};
@@ -3645,10 +3645,14 @@ function parseSQLText(text){
   }
 
   function parseExpr(){
+    const t0 = at();
     let left = parseAtom();
     while(at().t === 'op' && ['+','-','*','/'].indexOf(at().v) >= 0){
       const op = take().v;
-      left = {kind:'arith', op:op, a:left, b:parseAtom()};
+      const b = parseAtom();
+      /* 計算步驟只有「左 運算 右」一層；兩層以上會算錯欄位，寧可擋下 */
+      if(left.kind === 'arith' || b.kind === 'arith') fail('一個式子裡只能有一個 + - * /，多層運算目前畫不出來', t0);
+      left = {kind:'arith', op:op, a:left, b:b};
     }
     return left;
   }
@@ -3667,7 +3671,7 @@ function parseSQLText(text){
         p++;
         const args = [];
         let castType = '';
-        eatKw('DISTINCT');
+        if(isKw('DISTINCT')) fail(fn+'(DISTINCT …) 目前做不出對應的步驟');
         if(isOp('*')){ p++; args.push({kind:'star'}); }
         else if(!isOp(')')){ do { args.push(parseExpr()); } while(eatOp(',')); }
         if(fn === 'CAST' && eatKw('AS')){          /* CAST(x AS DATE) */
@@ -3761,11 +3765,17 @@ function parseSQLText(text){
         if(!err || !err.sqlErr) throw err;
         /* 括號其實是運算式的一部分，像 (a + b) > 3 —— 退回去當一般條件讀 */
         p = save; warn.length = nw;
-        try { list.push(parseCond()); return; }
+        try { list.push(litCond()); return; }
         catch(err2){ throw (err2 && err2.sqlErr && err2.pos >= err.pos) ? err2 : err; }
       }
     }
-    list.push(parseCond());
+    list.push(litCond());
+  }
+  /* 右邊是欄位或函式時，篩選步驟只會存成字面值，意思就變了 */
+  function litCond(){
+    const t0 = at(), c = parseCond();
+    if(c.kind === 'cmp' && c.right.kind !== 'lit') fail('條件右邊目前只能是固定值，不能是欄位或算式', t0);
+    return c;
   }
   function parseConds(){
     const branches = [];
@@ -4223,12 +4233,12 @@ function applyStatement(idx){
   let html = '<div class="pok"><b>解析成功</b> — 產生 '+blocks+' 個步驟、'+
     graph.nodes.filter(n=>n.type === 'table').length+' 張表。畫布已經換好了。';
   if(graph.madeUp.length)
-    html += '<br>這幾張表不在你的 schema 裡：<code>'+graph.madeUp.join('</code>、<code>')+
+    html += '<br>這幾張表不在你的 schema 裡：<code>'+graph.madeUp.map(esc).join('</code>、<code>')+
             '</code>。欄位是從 SQL 反推的，資料是編的，只給逐步檢視用。';
   html += '</div>';
   if(graph.warn.length){
     const uniq = graph.warn.filter((w,i)=>graph.warn.indexOf(w) === i);
-    html += '<ul class="wlist">'+uniq.map(w=>'<li>'+w+'</li>').join('')+'</ul>';
+    html += '<ul class="wlist">'+uniq.map(w=>'<li>'+esc(w)+'</li>').join('')+'</ul>';
   }
   parseOut.innerHTML = html;
 }

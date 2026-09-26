@@ -11,7 +11,9 @@ function element() {
     offsetWidth: 164,
     get offsetHeight() { return Math.max(86, parseInt(this.style.minHeight, 10) || 0); },
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
-    addEventListener() {}, removeEventListener() {}, setAttribute() {}, focus() {},
+    /* the last handler per event type is kept, so a test can press a button */
+    listeners: {},
+    addEventListener(type, fn) { this.listeners[type] = fn; }, removeEventListener() {}, setAttribute() {}, focus() {},
     appendChild(child) {
       if (child) child.parentNode = this;
       this.children.push(child);
@@ -96,6 +98,7 @@ export function loadApp(stored = {}) {
   const script = match[1].slice(0, at) + hook + match[1].slice(at);
   context.__sqlblocks = {};
   vm.runInContext(script, context, { filename: 'sql-blocks.html', timeout: 3000 });
+  context.__sqlblocks.document = document;
   return context.__sqlblocks;
 }
 

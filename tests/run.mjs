@@ -58,6 +58,37 @@ test('regression: BETWEEN makes exactly two ordered filters', () => {
   return 'filters=x>=1,x<=3,y=2';
 });
 
+/* Each of these used to import cleanly with no warning while the steps meant
+   something else. Refusing is the honest answer until the model can hold them. */
+test('regression: SQL the steps would silently change is refused', () => {
+  const refused = {
+    'SELECT x FROM t WHERE x = y': 'x = y became x = \'y\'',
+    'SELECT COUNT(DISTINCT x) AS n FROM t': 'DISTINCT was dropped',
+    'SELECT a + b * c AS v FROM t': 'became a_calc * c',
+    'SELECT (a + b) * c AS v FROM t': 'nested arithmetic',
+    'SELECT TOP 10 PERCENT * FROM t': 'became LIMIT 10',
+  };
+  for (const sql of Object.keys(refused)) sqlError(sql);
+  /* the shapes that do fit still import */
+  graphFromSQL(api, 'SELECT a * 2 AS v FROM t WHERE x = 5 AND y = \'k\'');
+  graphFromSQL(api, 'SELECT TOP 10 * FROM t');
+  graphFromSQL(api, 'SELECT * FROM a JOIN b ON a.id = b.id');
+  return `${Object.keys(refused).length} lossy shapes refused; single-op, TOP n, column ON still import`;
+});
+
+test('security: pasted names and warnings are shown as text, not HTML', () => {
+  const app = loadApp();
+  const doc = app.document;
+  const evil = '<img src=x onerror=alert(1)>';
+  doc.getElementById('sqlin').value = `SELECT * FROM "${evil}" ORDER BY a, b`;
+  doc.getElementById('do-parse').listeners.click();
+  const html = doc.getElementById('parse-out').innerHTML;
+  assert.match(html, /解析成功/);
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /&lt;img/);
+  return 'table name escaped in the success message';
+});
+
 test('regression: linear filters collapse into one CTE', () => {
   graphFromSQL(api, 'SELECT * FROM t WHERE x >= 1 AND x <= 3');
   const generated = api.buildSQL();
