@@ -1361,6 +1361,9 @@ function graphIssue(last){
       if(!s) return META[n.type].label+' 缺少第 '+(port+1)+' 個來源連線。';
       const problem = missing(s); if(problem) return problem;
     }
+    const need = (COL_FIELDS[n.type] || []).filter(f=>!OPTIONAL_COL[f]);
+    if(!(n.type === 'filter' && isOrFilter(n)) && need.some(f=>!n[f]))
+      return META[n.type].label+' 還沒選要用哪一欄。';
     if(n.type === 'filter'){
       const s = srcOf(n.id, 0), cols = evalNode(s).cols;
       let projected = s;
@@ -2043,6 +2046,7 @@ canvas.addEventListener('pointerup', e=>{
       const to = t.dataset.node, port = Number(t.dataset.port);
       state.edges = state.edges.filter(x=>!(x.to === to && x.port === port));
       state.edges.push({from:conn.from, to:to, port:port});
+      adoptCols(nodeById(to));
       refresh();
     }
     surface.querySelectorAll('.port.in.hot').forEach(x=>x.classList.remove('hot'));
@@ -2057,6 +2061,7 @@ canvas.addEventListener('pointerup', e=>{
     if(s){
       state.edges = state.edges.filter(x=>!(x.to === s.to && x.port === s.port));
       state.edges.push({from:s.from, to:s.to, port:s.port});
+      adoptCols(nodeById(s.to));
       /* 兩個輸入的步驟要重新對一次，不然第二個來源會壓到第一個 */
       if(META[nodeById(s.to).type].ins > 1){ renderNodes(); refit(s.to); }
     }
@@ -2104,6 +2109,7 @@ canvas.addEventListener('drop', e=>{
     n.x = Math.max(0, s.x); n.y = Math.max(0, s.y);
     state.edges = state.edges.filter(x=>!(x.to === s.to && x.port === s.port));
     state.edges.push({from:s.from, to:s.to, port:s.port});
+    adoptCols(nodeById(s.to));
   }
   refresh();
   flashNode(n.id);
@@ -2139,6 +2145,13 @@ function chOf(name){
   return (CH_CACHE[name] = hit);
 }
 const colOpt = (c, cur) => opt(c, cur, c + (chOf(c) ? '  —  ' + chOf(c) : ''));
+/* 欄位下拉：存的值不在清單裡時要老實顯示出來 —— 不然瀏覽器會秀第一個選項，
+   看起來選好了，其實存的是別的（SQL 就會冒出空欄位）。ok 是本來就合法的特殊值，像 * 或空字串 */
+function colChoices(avail, cur, ok){
+  const fine = avail.indexOf(cur) >= 0 || (ok || []).indexOf(cur) >= 0;
+  const head = fine ? '' : (cur ? opt(cur, cur, cur + '（上一步沒有這欄）') : opt('', '', '（選一個欄位）'));
+  return head + avail.map(c=>colOpt(c, cur)).join('');
+}
 const colChip = (c, on, attr) => '<button class="chip" '+attr+'="'+c+'" aria-pressed="'+on+'"><b>'+c+'</b>'+
   (chOf(c) ? '<i>'+chOf(c)+'</i>' : '')+'</button>';
 function esc(v){ return String(v == null ? '' : v).replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
@@ -2170,11 +2183,11 @@ function renderInspector(){
       Object.keys(CASTS).map(k=>opt(k, cur || '', CASTS[k].label)).join('')+'</select>';
     ks.forEach((k,i)=>{
       h += '<div class="agg" style="flex-wrap:wrap">'+
-           '<select data-k="'+i+'" data-f="left" style="min-width:110px">'+L.map(c=>colOpt(c, k.left)).join('')+'</select>'+
+           '<select data-k="'+i+'" data-f="left" style="min-width:110px">'+colChoices(L, k.left)+'</select>'+
            castOpts(k.lfn, i, 'lfn')+
            (ks.length > 1 ? '<button class="x" data-del-key="'+i+'" aria-label="刪掉">×</button>' : '')+
            '<div style="width:100%;color:var(--ink-3);font-family:var(--mono);font-size:11px;padding-left:2px">=</div>'+
-           '<select data-k="'+i+'" data-f="right" style="min-width:110px">'+R.map(c=>colOpt(c, k.right)).join('')+'</select>'+
+           '<select data-k="'+i+'" data-f="right" style="min-width:110px">'+colChoices(R, k.right)+'</select>'+
            castOpts(k.rfn, i, 'rfn')+
            '</div>';
     });
@@ -2214,7 +2227,7 @@ function renderInspector(){
           return;
         }
         h += '<div class="branch orcond"><select'+at+' data-f="col">'+
-             (avail.indexOf(c.col) < 0 ? opt(c.col, c.col) : '')+avail.map(x=>colOpt(x, c.col)).join('')+'</select>'+
+             colChoices(avail, c.col)+'</select>'+
              '<select'+at+' data-f="op">'+FILTER_OPS.map(o=>opt(o, c.op)).join('')+'</select>'+
              (needsVal(c.op) ? '<input type="text"'+at+' data-f="val" value="'+esc(c.val)+'">' : '')+kill+'</div>';
       });
@@ -2244,7 +2257,7 @@ function renderInspector(){
 
   if(n.type === 'filter' && !isOrFilter(n)){
     const up = srcOf(n.id, 0);
-    h += '<div class="rowf"><label>欄位</label><select data-f="col">'+avail.map(c=>colOpt(c, n.col)).join('')+'</select></div>';
+    h += '<div class="rowf"><label>欄位</label><select data-f="col">'+colChoices(avail, n.col)+'</select></div>';
     h += '<div class="rowf"><label>條件</label><select data-f="op" style="max-width:108px">'+FILTER_OPS.map(o=>opt(o, n.op)).join('')+
          '</select>'+(needsVal(n.op) ? '<input type="text" data-f="val" value="'+esc(n.val)+'">' : '')+'</div>';
     if(n.op === 'IN' || n.op === 'NOT IN')
@@ -2274,7 +2287,7 @@ function renderInspector(){
   }
 
   if(n.type === 'sort'){
-    h += '<div class="rowf"><label>依照</label><select data-f="by">'+avail.map(c=>colOpt(c, n.by)).join('')+'</select></div>';
+    h += '<div class="rowf"><label>依照</label><select data-f="by">'+colChoices(avail, n.by)+'</select></div>';
     h += '<div class="rowf"><label>方向</label><select data-f="dir">'+
       opt('DESC', n.dir, 'DESC 大 → 小')+opt('ASC', n.dir, 'ASC 小 → 大')+'</select></div>';
     h += '<div class="rowf"><label>取前幾筆</label><input type="number" min="0" data-f="limit" value="'+esc(n.limit)+'"></div>';
@@ -2288,7 +2301,7 @@ function renderInspector(){
   }
 
   if(n.type === 'case'){
-    h += '<div class="rowf"><label>看哪欄</label><select data-f="col">'+avail.map(c=>colOpt(c, n.col)).join('')+'</select></div>';
+    h += '<div class="rowf"><label>看哪欄</label><select data-f="col">'+colChoices(avail, n.col)+'</select></div>';
     h += '<div class="rowf"><label>新欄名</label><input type="text" data-f="as" value="'+esc(n.as)+'"></div>';
     h += '<div class="sec">分類規則（由上往下比，中了就停）</div>';
     n.branches.forEach((b,i)=>{
@@ -2304,7 +2317,7 @@ function renderInspector(){
 
   if(n.type === 'derive' && n.fn){
     h += '<div class="rowf"><label>函式</label><input type="text" data-f="fn" value="'+esc(n.fn)+'" style="max-width:120px"></div>';
-    h += '<div class="rowf"><label>參數欄位</label><select data-f="left">'+opt('*', n.left)+avail.map(c=>colOpt(c, n.left)).join('')+'</select></div>';
+    h += '<div class="rowf"><label>參數欄位</label><select data-f="left">'+opt('*', n.left)+colChoices(avail, n.left, ['*'])+'</select></div>';
     h += '<div class="rowf"><label>新欄名</label><input type="text" data-f="as" value="'+esc(n.as)+'"></div>';
     h += '<p class="note">這步只記錄「用了 <code>'+esc(n.fn)+'()</code>」這件事，列數不變。示範資料算不出真正結果，照抄原始值——實際換算的樣子看下面的 SQL。</p>';
     /* 換了函式名稱，原本的其他參數還在 —— 攤開給人看，要不要留由人決定 */
@@ -2312,7 +2325,7 @@ function renderInspector(){
       h += '<p class="note">會寫成 <code>'+esc(fnCallSQL(n))+'</code>。<br>換了函式的話，其他參數不一定還用得上。'+
            '<button class="btn ghost" data-drop-args style="width:100%;margin-top:6px">拿掉其他參數</button></p>';
   } else if(n.type === 'derive'){
-    h += '<div class="rowf"><label>左邊</label><select data-f="left">'+avail.map(c=>colOpt(c, n.left)).join('')+'</select></div>';
+    h += '<div class="rowf"><label>左邊</label><select data-f="left">'+colChoices(avail, n.left)+'</select></div>';
     h += '<div class="rowf"><label>運算</label><select data-f="op" style="max-width:64px">'+
       ['+','-','*','/'].map(o=>opt(o, n.op)).join('')+'</select>'+
       '<input type="text" data-f="right" value="'+esc(n.right)+'"></div>';
@@ -2331,10 +2344,10 @@ function renderInspector(){
       opt('MAX', n.fn, 'MAX 整組最大')+
       opt('COUNT', n.fn, 'COUNT 整組幾筆')+'</select></div>';
     if(!rankish)
-      h += '<div class="rowf"><label>算哪欄</label><select data-f="col">'+opt('*', n.col)+avail.map(c=>colOpt(c, n.col)).join('')+'</select></div>';
+      h += '<div class="rowf"><label>算哪欄</label><select data-f="col">'+opt('*', n.col)+colChoices(avail, n.col, ['*'])+'</select></div>';
     h += '<div class="sec">Partition by — 怎麼分組</div><div class="chips">'+
       avail.map(c=>colChip(c, n.partitionBy.indexOf(c) >= 0, 'data-part')).join('')+'</div>';
-    h += '<div class="rowf"><label>組內排序</label><select data-f="orderBy">'+opt('', n.orderBy, '（不排）')+avail.map(c=>colOpt(c, n.orderBy)).join('')+'</select></div>';
+    h += '<div class="rowf"><label>組內排序</label><select data-f="orderBy">'+opt('', n.orderBy, '（不排）')+colChoices(avail, n.orderBy, [''])+'</select></div>';
     h += '<div class="rowf"><label>方向</label><select data-f="dir">'+opt('DESC', n.dir)+opt('ASC', n.dir)+'</select></div>';
     h += '<div class="rowf"><label>新欄名</label><input type="text" data-f="as" value="'+esc(n.as)+'"></div>';
     h += '<p class="note">跟 GROUP BY 最大的差別：<b>列數完全不變</b>。<br>它只是在每一列旁邊多寫一個「你在你那組裡排第幾」。</p>';
@@ -2359,7 +2372,7 @@ function renderInspector(){
     n.aggs.forEach((a,i)=>{
       h += '<div class="agg"><select data-a="'+i+'" data-f="fn" style="max-width:78px">'+
         ['COUNT','SUM','AVG','MAX','MIN'].map(f=>opt(f, a.fn)).join('')+'</select>'+
-        '<select data-a="'+i+'" data-f="col">'+opt('*', a.col)+avail.map(c=>colOpt(c, a.col)).join('')+'</select>'+
+        '<select data-a="'+i+'" data-f="col">'+opt('*', a.col)+colChoices(avail, a.col, ['*'])+'</select>'+
         '<input type="text" data-a="'+i+'" data-f="as" value="'+esc(a.as)+'" style="max-width:100px">'+
         '<button class="x" data-del-agg="'+i+'" aria-label="刪掉">×</button></div>';
     });
@@ -2472,6 +2485,22 @@ function removeNode(id){
   outs.forEach(e=>refit(e.to));          /* 接回去之後把缺口補起來 */
   refresh();
 }
+/* 一塊剛接上來源時，看單一欄位的設定如果在新來源裡沒有，就換成新來源裡的欄位。
+   拖進來時的預設欄位是照當時選到的那塊猜的，接到別條線上就對不上了。 */
+const COL_FIELDS = {case:['col'], derive:['left'], window:['col', 'orderBy'], sort:['by'], filter:['col']};
+const OPTIONAL_COL = {orderBy:true, by:true};      /* 空的也合法：不排序、只取前 N 筆 */
+function adoptCols(n){
+  if(!n || !COL_FIELDS[n.type] || (n.type === 'filter' && isOrFilter(n))) return;
+  const src = srcOf(n.id, 0), avail = src ? evalNode(src).cols : [];
+  if(!avail.length) return;
+  const d = defaultsFor(n.type, src);
+  COL_FIELDS[n.type].forEach(f=>{
+    const v = n[f];
+    if(v === '*' || (OPTIONAL_COL[f] && !v) || avail.indexOf(v) >= 0) return;
+    n[f] = avail.indexOf(d[f]) >= 0 ? d[f] : avail[0];
+  });
+}
+
 /* ---- OR 篩選的編輯：any 是好幾組，每組裡的條件用 AND 串 ---- */
 const blankCond = (cols, col) => ({col:col || cols[0] || '', op:'=', val:''});
 /* 一般篩選多開一組，原本的條件變成第 1 組 */
@@ -2762,8 +2791,8 @@ document.getElementById('palette').addEventListener('click', e=>{
   addNode(b.dataset.t, defaultsFor(b.dataset.t));
 });
 
-function defaultsFor(t){
-  const sel = nodeById(state.sel);
+function defaultsFor(t, src){
+  const sel = src === undefined ? nodeById(state.sel) : src;
   const cols = (sel && sel.type !== 'output') ? evalNode(sel).cols : [];
   const nums = cols.filter(c=>/id$|amount|price|qty|count|total|fee|num/i.test(c));
   const pick = a => a.length ? a[a.length-1] : (cols[0] || '');
