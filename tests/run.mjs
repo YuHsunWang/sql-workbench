@@ -1587,6 +1587,17 @@ test('OR view: the block, inspector and step-through spell out the groups', () =
   return 'block shows 或 between groups; panel counts overlap; step-through marks ✓/✗';
 });
 
+test('OR view: a two-condition group shows every condition, not a clipped line', () => {
+  const graph = graphFromSQL(api, "SELECT * FROM r WHERE cutoff_date BETWEEN '2025-10-01' AND '2026-01-31' " +
+    "OR (cutoff_date >= '2026-05-01' AND rainfall_value > 0)");
+  installGraph(api, graph, orData);
+  const summary = api.nodeSummary(graph.nodes.find(n => n.type === 'filter'));
+  assert.doesNotMatch(summary, /…/);
+  assert.match(summary, /<code>cutoff_date<\/code><div class="ccmp"><code>>= 2025-10-01<\/code><code>&lt;= 2026-01-31<\/code><\/div>/);
+  assert.match(summary, /<div class="orsep">或<\/div><div class="cgrp"[^>]*><code>cutoff_date >= 2026-05-01<\/code><br><code>rainfall_value > 0<\/code>/);
+  return 'BETWEEN range shares one column name; second group lists both conditions';
+});
+
 test('OR editing: a plain filter offers the OR button', () => {
   const graph = graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20');
   installGraph(api, graph, orData);

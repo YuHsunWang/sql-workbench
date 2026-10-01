@@ -372,6 +372,9 @@ input[type="number"]{max-width:88px}
 .andor{display:flex;gap:6px;margin-top:4px}
 .andor .btn{flex:1;min-width:0;padding-left:4px;padding-right:4px}
 .orsep{display:flex;align-items:center;gap:6px;font-size:10.5px;font-weight:700;color:var(--ink-3);margin:4px 0}
+.cgrp{border-left:2px solid color-mix(in srgb,var(--c) 45%,transparent);padding-left:6px}
+.ccmp{padding-left:10px}
+.ccmp code{display:block}
 .orsep::before,.orsep::after{content:"";flex:1;border-top:1px dashed var(--line-soft)}
 /* 文氏圖：線是圈圈的顏色，字一律用文字色 */
 .venn{border:1px solid var(--line);border-radius:10px;background:var(--surface);padding:10px 12px 8px;max-width:340px;box-shadow:var(--shadow-s)}
@@ -1671,17 +1674,34 @@ function nodeSummary(n){
     }
     case 'filter': {
       if(isOrFilter(n)){
-        /* 一組一行，組跟組之間寫「或」；太多組就折起來 */
-        const line = b => {
-          const t = b.map(c=>isOrFilter(c) ? '('+condText(c)+')' : condText(c)).join(' 且 ');
-          return '<code>'+esc(t.length > 30 ? t.slice(0, 30)+'…' : t)+'</code>';
+        /* 一個條件一行，不再把整組串成一行再截斷 —— 截掉的往往正是後半段那個條件。
+           同一欄接連好幾個條件（BETWEEN 拆出來的 >= / <= 最常見）就共用一個欄名，
+           底下一行一個比較，窄窄的積木也放得下。 */
+        const cut = (t, k) => t.length > k ? t.slice(0, k)+'…' : t;
+        const cmp = c => esc(c.op+(needsVal(c.op) ? ' '+cut(String(c.val == null ? '' : c.val), 22) : ''));
+        const items = b => {
+          const out = [];
+          for(let i = 0; i < b.length; i++){
+            const c = b[i];
+            if(isOrFilter(c)){ out.push('<code>'+esc(cut('('+condText(c)+')', 40))+'</code>'); continue; }
+            let j = i;
+            while(j+1 < b.length && !isOrFilter(b[j+1]) && b[j+1].col === c.col) j++;
+            out.push(j === i
+              ? '<code>'+esc(c.col)+' '+cmp(c)+'</code>'
+              : '<code>'+esc(c.col)+'</code><div class="ccmp">'+b.slice(i, j+1).map(t=>'<code>'+cmp(t)+'</code>').join('')+'</div>');
+            i = j;
+          }
+          return out;
         };
-        /* 只有一組 = 同一塊裡的 AND：一個條件一行，中間寫「且」 */
-        const rows = n.any.length === 1 ? n.any[0].map(c=>[c]) : n.any;
-        const word = n.any.length === 1 ? '且' : '或', unit = n.any.length === 1 ? ' 個條件' : ' 組';
-        const shown = rows.length > 3 ? rows.slice(0, 2) : rows;
-        return shown.map(line).join('<div class="orsep">'+word+'</div>') +
-               (rows.length > shown.length ? '<div class="orsep">'+word+'</div>…還有 '+(rows.length - shown.length)+unit : '');
+        const clip = (xs, unit) => xs.length > 4 ? xs.slice(0, 3).concat(['…還有 '+(xs.length - 3)+unit]) : xs;
+        if(n.any.length === 1)       /* 只有一組 = 同一塊裡的 AND：中間寫「且」 */
+          return clip(items(n.any[0]), ' 個條件').join('<div class="orsep">且</div>');
+        /* 好幾組：一組一個框（框裡每個都要成立），框跟框之間寫「或」；太多組就折起來 */
+        const group = b => b.length === 1 ? items(b)[0]
+          : '<div class="cgrp" title="這組裡每個條件都要成立">'+clip(items(b), ' 個條件').join('<br>')+'</div>';
+        const shown = n.any.length > 3 ? n.any.slice(0, 2) : n.any;
+        return shown.map(group).join('<div class="orsep">或</div>') +
+               (n.any.length > shown.length ? '<div class="orsep">或</div>…還有 '+(n.any.length - shown.length)+' 組' : '');
       }
       const v = String(n.val == null ? '' : n.val);
       const shown = v.length > 22 ? v.slice(0, 22)+'…' : v;
