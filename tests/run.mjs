@@ -1680,6 +1680,63 @@ test('panel: adding a block selects it without opening the settings panel', () =
   return 'addNode selects the block and keeps the panel shut';
 });
 
+test('CASE: a column carried over from another branch is shown, repaired on connect, and never written as []', () => {
+  api.state.dialect = 'mssql';
+  /* weather → CASE → GROUP BY → output, where CASE was dropped in while a block on the
+     sales branch was selected, so it still points at sale_amt */
+  const graph = {
+    nodes:[{id:'w',type:'table',table:'weather'},
+           {id:'c',type:'case',col:'sale_amt',as:'is_rained',branches:[{op:'>',val:0,then:1}],other:0},
+           {id:'g',type:'groupby',keys:[],aggs:[{fn:'COUNT',col:'*',as:'n'}]},
+           {id:'o',type:'output'}],
+    edges:[{from:'w',to:'c',port:0},{from:'c',to:'g',port:0},{from:'g',to:'o',port:0}],
+  };
+  installGraph(api, graph, {weather:{cols:[{name:'ostore_no'},{name:'rainfall_value'}], rows:[['A',0],['B',3]]}});
+  const c = graph.nodes[1], g = graph.nodes[2];
+
+  /* the panel shows what is really stored instead of silently showing the first column */
+  api.state.sel = c.id; api.state.inspOpen = true; api.renderInspector();
+  assert.match(api.inspector.innerHTML, /<option value="sale_amt" selected>sale_amt（上一步沒有這欄）/);
+  assert.equal(api.colChoices(['a','b'], '').startsWith('<option value="" selected>（選一個欄位）'), true);
+  assert.deepEqual(json(api.evalNode(c).cols), ['ostore_no','rainfall_value'], 'no is_rained yet: the column is wrong');
+
+  /* connecting repairs it to a real column, and the new column flows on to GROUP BY */
+  api.adoptCols(c);
+  assert.equal(['ostore_no','rainfall_value'].includes(c.col), true);
+  c.col = 'rainfall_value';
+  assert.deepEqual(json(api.evalNode(c).cols), ['ostore_no','rainfall_value','is_rained']);
+  api.state.sel = g.id; api.renderInspector();
+  assert.match(api.inspector.innerHTML, /is_rained/);
+  assert.match(api.buildSQL(), /WHEN rainfall_value > 0 THEN 1/);
+
+  /* an empty column stops the SQL with a message instead of WHEN [] > 0 */
+  c.col = '';
+  const sql = api.buildSQL();
+  assert.doesNotMatch(sql, /\[\]/);
+  assert.match(sql, /無法產生 SQL：CASE 還沒選要用哪一欄/);
+  return 'stale column shown as such; adoptCols picks a real one; is_rained reaches GROUP BY; empty column refused';
+});
+
+test('JOIN: CONVERT on a key is kept, unknown wrappers are refused, AS \'alias\' parses', () => {
+  api.state.dialect = 'mssql';
+  const sql = "select top 10 convert(date,t.deal_time) as 'deal_date', t.ostore_no, w.rainfall_value " +
+    "from [analytic].[trans_detail] t join [analytic].[store_weather] w " +
+    "on convert(date,t.deal_time) = w.cutoff_date and t.ostore_no = w.ostore_no";
+  const graph = graphFromSQL(api, sql);
+  assert.deepEqual(json(graph.nodes.find(n => n.type === 'join').keys[0]),
+    {left:'deal_time', lfn:'DATE', right:'cutoff_date', rfn:''});
+  const generated = api.buildSQL();
+  assert.match(generated, /ON CAST\(a\.deal_time AS DATE\) = b\.cutoff_date/);
+  assert.match(generated, /AS deal_date/);
+  /* a style code on a text conversion changes the format, a bare function is not a step: refuse both */
+  sqlError("SELECT * FROM a JOIN b ON CONVERT(varchar(8), a.d, 112) = b.k");
+  sqlError("SELECT * FROM a JOIN b ON LEFT(a.k, 4) = b.k");
+  sqlError("SELECT * FROM a JOIN b ON a.k + 1 = b.k");
+  /* the conversions the join step can carry still import */
+  graphFromSQL(api, "SELECT * FROM a JOIN b ON CONVERT(int, a.k) = CAST(b.k AS int)");
+  return 'CONVERT(date, …) → DATE cast on the key; CONVERT style / LEFT / arithmetic refused';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {
