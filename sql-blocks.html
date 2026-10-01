@@ -3953,7 +3953,7 @@ function astToGraph(parsed){
         warn.push('NOT BETWEEN 被改寫成 < 或 >（OR）— 這就是它真正的意思');
         return [{op:'OR', any:[[{col:col, op:'<', val:lo, str:q2(c.lo)}], [{col:col, op:'>', val:hi, str:q2(c.hi)}]]}];
       }
-      warn.push('BETWEEN 被拆成兩個步驟（>= 和 <=）— 這就是它真正的意思');
+      warn.push('BETWEEN 被拆成兩個條件（>= 和 <=）— 這就是它真正的意思');
       return [{col:col, op:'>=', val:lo, str:q2(c.lo)}, {col:col, op:'<=', val:hi, str:q2(c.hi)}];
     }
     if(c.kind === 'in'){
@@ -3970,6 +3970,23 @@ function astToGraph(parsed){
     const v = litOf(c.right);
     if(c.right.kind === 'lit') noteHint(col, [v]);
     return [{col:col, op:c.op, val:v, str:(c.right.kind === 'lit' && typeof c.right.v === 'string')}];
+  }
+
+  /* 一段 WHERE／HAVING 變成幾塊篩選：連在一起的一般條件併成一塊（塊裡用 AND 串），
+     括號裡的 OR 自己一塊 —— 這樣每個條件在面板裡都改得到。順序照 SQL 原樣。 */
+  function condBlocks(list){
+    const blocks = [];
+    let run = [];
+    const flush = () => {
+      if(run.length === 1) blocks.push(run[0]);
+      else if(run.length) blocks.push({op:'OR', any:[run]});
+      run = [];
+    };
+    list.forEach(w=>condFilters(w).forEach(spec=>{
+      if(isOrFilter(spec)){ flush(); blocks.push(spec); } else run.push(spec);
+    }));
+    flush();
+    return blocks;
   }
 
   /* 先掃一遍 AST，算出每張表有哪些欄位。建圖時要靠它分辨
@@ -4061,9 +4078,7 @@ function astToGraph(parsed){
       rightAliases.forEach(a=>leftAliases.add(a));
     });
 
-    c.where.forEach(w=>{
-      condFilters(w).forEach(spec=>{ const f = add('filter', spec); conn(cur, f); cur = f; });
-    });
+    condBlocks(c.where).forEach(spec=>{ const f = add('filter', spec); conn(cur, f); cur = f; });
 
     /* SELECT 清單裡算出來的欄位：CASE 和四則運算在 GROUP BY 之前，視窗函數在之後 */
     const windows = [];
@@ -4127,9 +4142,7 @@ function astToGraph(parsed){
       cols = g.keys.concat(g.aggs.map(a=>a.as));
     }
 
-    c.having.forEach(w=>{
-      condFilters(w).forEach(spec=>{ const f = add('filter', spec); conn(cur, f); cur = f; });
-    });
+    condBlocks(c.having).forEach(spec=>{ const f = add('filter', spec); conn(cur, f); cur = f; });
 
     windows.forEach(it=>{
       const e = it.expr;

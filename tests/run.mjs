@@ -51,11 +51,26 @@ test('regression: schema qualifier survives all dialects', () => {
   return 'mysql/postgres/mssql/oracle qualifiers preserved';
 });
 
-test('regression: BETWEEN makes exactly two ordered filters', () => {
+test('regression: BETWEEN makes exactly two ordered conditions in one block', () => {
   const graph = graphFromSQL(api, 'SELECT * FROM t WHERE x BETWEEN 1 AND 3 AND y = 2');
   const filters = graph.nodes.filter(n => n.type === 'filter');
-  assert.deepEqual(json(filters.map(n => [n.col, n.op, n.val])), [['x','>=',1],['x','<=',3],['y','=',2]]);
-  return 'filters=x>=1,x<=3,y=2';
+  assert.equal(filters.length, 1, 'one WHERE → one block');
+  assert.deepEqual(json(filters[0].any[0].map(n => [n.col, n.op, n.val])), [['x','>=',1],['x','<=',3],['y','=',2]]);
+  return 'one block: x>=1 AND x<=3 AND y=2';
+});
+
+test('reverse parse: plain AND conditions share a block, an OR group gets its own', () => {
+  let graph = graphFromSQL(api, 'SELECT * FROM t WHERE a >= 1 AND b = 2');
+  assert.equal(graph.nodes.filter(n => n.type === 'filter').length, 1);
+  roundTrip('SELECT * FROM t WHERE a >= 1 AND b = 2');
+  /* (b OR c) stays its own block so every condition is editable in the panel; order is kept */
+  graph = graphFromSQL(api, 'SELECT * FROM t WHERE a >= 1 AND e = 5 AND (b = 2 OR c = 3) AND d = 4');
+  const blocks = api.chainOrder().filter(n => n.type === 'filter');
+  assert.deepEqual(json(blocks.map(n => n.any ? n.any.map(g => g.map(c => c.col).join('&')).join('|') : n.col)),
+    ['a&e', 'b|c', 'd']);
+  const having = graphFromSQL(api, 'SELECT city, COUNT(*) AS n FROM t GROUP BY city HAVING COUNT(*) >= 5 AND city <> \'x\'');
+  assert.equal(having.nodes.filter(n => n.type === 'filter').length, 1);
+  return 'a AND b → 1 block; a AND e AND (b OR c) AND d → [a&e] [b|c] [d]; HAVING too';
 });
 
 /* Each of these used to import cleanly with no warning while the steps meant
@@ -573,7 +588,9 @@ test('string codes keep their quotes even when they look numeric', () => {
   // 重新匯入一次還是字串
   const again = api.astToGraph(api.parseSQLText(generated));
   assert.match(api.buildSQL.call(null) || '', /.*/);
-  assert.equal(again.nodes.filter(n => n.type === 'filter').length, 2);
+  const kept = again.nodes.filter(n => n.type === 'filter');
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].any[0].length, 2);
   return "IN ('067', '116', '213') and fm_code = '0987' stay quoted";
 });
 
@@ -1561,9 +1578,12 @@ test('Venn: JOIN shades the overlap for INNER and the left circle for LEFT', () 
 });
 
 test('Venn: chained filters shade the intersection, step by step', () => {
-  const graph = graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20 AND inv_rank <= 20');
+  /* two separate blocks one after the other (still a WHERE … AND …) */
+  const graph = graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20');
   installGraph(api, graph, orData);
-  const [a, b] = api.chainOrder().filter(n => n.type === 'filter');
+  const a = graph.nodes.find(n => n.type === 'filter');
+  const b = api.andAfter(a, ['id','member_rank','inv_rank']);
+  Object.assign(b, {col:'inv_rank', op:'<=', val:'20'});
   assert.deepEqual(json(api.andChain(b).map(n => n.id)), [a.id, b.id]);
   assert.deepEqual(json(api.andChain(a).map(n => n.id)), [a.id, b.id]);
   /* rows: 1 only ①, 2 only ②, 3 neither, 4 both */
@@ -1597,7 +1617,7 @@ test('Venn: a lone filter or a long chain draws no AND diagram', () => {
   graph = graphFromSQL(api, 'SELECT * FROM r WHERE id > 0 AND id > 1 AND id > 2 AND id > 3');
   installGraph(api, graph, orData);
   const f = graph.nodes.find(n => n.type === 'filter');
-  assert.equal(api.andChain(f).length, 4);
+  assert.equal(f.any[0].length, 4, 'four conditions in one block');
   assert.equal(api.andVenn(f), '');
   api.state.sel = f.id;
   api.state.inspOpen = true;
