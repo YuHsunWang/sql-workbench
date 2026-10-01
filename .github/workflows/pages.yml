@@ -1,0 +1,61 @@
+# 把 sql-blocks.html 發佈到 GitHub Pages。
+# 推到 main（或在 Actions 頁手動執行）時：先跑測試，過了才部署。
+# 第一次用之前要到 Settings → Pages → Build and deployment → Source 選「GitHub Actions」。
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同時只跑一次部署；新的推上來時不要中斷正在部署的那次
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run tests
+        run: node tests/run.mjs
+
+      - name: Build site
+        run: |
+          mkdir -p _site
+          # 網站首頁就是工作台本身；原檔名也留一份，舊連結才不會斷
+          cp sql-blocks.html _site/index.html
+          cp sql-blocks.html _site/sql-blocks.html
+          # 頁面裡有內部的表名與欄位說明 —— 請搜尋引擎不要收錄（這不等於隱藏，知道網址的人還是看得到）
+          for f in _site/index.html _site/sql-blocks.html; do
+            sed -i '1i <meta name="robots" content="noindex, nofollow">' "$f"
+            grep -q 'name="robots"' "$f"
+          done
+          touch _site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
