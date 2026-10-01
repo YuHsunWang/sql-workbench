@@ -51,11 +51,26 @@ test('regression: schema qualifier survives all dialects', () => {
   return 'mysql/postgres/mssql/oracle qualifiers preserved';
 });
 
-test('regression: BETWEEN makes exactly two ordered filters', () => {
+test('regression: BETWEEN makes exactly two ordered conditions in one block', () => {
   const graph = graphFromSQL(api, 'SELECT * FROM t WHERE x BETWEEN 1 AND 3 AND y = 2');
   const filters = graph.nodes.filter(n => n.type === 'filter');
-  assert.deepEqual(json(filters.map(n => [n.col, n.op, n.val])), [['x','>=',1],['x','<=',3],['y','=',2]]);
-  return 'filters=x>=1,x<=3,y=2';
+  assert.equal(filters.length, 1, 'one WHERE → one block');
+  assert.deepEqual(json(filters[0].any[0].map(n => [n.col, n.op, n.val])), [['x','>=',1],['x','<=',3],['y','=',2]]);
+  return 'one block: x>=1 AND x<=3 AND y=2';
+});
+
+test('reverse parse: plain AND conditions share a block, an OR group gets its own', () => {
+  let graph = graphFromSQL(api, 'SELECT * FROM t WHERE a >= 1 AND b = 2');
+  assert.equal(graph.nodes.filter(n => n.type === 'filter').length, 1);
+  roundTrip('SELECT * FROM t WHERE a >= 1 AND b = 2');
+  /* (b OR c) stays its own block so every condition is editable in the panel; order is kept */
+  graph = graphFromSQL(api, 'SELECT * FROM t WHERE a >= 1 AND e = 5 AND (b = 2 OR c = 3) AND d = 4');
+  const blocks = api.chainOrder().filter(n => n.type === 'filter');
+  assert.deepEqual(json(blocks.map(n => n.any ? n.any.map(g => g.map(c => c.col).join('&')).join('|') : n.col)),
+    ['a&e', 'b|c', 'd']);
+  const having = graphFromSQL(api, 'SELECT city, COUNT(*) AS n FROM t GROUP BY city HAVING COUNT(*) >= 5 AND city <> \'x\'');
+  assert.equal(having.nodes.filter(n => n.type === 'filter').length, 1);
+  return 'a AND b → 1 block; a AND e AND (b OR c) AND d → [a&e] [b|c] [d]; HAVING too';
 });
 
 /* Each of these used to import cleanly with no warning while the steps meant
@@ -573,7 +588,9 @@ test('string codes keep their quotes even when they look numeric', () => {
   // 重新匯入一次還是字串
   const again = api.astToGraph(api.parseSQLText(generated));
   assert.match(api.buildSQL.call(null) || '', /.*/);
-  assert.equal(again.nodes.filter(n => n.type === 'filter').length, 2);
+  const kept = again.nodes.filter(n => n.type === 'filter');
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].any[0].length, 2);
   return "IN ('067', '116', '213') and fm_code = '0987' stay quoted";
 });
 
@@ -1399,14 +1416,16 @@ test('OR: HAVING and NOT BETWEEN become OR filters', () => {
 });
 
 /* the graph as it stands must be what its own SQL parses back into */
-function stableSQL() {
+/* shape:false — one WHERE block holding several AND conditions reparses into
+   chained blocks, so only the SQL (not the step list) has to come back the same */
+function stableSQL({shape = true} = {}) {
   const {nodes, edges, uid} = api.state;
   const steps = () => api.chainOrder().map(n => n.type + (n.type === 'filter' ? ':' + n.op : '')).join(' > ');
   const generated = api.buildSQL(), before = steps();
   const back = api.astToGraph(api.parseSQLText(generated));
   api.state.nodes = back.nodes; api.state.edges = back.edges;
   try {
-    assert.equal(steps(), before, 'same steps after reparsing');
+    if (shape) assert.equal(steps(), before, 'same steps after reparsing');
     assert.equal(api.buildSQL(), generated, 'same SQL after reparsing');
   } finally {
     Object.assign(api.state, {nodes, edges, uid});
@@ -1437,7 +1456,7 @@ test('OR editing: a plain filter grows a second group and round-trips', () => {
   return 'plain → 2 groups → AND inside a group → 3 groups, SQL stable';
 });
 
-test('OR editing: shrinking to one group collapses or splits into a chain', () => {
+test('OR editing: shrinking to one group collapses or stays one AND block', () => {
   let graph = graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20 OR inv_rank <= 20');
   installGraph(api, graph, orData);
   let f = graph.nodes.find(n => n.type === 'filter');
@@ -1450,23 +1469,24 @@ test('OR editing: shrinking to one group collapses or splits into a chain', () =
   graph = graphFromSQL(api, 'SELECT * FROM r WHERE id = 9 OR (member_rank <= 20 AND inv_rank <= 20)');
   installGraph(api, graph, orData);
   f = graph.nodes.find(n => n.type === 'filter');
-  const made = api.orDelTerm(f, 0, 0);
-  assert.equal(made.length, 1);
-  const filters = api.chainOrder().filter(n => n.type === 'filter');
-  assert.deepEqual(json(filters.map(n => [n.col, n.op, n.val])), [['member_rank','<=',20], ['inv_rank','<=',20]]);
-  assert.match(stableSQL(), /WHERE member_rank <= 20\n    AND inv_rank <= 20/);
+  assert.deepEqual(json(api.orDelTerm(f, 0, 0)), []);
+  assert.equal(api.chainOrder().filter(n => n.type === 'filter').length, 1, 'still one block');
+  assert.equal(f.any.length, 1);
+  assert.deepEqual(json(f.any[0].map(c => [c.col, c.op, c.val])), [['member_rank','<=',20], ['inv_rank','<=',20]]);
+  assert.match(stableSQL({shape:false}), /WHERE member_rank <= 20\n    AND inv_rank <= 20\n/);
   const out = api.evalNode(api.state.nodes.find(n => n.type === 'output'));
   assert.deepEqual(json(out.rows.map(r => r[0])), [4]);
 
-  /* the last group being a nested OR becomes the node itself */
-  graph = graphFromSQL(api, 'SELECT * FROM r WHERE id = 9 OR ((id = 1 OR id = 2) AND inv_rank > 0)');
+  /* a lone nested OR left as the only condition becomes the node itself */
+  graph = graphFromSQL(api, 'SELECT * FROM r WHERE id = 9 OR (id = 1 OR id = 2)');
   installGraph(api, graph, orData);
   f = graph.nodes.find(n => n.type === 'filter');
+  f.any = [[{col:'id', op:'=', val:9}], [{op:'OR', any:[[{col:'id', op:'=', val:1}], [{col:'id', op:'=', val:2}]]}]];
   api.orDelTerm(f, 0, 0);
   assert.equal(api.isOrFilter(f), true);
   assert.equal(f.any.length, 2);
   stableSQL();
-  return 'one condition → plain filter; AND group → two chained filters; nested OR kept';
+  return 'one condition → plain filter; one AND group → stays a single block; nested OR kept';
 });
 
 test('OR view: the block, inspector and step-through spell out the groups', () => {
@@ -1477,6 +1497,7 @@ test('OR view: the block, inspector and step-through spell out the groups', () =
   assert.match(summary, /member_rank &lt;= 20<\/code><div class="orsep">或<\/div><code>inv_rank &lt;= 20/);
 
   api.state.sel = f.id;
+  api.state.inspOpen = true;
   api.renderInspector();
   const panel = api.inspector.innerHTML;
   assert.match(panel, /第 1 組[\s\S]*第 2 組/);
@@ -1500,6 +1521,7 @@ test('OR editing: a plain filter offers the OR button', () => {
   const graph = graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20');
   installGraph(api, graph, orData);
   api.state.sel = graph.nodes.find(n => n.type === 'filter').id;
+  api.state.inspOpen = true;
   api.renderInspector();
   assert.match(api.inspector.innerHTML, /data-to-or/);
   return 'plain filter panel has ＋ 或';
@@ -1528,6 +1550,7 @@ test('Venn: OR shows the union with the real per-region counts', () => {
   api.orAddGroup(f, ['id']);
   assert.equal(api.orVenn(f, api.evalNode(graph.nodes[0])), '', 'four groups do not fit a Venn');
   api.state.sel = f.id;
+  api.state.inspOpen = true;
   api.renderInspector();
   assert.match(api.inspector.innerHTML, /超過 3 組，文氏圖畫不下/);
   return 'union shaded, counts 1/1/1 + 1 outside, 3 sets = 7 regions, 4 sets fall back';
@@ -1548,34 +1571,39 @@ test('Venn: JOIN shades the overlap for INNER and the left circle for LEFT', () 
   assert.match(api.joinPairsVenn(join), /對得上：左表 2 列、右表 3 列/);
   assert.match(api.joinPairsVenn(join), /左表：<code>l<\/code>/);
   api.state.sel = join.id;
+  api.state.inspOpen = true;
   api.renderInspector();
   assert.match(api.inspector.innerHTML, /哪些列會留下[\s\S]*class="venn"/);
   return 'INNER shades 3 only; LEFT shades 1 and 3; legend names the tables';
 });
 
 test('Venn: chained filters shade the intersection, step by step', () => {
-  const graph = graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20 AND inv_rank <= 20');
+  /* two separate blocks one after the other (still a WHERE … AND …) */
+  const graph = graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20');
   installGraph(api, graph, orData);
-  const [a, b] = api.chainOrder().filter(n => n.type === 'filter');
+  const a = graph.nodes.find(n => n.type === 'filter');
+  const b = api.andAfter(a, ['id','member_rank','inv_rank']);
+  Object.assign(b, {col:'inv_rank', op:'<=', val:'20'});
   assert.deepEqual(json(api.andChain(b).map(n => n.id)), [a.id, b.id]);
   assert.deepEqual(json(api.andChain(a).map(n => n.id)), [a.id, b.id]);
   /* rows: 1 only ①, 2 only ②, 3 neither, 4 both */
   const full = api.andVenn(a);
   assert.deepEqual(vennCounts(full), [['vout',1], ['vout',1], ['vin',1]], 'only the overlap is kept');
-  assert.match(full, /一關都沒過 1</);
-  assert.match(full, /4 列 → 過第①關 2 列 → 過第②關 1 列/);
-  assert.match(full, /class="vcur">[^]*第①關[^]*← 這一塊/);
-  const first = api.andVenn(a, 0);
+  assert.match(full, /一個都沒成立 1</);
+  assert.match(full, /4 列 → 過條件① 2 列 → 過條件② 1 列/);
+  assert.match(full, /class="vcur">[^]*條件①[^]*← 這一塊/);
+  const first = api.andVenn(a, true);
   assert.deepEqual(vennCounts(first), [['vin',1], ['vout',1], ['vin',1]], 'after ① the whole first circle is still in');
-  assert.doesNotMatch(first, /過第②關/);
+  assert.doesNotMatch(first, /過條件②/);
 
   const step = api.buildSteps().filter(s => s.title === 'WHERE')[0];
   const box = {children:[], appendChild(c) { this.children.push(c); return c; }};
   step.render(box);
   assert.equal(box.children.length, 2);
-  assert.match(box.children[1].innerHTML, /走到第①關/);
+  assert.match(box.children[1].innerHTML, /走到這一塊/);
 
   api.state.sel = b.id;
+  api.state.inspOpen = true;
   api.renderInspector();
   assert.match(api.inspector.innerHTML, /跟前後的篩選一起看（AND）[\s\S]*class="venn"/);
   return 'chain found from either end; intersection shaded; step 1 shades circle ①; funnel 4→2→1';
@@ -1589,12 +1617,67 @@ test('Venn: a lone filter or a long chain draws no AND diagram', () => {
   graph = graphFromSQL(api, 'SELECT * FROM r WHERE id > 0 AND id > 1 AND id > 2 AND id > 3');
   installGraph(api, graph, orData);
   const f = graph.nodes.find(n => n.type === 'filter');
-  assert.equal(api.andChain(f).length, 4);
+  assert.equal(f.any[0].length, 4, 'four conditions in one block');
   assert.equal(api.andVenn(f), '');
   api.state.sel = f.id;
+  api.state.inspOpen = true;
   api.renderInspector();
-  assert.match(api.inspector.innerHTML, /共 4 塊篩選串在一起（AND），超過 3 塊文氏圖畫不下/);
+  assert.match(api.inspector.innerHTML, /一共 4 個 AND 條件，超過 3 個文氏圖畫不下/);
   return 'single filter: none; four chained: note instead';
+});
+
+test('AND editing: ＋且 adds a condition inside the same block', () => {
+  api.state.dialect = 'postgres';
+  const graph = graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20');
+  installGraph(api, graph, orData);
+  const f = graph.nodes.find(n => n.type === 'filter');
+  api.state.sel = f.id;
+  api.state.inspOpen = true;
+  api.renderInspector();
+  assert.match(api.inspector.innerHTML, /data-to-and[^>]*>＋ 且（還要符合）/);
+  assert.match(api.inspector.innerHTML, /data-to-or[^>]*>＋ 或（符合也留下）/);
+  assert.doesNotMatch(api.inspector.innerHTML, /data-and-next/, 'a plain filter never adds a block');
+
+  api.andFromPlain(f, ['id','member_rank','inv_rank']);
+  assert.equal(api.state.nodes.filter(n => n.type === 'filter').length, 1, 'still one WHERE block');
+  assert.equal(f.any.length, 1);
+  Object.assign(f.any[0][1], {col:'inv_rank', op:'<=', val:'20'});
+  api.orAddCond(f, 0, ['id','member_rank','inv_rank']);
+  Object.assign(f.any[0][2], {col:'id', op:'<>', val:'3'});
+  assert.match(stableSQL({shape:false}), /WHERE member_rank <= 20\n    AND inv_rank <= 20\n    AND id <> 3\n/);
+  assert.deepEqual(json(api.evalNode(api.state.nodes.find(n => n.type === 'output')).rows.map(r => r[0])), [4]);
+
+  /* the block reads as AND everywhere */
+  assert.match(api.nodeSummary(f), /<div class="orsep">且<\/div>/);
+  api.renderInspector();
+  const panel = api.inspector.innerHTML;
+  assert.match(panel, /條件（每個都要成立）/);
+  assert.doesNotMatch(panel, /第 1 組/);
+  assert.match(panel, /＋ 或（符合另一組條件也留下）/);
+  assert.match(panel, /這些條件一起看（AND）[\s\S]*class="venn"/);
+  const step = api.buildSteps().find(s => s.title === 'WHERE');
+  assert.match(step.cap, /AND<\/code> 是<strong>每個條件都要成立/);
+  const box = {children:[], appendChild(c) { this.children.push(c); return c; }};
+  step.render(box);
+  assert.match(box.children[0].innerHTML, /條件①<\/th><th>條件②<\/th><th>條件③/);
+
+  /* ＋或 on an AND block makes (a AND b AND c) OR d */
+  api.orAddGroup(f, ['id']);
+  Object.assign(f.any[1][0], {col:'id', op:'=', val:'3'});
+  assert.match(api.buildSQL(), /WHERE \(member_rank <= 20 AND inv_rank <= 20 AND id <> 3\) OR id = 3/);
+  return 'plain → one block with AND; three conditions; ＋或 on top gives (…) OR d';
+});
+
+test('panel: adding a block selects it without opening the settings panel', () => {
+  graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20');
+  const f = api.state.nodes.find(n => n.type === 'filter');
+  api.state.sel = f.id;
+  api.state.inspOpen = true;
+  api.addNode('distinct', {});
+  const added = api.state.nodes[api.state.nodes.length - 1];
+  assert.equal(api.state.sel, added.id, 'the new block is selected, so the next one chains after it');
+  assert.equal(api.state.inspOpen, false, 'but the panel stays closed');
+  return 'addNode selects the block and keeps the panel shut';
 });
 
 let passed = 0;
