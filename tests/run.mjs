@@ -1597,6 +1597,37 @@ test('Venn: a lone filter or a long chain draws no AND diagram', () => {
   return 'single filter: none; four chained: note instead';
 });
 
+test('AND editing: ＋且 adds the next filter block, from a plain or an OR filter', () => {
+  api.state.dialect = 'postgres';
+  let graph = graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20');
+  installGraph(api, graph, orData);
+  const f = graph.nodes.find(n => n.type === 'filter');
+  api.state.sel = f.id;
+  api.renderInspector();
+  assert.match(api.inspector.innerHTML, /data-and-next[^>]*>＋ 且/);
+  const m = api.andAfter(f, ['id','member_rank','inv_rank']);
+  assert.equal(api.state.sel, m.id, 'the new block is selected for editing');
+  assert.deepEqual([m.col, m.op], ['member_rank', '=']);
+  Object.assign(m, {col:'inv_rank', op:'<=', val:'20'});
+  assert.deepEqual(json(api.chainOrder().map(n => n.type)), ['filter','filter']);
+  const out = api.state.nodes.find(n => n.type === 'output');
+  assert.equal(api.state.edges.filter(e => e.to === out.id)[0].from, m.id, 'downstream now hangs off the new block');
+  assert.match(stableSQL(), /WHERE member_rank <= 20\n    AND inv_rank <= 20/);
+  assert.deepEqual(json(api.evalNode(out).rows.map(r => r[0])), [4]);
+
+  graph = graphFromSQL(api, 'SELECT * FROM r WHERE member_rank <= 20 OR inv_rank <= 20');
+  installGraph(api, graph, orData);
+  const or = graph.nodes.find(n => n.type === 'filter');
+  api.state.sel = or.id;
+  api.renderInspector();
+  assert.match(api.inspector.innerHTML, /data-and-next[^>]*>＋ 且（整塊之外/);
+  const z = api.andAfter(or, ['id','member_rank','inv_rank']);
+  Object.assign(z, {col:'id', op:'<>', val:'4'});
+  assert.match(stableSQL(), /WHERE \(member_rank <= 20 OR inv_rank <= 20\)\n    AND id <> 4/);
+  assert.deepEqual(json(api.evalNode(api.state.nodes.find(n => n.type === 'output')).rows.map(r => r[0])), [1,2]);
+  return 'plain → two chained blocks; OR block → (a OR b) AND c; SQL stable';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {

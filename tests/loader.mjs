@@ -89,7 +89,7 @@ export function loadApp(stored = {}) {
     'validQuick', 'quickCodes', 'quickVal', 'noteManifest', 'applyNotes', 'chainOf',
     'nodeSummary', 'removeNode', 'addNode', 'viewCenter', 'noteOf', 'autoNote',
     'orFromPlain', 'orAddGroup', 'orAddCond', 'orDelTerm', 'isOrFilter',
-    'renderInspector', 'inspector', 'buildSteps', 'orVenn', 'joinPairsVenn', 'andChain', 'andVenn',
+    'renderInspector', 'inspector', 'buildSteps', 'orVenn', 'joinPairsVenn', 'andChain', 'andVenn', 'andAfter',
   ];
   const marker = '})();';
   const at = match[1].lastIndexOf(marker);

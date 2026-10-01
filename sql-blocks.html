@@ -369,6 +369,8 @@ input[type="number"]{max-width:88px}
 .orand{font-size:10.5px;color:var(--ink-3);margin:-3px 0 4px 2px}
 .orchip{flex:1;white-space:normal;word-break:break-all}
 .orbtn{width:100%;font-size:11px;padding:3px 6px;margin-bottom:4px}
+.andor{display:flex;gap:6px;margin-top:4px}
+.andor .btn{flex:1;min-width:0;padding-left:4px;padding-right:4px}
 .orsep{display:flex;align-items:center;gap:6px;font-size:10.5px;font-weight:700;color:var(--ink-3);margin:4px 0}
 .orsep::before,.orsep::after{content:"";flex:1;border-top:1px dashed var(--line-soft)}
 /* 文氏圖：線是圈圈的顏色，字一律用文字色 */
@@ -2201,6 +2203,7 @@ function renderInspector(){
       h += '<button class="btn ghost orbtn" data-or-and="'+bi+'">＋ 且（這組再加一個條件）</button></div>';
     });
     h += '<button class="btn ghost" data-or-group style="width:100%;margin-top:6px">＋ 或（多一組）</button>';
+    h += '<button class="btn ghost" data-and-next style="width:100%;margin-top:4px" title="後面多接一塊篩選：這整塊 OR 成立之外，還要符合另一個條件">＋ 且（整塊之外還要符合另一個條件）</button>';
     /* 每組各中幾列、同時中好幾組的有幾列 —— OR 不是把各組加起來 */
     const S = up ? evalNode(up) : {cols:[], rows:[]};
     const tests = n.any.map(b=>condTest({op:'OR', any:[b]}, S.cols));
@@ -2225,7 +2228,9 @@ function renderInspector(){
            (!inList(n.val).length ? '<br><b style="color:var(--drop)">清單是空的：IN 永遠不成立，NOT IN 永遠成立。</b>' : '')+'</p>';
     if(n.op === 'LIKE' || n.op === 'NOT LIKE')
       h += '<p class="note"><code>%</code> = 任意長度，<code>_</code> = 剛好一個字。<br><code>台%</code> 是「開頭是台」，<code>%北%</code> 是「中間有北」。</p>';
-    h += '<button class="btn ghost" data-to-or style="width:100%;margin-top:4px">＋ 或（符合另一個條件也留下）</button>';
+    h += '<div class="andor"><button class="btn ghost" data-and-next title="後面多接一塊篩選：兩個條件都要成立">＋ 且（還要符合）</button>'+
+         '<button class="btn ghost" data-to-or title="這塊變成 OR：符合任一個條件就留下">＋ 或（符合也留下）</button></div>'+
+         '<p class="note">「且」會在後面多接一塊篩選 —— 一塊接一塊，就是 <code>AND</code>。「或」是把條件放進同一塊。</p>';
     if(up && up.type === 'groupby')
       h += '<p class="note">這塊接在 GROUP BY 後面 —— 這就是 <code>HAVING</code> 在做的事。<br>因為上一步已經變成一個 CTE，用 <code>WHERE</code> 就夠了，不用 <code>HAVING</code>。</p>';
   }
@@ -2388,6 +2393,12 @@ inspector.addEventListener('click', e=>{
   if(t.hasAttribute('data-add-branch')){ n.branches.push({op:'>=', val:0, then:'新類別'}); refresh(); return; }
   if(t.dataset.delBranch !== undefined){ n.branches.splice(Number(t.dataset.delBranch),1); refresh(); return; }
   if(t.hasAttribute('data-to-or')){ orFromPlain(n, colsInto(n.id)); refresh(); return; }
+  if(t.hasAttribute('data-and-next')){
+    const m = andAfter(n, colsInto(n.id));
+    renderNodes(); refit(m.id);                  /* 貼齊前一塊，接點才會對上 */
+    refresh(); revealNode(m.id); flashNode(m.id);
+    return;
+  }
   if(t.hasAttribute('data-or-group')){ orAddGroup(n, colsInto(n.id)); refresh(); return; }
   if(t.dataset.orAnd !== undefined){ orAddCond(n, Number(t.dataset.orAnd), colsInto(n.id)); refresh(); return; }
   if(t.dataset.orDel !== undefined){
@@ -2464,15 +2475,25 @@ function settleOr(n){
   else { n.col = head.col; n.op = head.op; n.val = head.val; if(head.str) n.str = true; else delete n.str; }
   const made = [];
   let prev = n;
-  only.forEach(c=>{
-    const m = Object.assign({id:'n'+(++state.uid), type:'filter', x:prev.x + 164 + SNAP_GAP, y:prev.y}, JSON.parse(JSON.stringify(c)));
-    state.nodes.forEach(o=>{ if(o !== prev && o.x >= prev.x + 140) o.x += 164 + SNAP_GAP; });
-    state.edges.filter(e=>e.from === prev.id).forEach(e=>{ e.from = m.id; });
-    state.nodes.push(m);
-    state.edges.push({from:prev.id, to:m.id, port:0});
-    made.push(m); prev = m;
-  });
+  only.forEach(c=>{ prev = filterAfter(prev, c); made.push(prev); });
   return made;
+}
+/* 在 prev 後面插一塊篩選，原本接在 prev 後面的改接到新的這塊、下游往右推。
+   AND 在這裡就是一塊接一塊，所以「＋ 且」也是用這個 */
+function filterAfter(prev, spec){
+  const m = Object.assign({id:'n'+(++state.uid), type:'filter', x:prev.x + 164 + SNAP_GAP, y:prev.y},
+                          JSON.parse(JSON.stringify(spec)));
+  state.nodes.forEach(o=>{ if(o !== prev && o.x >= prev.x + 140) o.x += 164 + SNAP_GAP; });
+  state.edges.filter(e=>e.from === prev.id).forEach(e=>{ e.from = m.id; });
+  state.nodes.push(m);
+  state.edges.push({from:prev.id, to:m.id, port:0});
+  return m;
+}
+/* 「＋ 且」：新的一塊預設看同一欄，選起來讓人直接改 */
+function andAfter(n, cols){
+  const m = filterAfter(n, blankCond(cols, isOrFilter(n) ? '' : n.col));
+  state.sel = m.id;
+  return m;
 }
 function toggle(arr, v){ const i = arr.indexOf(v); if(i >= 0) arr.splice(i,1); else arr.push(v); }
 function prune(n){
