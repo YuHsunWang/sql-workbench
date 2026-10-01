@@ -1717,6 +1717,26 @@ test('CASE: a column carried over from another branch is shown, repaired on conn
   return 'stale column shown as such; adoptCols picks a real one; is_rained reaches GROUP BY; empty column refused';
 });
 
+test('JOIN: CONVERT on a key is kept, unknown wrappers are refused, AS \'alias\' parses', () => {
+  api.state.dialect = 'mssql';
+  const sql = "select top 10 convert(date,t.deal_time) as 'deal_date', t.ostore_no, w.rainfall_value " +
+    "from [analytic].[trans_detail] t join [analytic].[store_weather] w " +
+    "on convert(date,t.deal_time) = w.cutoff_date and t.ostore_no = w.ostore_no";
+  const graph = graphFromSQL(api, sql);
+  assert.deepEqual(json(graph.nodes.find(n => n.type === 'join').keys[0]),
+    {left:'deal_time', lfn:'DATE', right:'cutoff_date', rfn:''});
+  const generated = api.buildSQL();
+  assert.match(generated, /ON CAST\(a\.deal_time AS DATE\) = b\.cutoff_date/);
+  assert.match(generated, /AS deal_date/);
+  /* a style code on a text conversion changes the format, a bare function is not a step: refuse both */
+  sqlError("SELECT * FROM a JOIN b ON CONVERT(varchar(8), a.d, 112) = b.k");
+  sqlError("SELECT * FROM a JOIN b ON LEFT(a.k, 4) = b.k");
+  sqlError("SELECT * FROM a JOIN b ON a.k + 1 = b.k");
+  /* the conversions the join step can carry still import */
+  graphFromSQL(api, "SELECT * FROM a JOIN b ON CONVERT(int, a.k) = CAST(b.k AS int)");
+  return 'CONVERT(date, …) → DATE cast on the key; CONVERT style / LEFT / arithmetic refused';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {

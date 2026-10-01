@@ -3650,7 +3650,10 @@ function parseSQLText(text){
   const isStop = k => { const u = up(at(k)); return u !== null && KEYWORDS.has(u); };
 
   function maybeAlias(){
-    if(eatKw('AS')) return nameTok();
+    if(eatKw('AS')){
+      if(at().t === 'str') return take().v;      /* SQL Server 的 AS 'deal_date' */
+      return nameTok();
+    }
     const t = at();
     if(t.t === 'word' && (t.quoted || !isStop())) { p++; return keepQuoted(t); }
     return null;
@@ -3749,9 +3752,18 @@ function parseSQLText(text){
     const on = [];
     if(eatKw('ON')){
       do {
-        const l = parseExpr();
+        const t0 = at(), l = parseExpr();
         if(!eatOp('=')) fail('JOIN 的 ON 只看得懂 a.x = b.y');
-        on.push({left:l, right:parseExpr()});
+        const t1 = at(), r = parseExpr();
+        /* 對照欄只能是欄位，或包一層步驟做得出來的轉換 —— 其他函式不擋的話會被默默拿掉，
+           像 CONVERT(date, deal_time) 變成 deal_time，對到的列就完全不一樣了 */
+        [[l, t0], [r, t1]].forEach(x=>{
+          if(x[0].kind === 'call' && !castOf(x[0]))
+            fail('JOIN 條件裡的 '+x[0].fn+'(…) 目前做不出對應的步驟（只支援 CAST / CONVERT 轉日期、整數、文字，TRIM、UPPER）', x[1]);
+          if(x[0].kind !== 'call' && x[0].kind !== 'col')
+            fail('JOIN 條件兩邊目前只能是欄位，或包一層轉換', x[1]);
+        });
+        on.push({left:l, right:r});
       } while(eatKw('AND'));
     } else if(isKw('USING')){
       p++; needOp('(');
@@ -3929,7 +3941,16 @@ function castOf(e){
   if(f === 'TRIM')  return 'TRIM';
   if(f === 'UPPER') return 'UPPER';
   if(f === 'DATE' || f === 'TRUNC') return 'DATE';
-  if(f === 'CAST'){
+  /* SQL Server：CONVERT(型別, 欄位[, 樣式])。日期以外帶樣式的轉換（像 varchar 加 112）
+     換成 CAST 會改掉格式，這種回傳空字串，讓反解直接擋下來 */
+  if(f === 'CONVERT' || f === 'TRY_CONVERT'){
+    const t = (e.args[0] && e.args[0].kind === 'col' ? e.args[0].col : '').toUpperCase();
+    if(/DATE/.test(t)) return 'DATE';
+    if(e.args.length > 2) return '';
+    if(/INT|NUMBER|DEC|SIGNED|UNSIGNED/.test(t)) return 'INT';
+    return t ? 'TEXT' : '';
+  }
+  if(f === 'CAST' || f === 'TRY_CAST'){
     const t = (e.castType || '').toUpperCase();
     if(/DATE/.test(t)) return 'DATE';
     if(/INT|NUMBER|DEC|SIGNED|UNSIGNED/.test(t)) return 'INT';
