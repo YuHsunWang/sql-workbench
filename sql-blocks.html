@@ -999,9 +999,9 @@ function evalNode(node, ctx){
 
   case 'select': {
     const s = S();
-    const idx = (node.cols || []).map(c=>s.cols.indexOf(c)).filter(i=>i >= 0);
+    const idx = (node.cols || []).map((c,i)=>({i:s.cols.indexOf(c), out:(node.outCols || node.cols)[i]})).filter(x=>x.i >= 0);
     if(!idx.length) return s;                      /* 一個都沒選 = 全部要，等同 SELECT * */
-    return {cols:idx.map(i=>s.cols[i]), rows:s.rows.map(r=>idx.map(i=>r[i]))};
+    return {cols:idx.map(x=>x.out), rows:s.rows.map(r=>idx.map(x=>r[x.i]))};
   }
 
   case 'distinct': {
@@ -1013,7 +1013,7 @@ function evalNode(node, ctx){
     const s = S();
     let rows = sortRows(s, node);
     const offset = Math.max(0, Number(node.offset) || 0);
-    if(Number(node.limit) > 0) rows = rows.slice(offset, offset + Number(node.limit));
+    if(Number(node.limit) > 0 || node.limitZero) rows = rows.slice(offset, offset + Number(node.limit));
     else if(offset > 0) rows = rows.slice(offset);
     return {cols:s.cols, rows:rows};
   }
@@ -1032,7 +1032,10 @@ function evalNode(node, ctx){
   }
 
   case 'derive': {
-    const s = S(), li = s.cols.indexOf(node.left);
+    const s = S();
+    if(Object.prototype.hasOwnProperty.call(node, 'literal'))
+      return {cols:s.cols.concat([node.as]), rows:s.rows.map(r=>r.concat([node.literal]))};
+    const li = s.cols.indexOf(node.left);
     if(li < 0) return s;
     if(node.fn){
       /* 示範資料算不出真正的函式結果，先照抄原始值——實際換算請看下面的 SQL */
@@ -1268,18 +1271,18 @@ function schemaOf(n){
 }
 
 /* SQL Server 的 TOP 長在 SELECT 上，其他家長長在尾巴；有位移時改用 OFFSET */
-function limHead(lim, offset){ return (lim > 0 && !offset && D().lim === 'top') ? 'SELECT TOP '+lim+' *' : 'SELECT *'; }
-function limTail(lim, offset, ind, hasOrder){
+function limHead(lim, offset, limitZero){ return ((lim > 0 || limitZero) && !offset && D().lim === 'top') ? 'SELECT TOP '+lim+' *' : 'SELECT *'; }
+function limTail(lim, offset, ind, hasOrder, limitZero){
   offset = Math.max(0, Number(offset) || 0);
   if(D().lim === 'limit'){
-    if(lim <= 0) return offset > 0 ? '\n'+ind+'OFFSET '+offset : '';
+    if(lim <= 0 && !limitZero) return offset > 0 ? '\n'+ind+'OFFSET '+offset : '';
     return '\n'+ind+'LIMIT '+lim+(offset > 0 ? ' OFFSET '+offset : '');
   }
   if(offset > 0){
     if(!hasOrder) return '\n'+ind+'-- 無法套用 OFFSET '+offset+'：'+D().name+' 需要先指定 ORDER BY，這次未限制列數。';
-    return '\n'+ind+'OFFSET '+offset+' ROWS'+(lim > 0 ? '\n'+ind+'FETCH NEXT '+lim+' ROWS ONLY' : '');
+    return '\n'+ind+'OFFSET '+offset+' ROWS'+(lim > 0 || limitZero ? '\n'+ind+'FETCH NEXT '+lim+' ROWS ONLY' : '');
   }
-  if(lim <= 0) return '';
+  if(lim <= 0 && !limitZero) return '';
   if(D().lim === 'fetch') return '\n'+ind+'FETCH FIRST '+lim+' ROWS ONLY';
   return '';
 }
@@ -1300,6 +1303,7 @@ function numish(v){
 const isNum = v => numish(v) !== null;
 const strLit = v => "'"+String(v).replace(/\\/g, state.dialect === 'mysql' ? '\\\\' : '\\').replace(/'/g,"''")+"'";
 const lit = v => isNum(v) ? String(numish(v)) : strLit(v);
+const sqlLit = v => v === null ? 'NULL' : lit(v);
 function operand(v, cols){ return cols.indexOf(v) >= 0 ? q(v) : (isNum(v) ? String(Number(v)) : lit(v)); }
 function condSQL(n){
   /* AND 比 OR 先結合，本來不用括號；多支時還是包起來，看的人才不用記優先順序 */
@@ -1362,7 +1366,8 @@ function graphIssue(last){
       const problem = missing(s); if(problem) return problem;
     }
     const need = (COL_FIELDS[n.type] || []).filter(f=>!OPTIONAL_COL[f]);
-    if(!(n.type === 'filter' && isOrFilter(n)) && need.some(f=>!n[f]))
+    if(!(n.type === 'filter' && isOrFilter(n)) &&
+       !(n.type === 'derive' && Object.prototype.hasOwnProperty.call(n, 'literal')) && need.some(f=>!n[f]))
       return META[n.type].label+' 還沒選要用哪一欄。';
     if(n.type === 'filter'){
       const s = srcOf(n.id, 0), cols = evalNode(s).cols;
@@ -1422,7 +1427,11 @@ function buildSQL(){
 
   /* ORDER BY / LIMIT 只有放在最外層才有意義 —— 最後一塊是排序就抽出來 */
   const tailSort = (last.type === 'sort') ? last : null;
-  const all = chainOrder().filter(n=>n !== tailSort);
+  const sortInput = tailSort ? srcOf(tailSort.id, 0) : null;
+  /* 排序欄位若沒被選出，讓最外層 SELECT 先排序再挑欄位。 */
+  const tailSelect = sortInput && sortInput.type === 'select' &&
+    sortKeys(tailSort).some(k=>(sortInput.outCols || sortInput.cols || []).indexOf(k.by) < 0) ? sortInput : null;
+  const all = chainOrder().filter(n=>n !== tailSort && n !== tailSelect);
 
   /* 一連串只餵給下一個 filter 的 filter，併成一個 CTE、WHERE 用 AND 串 */
   const absorbed = {};
@@ -1433,7 +1442,7 @@ function buildSQL(){
     /* 連續的 filter 併成一個 WHERE */
     if(n.type === 'filter' && s.type === 'filter') absorbed[s.id] = true;
     /* 「選欄位」只是餵給下一塊時，把欄位清單併進去，不用自己一層 CTE */
-    if(s.type === 'select' && ['filter','distinct','sort'].indexOf(n.type) >= 0) absorbed[s.id] = true;
+    if(s.type === 'select' && !s.outCols && ['filter','distinct','sort'].indexOf(n.type) >= 0) absorbed[s.id] = true;
   });
   const order = all.filter(n=>!absorbed[n.id]);
   /* 回頭找被併掉的 select 提供的欄位清單 */
@@ -1495,7 +1504,9 @@ function buildSQL(){
             '\n  FROM '+ref(s0);
 
     } else if(n.type === 'derive'){
-      sql = n.fn
+      sql = Object.prototype.hasOwnProperty.call(n, 'literal')
+        ? '  SELECT *,\n    '+sqlLit(n.literal)+' AS '+q(n.as)+'\n  FROM '+ref(s0)
+        : n.fn
         ? '  SELECT *,\n    '+fnCallSQL(n)+' AS '+q(n.as)+
           '\n  FROM '+ref(s0)
         : '  SELECT *,\n    '+q(n.left)+' '+n.op+' '+operand(n.right, up)+' AS '+q(n.as)+
@@ -1531,7 +1542,7 @@ function buildSQL(){
       /* 照使用者選的欄位原樣寫出來。就算執行引擎認不得某個欄名也不要退回
          SELECT * —— 那會把整張表抓回來，正好是這個步驟要避免的事。 */
       const keep = n.cols || [];
-      sql = '  SELECT '+(keep.length ? list(keep.map(q), 9) : '*')+'\n  FROM '+ref(s0);
+      sql = '  SELECT '+(keep.length ? list(selectItems(n), 9) : '*')+'\n  FROM '+ref(s0);
 
     } else if(n.type === 'distinct'){
       const inh = inheritedCols(n);
@@ -1541,9 +1552,9 @@ function buildSQL(){
       const lim = Number(n.limit) || 0;
       const offset = Math.max(0, Number(n.offset) || 0);
       const inh = inheritedCols(n), from = inh ? realSource(n) : s0;
-      sql = lim > 0 || offset > 0
-        ? '  '+(inh ? limHead(lim, offset).replace(/\*$/, list(inh.map(q), 9)) : limHead(lim, offset))+
-          '\n  FROM '+ref(from)+(n.by ? '\n  ORDER BY '+orderSQL(n) : '')+limTail(lim, offset, '  ', !!n.by)
+      sql = lim > 0 || offset > 0 || n.limitZero
+        ? '  '+(inh ? limHead(lim, offset, n.limitZero).replace(/\*$/, list(inh.map(q), 9)) : limHead(lim, offset, n.limitZero))+
+          '\n  FROM '+ref(from)+(n.by ? '\n  ORDER BY '+orderSQL(n) : '')+limTail(lim, offset, '  ', !!n.by, n.limitZero)
         : '  -- 夾在中間的 ORDER BY 資料庫可以不理你，已省略\n'+
           '  -- （排序請放最後一塊，或填「取前幾筆」）\n'+
           '  SELECT '+(inh ? list(inh.map(q), 9) : '*')+'\n  FROM '+ref(from);
@@ -1560,15 +1571,18 @@ function buildSQL(){
   if(tailSort){
     const lim = Number(tailSort.limit) || 0;
     const offset = Math.max(0, Number(tailSort.offset) || 0);
-    out_sql += limHead(lim, offset)+'\nFROM '+ref(srcOf(tailSort.id,0))+
+    const head = limHead(lim, offset, tailSort.limitZero);
+    out_sql += (tailSelect ? head.replace(/\*$/, list(selectItems(tailSelect), 7)) : head)+
+               '\nFROM '+ref(tailSelect ? srcOf(tailSelect.id,0) : sortInput)+
                (tailSort.by ? '\nORDER BY '+orderSQL(tailSort) : '')+
-               limTail(lim, offset, '', !!tailSort.by)+';';
+               limTail(lim, offset, '', !!tailSort.by, tailSort.limitZero)+';';
   } else {
     out_sql += 'SELECT *\nFROM ' + ref(last) + ';';
   }
   return out_sql;
 }
 function list(items, pad){ return items.join(',\n' + ' '.repeat(pad)); }
+function selectItems(n){ return n.cols.map((c,i)=>q(c)+(n.outCols && n.outCols[i] !== c ? ' AS '+q(n.outCols[i]) : '')); }
 /* 來源欄位放回它原本的位置，其他參數照原文 */
 function fnCallSQL(n){
   const col = n.left === '*' ? '*' : q(n.left);
@@ -1683,7 +1697,8 @@ function nodeSummary(n){
     }
     case 'sort':   return '<code>'+orderText(n)+'</code>'+(Number(n.limit)>0 ? '<br>只留前 '+n.limit+' 筆' : '');
     case 'case':   return '看 <code>'+n.col+'</code><br>分成 '+(n.branches.length+1)+' 類 → <code>'+n.as+'</code>';
-    case 'derive': return n.fn
+    case 'derive': return Object.prototype.hasOwnProperty.call(n, 'literal')
+      ? '<code>'+sqlLit(n.literal)+'</code><br>→ <code>'+n.as+'</code>' : n.fn
       ? '<code>'+n.fn+'('+n.left+')</code><br>→ <code>'+n.as+'</code>'
       : '<code>'+n.left+' '+n.op+' '+n.right+'</code><br>→ <code>'+n.as+'</code>';
     case 'window': return '<code>'+n.fn+'</code><br>每個 <code>'+(n.partitionBy.join(',')||'全部')+'</code> 內排名';
@@ -2315,7 +2330,10 @@ function renderInspector(){
     h += '<button class="btn ghost" data-add-branch style="width:100%;margin-top:4px">＋ 多一條規則</button>';
   }
 
-  if(n.type === 'derive' && n.fn){
+  if(n.type === 'derive' && Object.prototype.hasOwnProperty.call(n, 'literal')){
+    h += '<div class="rowf"><label>固定值</label><code>'+sqlLit(n.literal)+'</code></div>';
+    h += '<div class="rowf"><label>新欄名</label><input type="text" data-f="as" value="'+esc(n.as)+'"></div>';
+  } else if(n.type === 'derive' && n.fn){
     h += '<div class="rowf"><label>函式</label><input type="text" data-f="fn" value="'+esc(n.fn)+'" style="max-width:120px"></div>';
     h += '<div class="rowf"><label>參數欄位</label><select data-f="left">'+opt('*', n.left)+colChoices(avail, n.left, ['*'])+'</select></div>';
     h += '<div class="rowf"><label>新欄名</label><input type="text" data-f="as" value="'+esc(n.as)+'"></div>';
@@ -2491,6 +2509,7 @@ const COL_FIELDS = {case:['col'], derive:['left'], window:['col', 'orderBy'], so
 const OPTIONAL_COL = {orderBy:true, by:true};      /* 空的也合法：不排序、只取前 N 筆 */
 function adoptCols(n){
   if(!n || !COL_FIELDS[n.type] || (n.type === 'filter' && isOrFilter(n))) return;
+  if(n.type === 'derive' && Object.prototype.hasOwnProperty.call(n, 'literal')) return;
   const src = srcOf(n.id, 0), avail = src ? evalNode(src).cols : [];
   if(!avail.length) return;
   const d = defaultsFor(n.type, src);
@@ -2560,7 +2579,11 @@ function prune(n){
   }
   else if(n.keys) n.keys = n.keys.filter(k=>avail.indexOf(k) >= 0);
   if(n.partitionBy) n.partitionBy = n.partitionBy.filter(k=>avail.indexOf(k) >= 0);
-  if(n.type === 'select' && n.cols) n.cols = avail.filter(c=>n.cols.indexOf(c) >= 0);
+  if(n.type === 'select' && n.cols){
+    const kept = n.cols.map((c,i)=>({col:c, out:(n.outCols || n.cols)[i]})).filter(x=>avail.indexOf(x.col) >= 0);
+    n.cols = kept.map(x=>x.col);
+    if(n.outCols) n.outCols = kept.map(x=>x.out);
+  }
 }
 
 /* ============================================================
@@ -2860,7 +2883,7 @@ document.getElementById('btn-parse').addEventListener('click', ()=>{
 function parseDDL(txt){
   SAMPLE_GEN.clear();            /* 換一整套 schema 就重新分類 */
   const out = {};
-  const re = /create\s+table\s+(?:if\s+not\s+exists\s+)?[`"\[]?([A-Za-z_][\w$]*)[`"\]]?\s*\(([\s\S]*?)\)\s*;/gi;
+  const re = /create\s+table\s+(?:if\s+not\s+exists\s+)?((?:[`"\[]?[A-Za-z_][\w$]*[`"\]]?)(?:\s*\.\s*[`"\[]?[A-Za-z_][\w$]*[`"\]]?)*)\s*\(([\s\S]*?)\)\s*;/gi;
   let m;
   while((m = re.exec(txt))){
     const cols = splitTop(m[2]).map(part=>{
@@ -2872,7 +2895,7 @@ function parseDDL(txt){
       /* 欄名會被畫進 HTML，只收一般識別字 */
       return /^[A-Za-z_][\w$]*$/.test(cname) ? {name:cname, ch:'', type:ctype} : null;
     }).filter(Boolean);
-    if(cols.length) out[m[1]] = {label:'', cols:cols, rows:fakeRows(cols)};
+    if(cols.length) out[m[1].replace(/[`"\[\]\s]/g,'')] = {label:'', cols:cols, rows:fakeRows(cols)};
   }
   return out;
 }
@@ -3060,7 +3083,15 @@ function buildSteps(){
 
     if(n.type === 'derive'){
       const D = evalNode(n);
-      steps.push(n.fn ? {
+      steps.push(Object.prototype.hasOwnProperty.call(n, 'literal') ? {
+        title:'固定值欄位',
+        cap:'每列填入 <code>'+sqlLit(n.literal)+'</code>，存成新欄 <code>'+n.as+'</code>。',
+        render: box => {
+          box.appendChild(miniTable('之前', S));
+          box.appendChild(mark('→'));
+          box.appendChild(miniTable('之後', D, {hi:D.cols.length - 1}));
+        }
+      } : n.fn ? {
         title:'算欄位（函式）',
         cap:'呼叫函式 <code>'+n.fn+'('+n.left+')</code>，結果存進新欄 <code>'+n.as+'</code>。列數不變；示範資料只是照抄原始值，真正的換算結果請看下面的 SQL。',
         render: box => {
@@ -3684,7 +3715,7 @@ function parseSQLText(text){
   }
 
   function parseTail(){
-    const t = {orderBy:null, dir:'ASC', limit:0, offset:0};
+    const t = {orderBy:null, dir:'ASC', limit:0, offset:0, limitZero:false};
     if(isKw('ORDER') && isKw('BY',1)){
       p += 2;
       t.orderBy = exprName(parseExpr());
@@ -3696,12 +3727,14 @@ function parseSQLText(text){
       const first = Number(take().v) || 0;
       if(eatOp(',')){ t.offset = first; t.limit = Number(take().v) || 0; }
       else { t.limit = first; if(eatKw('OFFSET')) t.offset = Number(take().v) || 0; }
+      t.limitZero = t.limit === 0;
     }
     else {
       if(eatKw('OFFSET')){ t.offset = Number(take().v) || 0; eatKw('ROWS'); eatKw('ROW'); }
       if(eatKw('FETCH')){
         if(!eatKw('FIRST')) eatKw('NEXT');
         t.limit = Number(take().v) || 0; eatKw('ROWS'); eatKw('ROW'); eatKw('ONLY');
+        t.limitZero = t.limit === 0;
       }
     }
     return t;
@@ -3745,7 +3778,7 @@ function parseSQLText(text){
     if(eatKw('INNER')){}
     else if(eatKw('LEFT')){ type = 'LEFT'; eatKw('OUTER'); }
     else if(eatKw('RIGHT')){ type = 'RIGHT'; eatKw('OUTER'); }
-    else if(eatKw('FULL')){ type = 'LEFT'; eatKw('OUTER'); warn.push('FULL OUTER JOIN 被畫成 LEFT JOIN — 右邊配不到的列不會出現'); }
+    else if(eatKw('FULL')) fail('FULL OUTER JOIN 目前做不出對應的步驟', T[save]);
     else if(eatKw('CROSS')){ warn.push('CROSS JOIN 沒有 ON 條件，被畫成 INNER JOIN'); }
     if(!eatKw('JOIN')){ p = save; return null; }
     const src = parseSource();
@@ -3798,6 +3831,7 @@ function parseSQLText(text){
     if(isKw('CASE')) return parseCase();
     if(t.t === 'num'){ p++; return {kind:'lit', v:Number(t.v)}; }
     if(t.t === 'str'){ p++; return {kind:'lit', v:t.v}; }
+    if(isKw('NULL')){ p++; return {kind:'lit', v:null}; }
     if(isOp('(')){ p++; const e = parseExpr(); needOp(')'); return e; }
     if(t.t === 'word' && !t.quoted && ['IN','EXISTS','BETWEEN','LIKE','NOT'].indexOf(t.v.toUpperCase()) >= 0)
       fail(t.v.toUpperCase()+' 目前還做不出對應的步驟');
@@ -3930,7 +3964,7 @@ function parseSQLText(text){
 
   const stmt = parseStatement();
   eatOp(';');
-  if(at().t !== 'eof') warn.push('第一段 SELECT 後面還有東西，只反解了第一段');
+  if(at().t !== 'eof') fail('SELECT 後面還有無法反解的語法');
   return {stmt:stmt, warn:warn, src:text};
 }
 
@@ -3990,11 +4024,11 @@ function astToGraph(parsed){
     vals.forEach(v=>{ if(v !== '' && v !== null && v !== undefined && hints[col].indexOf(v) < 0) hints[col].push(v); });
   }
   /* 一個條件可能要好幾個步驟：BETWEEN 就是 >= 和 <= 兩塊 */
-  function condFilters(c){
+  function condFilters(c, aliases){
     /* 一整組 OR 放進同一塊篩選：any 裡每一支是用 AND 串的條件 */
     if(c.kind === 'or')
-      return [{op:'OR', any:c.branches.map(b=>[].concat.apply([], b.map(condFilters)))}];
-    const col = exprName(c.left);
+      return [{op:'OR', any:c.branches.map(b=>[].concat.apply([], b.map(x=>condFilters(x, aliases))))}];
+    const col = (aliases && aliases[exprName(c.left)]) || exprName(c.left);
     if(c.kind === 'between'){
       const lo = litOf(c.lo), hi = litOf(c.hi);
       noteHint(col, [lo, hi]);
@@ -4024,7 +4058,7 @@ function astToGraph(parsed){
 
   /* 一段 WHERE／HAVING 變成幾塊篩選：連在一起的一般條件併成一塊（塊裡用 AND 串），
      括號裡的 OR 自己一塊 —— 這樣每個條件在面板裡都改得到。順序照 SQL 原樣。 */
-  function condBlocks(list){
+  function condBlocks(list, aliases){
     const blocks = [];
     let run = [];
     const flush = () => {
@@ -4032,7 +4066,7 @@ function astToGraph(parsed){
       else if(run.length) blocks.push({op:'OR', any:[run]});
       run = [];
     };
-    list.forEach(w=>condFilters(w).forEach(spec=>{
+    list.forEach(w=>condFilters(w, aliases).forEach(spec=>{
       if(isOrFilter(spec)){ flush(); blocks.push(spec); } else run.push(spec);
     }));
     flush();
@@ -4159,6 +4193,10 @@ function astToGraph(parsed){
         });
         conn(cur, n); cur = n;
         cols = cols ? cols.concat([n.as]) : null;
+      } else if(e.kind === 'lit'){
+        const n = add('derive', {literal:e.v, as:it.alias || exprName(e)});
+        conn(cur, n); cur = n;
+        cols = cols ? cols.concat([n.as]) : null;
       } else if(e.kind === 'window'){
         windows.push(it);
       } else if(e.kind === 'call' && AGG_FNS.indexOf(e.fn) < 0){
@@ -4192,7 +4230,12 @@ function astToGraph(parsed){
       cols = g.keys.concat(g.aggs.map(a=>a.as));
     }
 
-    condBlocks(c.having).forEach(spec=>{ const f = add('filter', spec); conn(cur, f); cur = f; });
+    const aggAliases = {};
+    c.items.forEach(it=>{
+      if(it.kind === 'expr' && it.expr.kind === 'call' && AGG_FNS.indexOf(it.expr.fn) >= 0)
+        aggAliases[exprName(it.expr)] = it.alias || exprName(it.expr);
+    });
+    condBlocks(c.having, aggAliases).forEach(spec=>{ const f = add('filter', spec); conn(cur, f); cur = f; });
 
     windows.forEach(it=>{
       const e = it.expr;
@@ -4216,15 +4259,22 @@ function astToGraph(parsed){
        有 GROUP BY 時不用補：groupby 步驟本來就只吐 key + 聚合那幾欄。 */
     const hasStar = c.items.some(it=>it.kind === 'star');
     if(!hasStar && !c.groupBy.length && !aggs.length){
-      const keep = [];
+      const keep = [], outCols = [];
       c.items.forEach(it=>{
         if(it.kind !== 'expr') return;
-        const nm = it.alias || exprName(it.expr);
-        if(nm && keep.indexOf(nm) < 0) keep.push(nm);
+        const source = it.expr.kind === 'col' ? exprName(it.expr) : (it.alias || exprName(it.expr));
+        const nm = it.alias || source;
+        if(source && !keep.some((col,i)=>col === source && outCols[i] === nm)){
+          keep.push(source); outCols.push(nm);
+        }
       });
       /* 欄位跟上一步一模一樣就不補 —— 不然 JOIN 自己列出來的欄位清單
          會被誤認成挑欄位，重新匯入一次就多長一個步驟。 */
-      if(keep.length && (!colsKnown || !sameCols(cols, keep))){ const pk = add('select', {cols:keep}); conn(cur, pk); cur = pk; }
+      if(keep.length && (!colsKnown || !sameCols(cols, outCols))){
+        const pk = add('select', {cols:keep});
+        if(!sameCols(keep, outCols)) pk.outCols = outCols;
+        conn(cur, pk); cur = pk;
+      }
     }
 
     if(c.distinct){ const d = add('distinct', {}); conn(cur, d); cur = d; }
@@ -4241,8 +4291,9 @@ function astToGraph(parsed){
       conn(cur, un, 0); conn(other, un, 1);
       cur = un;
     });
-    if(st.tail.orderBy || st.tail.limit || st.tail.offset){
+    if(st.tail.orderBy || st.tail.limit || st.tail.offset || st.tail.limitZero){
       const s = add('sort', {by:st.tail.orderBy || '', dir:st.tail.dir, limit:st.tail.limit, offset:st.tail.offset});
+      if(st.tail.limitZero) s.limitZero = true;
       if(st.tail.more && st.tail.more.length) s.more = st.tail.more;
       conn(cur, s); cur = s;
     }

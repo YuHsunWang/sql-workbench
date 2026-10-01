@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { performance } from 'node:perf_hooks';
+import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import { loadApp, graphFromSQL, installGraph } from './loader.mjs';
 
@@ -30,6 +31,75 @@ function roundTrip(sql, dialect = 'postgres') {
   assert.equal(signature(second), signature(first));
   return generated;
 }
+
+test('regression: explicit LIMIT 0 keeps an empty result', () => {
+  const generated = roundTrip('SELECT * FROM a LIMIT 0');
+  assert.match(generated, /LIMIT 0;/);
+  return 'LIMIT 0 survives reverse parsing and SQL generation';
+});
+
+test('regression: DDL import keeps a schema-qualified table name', () => {
+  const app = loadApp();
+  app.document.getElementById('ddl').value = 'CREATE TABLE analytics.t (id INTEGER);';
+  app.document.getElementById('btn-parse').listeners.click();
+  assert.deepEqual(json(app.state.schema['analytics.t'].cols.map(c => c.name)), ['id']);
+  return 'analytics.t imported with its id column';
+});
+
+test('regression: ORDER BY can use a column outside the SELECT list', () => {
+  const app = loadApp();
+  app.state.schema = {a:{cols:[{name:'id'}, {name:'v'}], rows:[]}};
+  graphFromSQL(app, 'SELECT id FROM a ORDER BY v DESC');
+  const generated = app.buildSQL();
+  assert.match(generated, /SELECT id\s+FROM a\s+ORDER BY v DESC/);
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE a(id INTEGER, v INTEGER); INSERT INTO a VALUES (1, 10), (2, 20);');
+  assert.deepEqual(json(db.prepare(generated).all()), [{id:2}, {id:1}]);
+  return 'id-only result remains sorted by v DESC';
+});
+
+test('regression: SELECT NULL creates a constant column', () => {
+  const app = loadApp();
+  graphFromSQL(app, 'SELECT NULL AS x FROM a');
+  const generated = app.buildSQL();
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE a(id INTEGER); INSERT INTO a VALUES (1), (2);');
+  assert.deepEqual(json(db.prepare(generated).all()), [{x:null}, {x:null}]);
+  return 'NULL remains a two-row constant projection';
+});
+
+test('regression: a column alias without AS keeps its source', () => {
+  const app = loadApp();
+  graphFromSQL(app, 'SELECT id x FROM orders');
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE orders(id INTEGER); INSERT INTO orders VALUES (4);');
+  assert.deepEqual(json(db.prepare(app.buildSQL()).all()), [{x:4}]);
+  return 'id is selected and renamed x';
+});
+
+test('regression: HAVING uses the aggregate output alias', () => {
+  const app = loadApp();
+  graphFromSQL(app, 'SELECT COUNT(*) n FROM orders HAVING COUNT(*)>1');
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE orders(id INTEGER); INSERT INTO orders VALUES (1), (2);');
+  assert.deepEqual(json(db.prepare(app.buildSQL()).all()), [{n:2}]);
+  return 'COUNT(*) HAVING threshold returns the aliased count';
+});
+
+test('regression: FULL OUTER JOIN is refused when the graph cannot represent it', () => {
+  sqlError('SELECT a.id FROM a FULL OUTER JOIN b ON a.id=b.id');
+  return 'FULL OUTER JOIN raises sqlErr';
+});
+
+test('regression: NULLS LAST is refused when ordering cannot preserve it', () => {
+  sqlError('SELECT * FROM a ORDER BY v ASC NULLS LAST');
+  return 'NULLS LAST raises sqlErr';
+});
+
+test('regression: EXCEPT is refused instead of dropping its second query', () => {
+  sqlError('SELECT id FROM a EXCEPT SELECT id FROM b');
+  return 'EXCEPT raises sqlErr';
+});
 
 test('regression: quoted leading-zero IN values', () => {
   const generated = roundTrip("SELECT * FROM t WHERE kgrp_code IN ('067','087')");
