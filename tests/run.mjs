@@ -1807,6 +1807,131 @@ test('JOIN: CONVERT on a key is kept, unknown wrappers are refused, AS \'alias\'
   return 'CONVERT(date, …) → DATE cast on the key; CONVERT style / LEFT / arithmetic refused';
 });
 
+/* ---- 2026-10-04 review: each of these produced SQL that ran wrong or not at all ---- */
+function graphError(sql) {
+  try { api.astToGraph(api.parseSQLText(sql)); } catch (error) {
+    assert.equal(error?.sqlErr, true, String(error));
+    assert.equal(error.pos >= 0 && error.pos <= sql.length, true, 'error points into the SQL');
+    return error;
+  }
+  assert.fail(`expected sqlErr for ${JSON.stringify(sql)}`);
+}
+const outRows = () => json(api.evalNode(api.state.nodes.find(n => n.type === 'output')).rows);
+
+test('review: a 選欄位 with nothing ticked still reads from the real table', () => {
+  /* 全不選 means "all columns"; the block gets folded into the next CTE, which then
+     pointed at the folded block and printed FROM ? — SQL that cannot run */
+  const app = loadApp();
+  app.state.nodes.find(n => n.type === 'select').cols = [];
+  const sql = app.buildSQL();
+  assert.doesNotMatch(sql, /FROM \?/);
+  assert.match(sql, /filtered AS \(\n  SELECT \*\n  FROM analytic\.trans_detail\n  WHERE/);
+  app.astToGraph(app.parseSQLText(sql));
+  return 'filter CTE reads analytic.trans_detail and re-imports';
+});
+
+test('review: CASE without ELSE gives NULL, not the text NULL', () => {
+  const sql = roundTrip("SELECT CASE WHEN x = 1 THEN 'a' END AS t FROM t");
+  assert.match(sql, /ELSE NULL/);
+  assert.doesNotMatch(sql, /'NULL'/);
+  const graph = graphFromSQL(api, "SELECT CASE WHEN x = 1 THEN 'a' ELSE NULL END AS t FROM t");
+  installGraph(api, graph, {t: {cols: [{name: 'x'}], rows: [[1], [2]]}});
+  assert.deepEqual(outRows(), [['a'], [null]]);
+  return 'ELSE NULL round-trips; row 2 is NULL in the preview too';
+});
+
+test('review: SQL whose meaning the steps would change is refused, not imported', () => {
+  const parseRefused = [
+    "SELECT CASE WHEN x = 1 THEN y ELSE 'n' END AS t FROM t",     /* THEN y became the text 'y' */
+    "SELECT CASE WHEN x > amt THEN 'a' ELSE 'b' END AS t FROM t",  /* x > amt became x > 0 */
+    "SELECT * FROM t WHERE UPPER(name) = 'A'",                     /* UPPER was dropped */
+    'SELECT * FROM t WHERE a + b > 3',                             /* became a_calc > 3 */
+    'SELECT city, amt FROM t ORDER BY 3',                          /* no third item */
+  ];
+  parseRefused.forEach(sqlError);
+  /* only in HAVING, so the steps have no count_all column to filter */
+  graphError('SELECT city FROM t GROUP BY city HAVING COUNT(*) > 1');
+  return `${parseRefused.length + 1} lossy shapes refused`;
+});
+
+test('review: HAVING on an aggregate filters the aliased column', () => {
+  const graph = graphFromSQL(api, 'SELECT city, SUM(amt) AS total FROM t GROUP BY city HAVING SUM(amt) > 150');
+  assert.equal(graph.nodes.find(n => n.type === 'filter').col, 'total');
+  assert.match(api.buildSQL(), /WHERE total > 150/);
+  installGraph(api, graph, {t: {cols: [{name: 'city'}, {name: 'amt'}], rows: [['tp', 50], ['tp', 70], ['tc', 200]]}});
+  assert.deepEqual(outRows(), [['tc', 200]]);
+  return 'HAVING SUM(amt) -> WHERE total; tp 120 dropped, tc 200 kept';
+});
+
+test('review: ORDER BY 2 and GROUP BY 1 mean SELECT positions', () => {
+  let graph = graphFromSQL(api, 'SELECT city, amt FROM t ORDER BY 2 DESC');
+  assert.equal(graph.nodes.find(n => n.type === 'sort').by, 'amt');
+  graph = graphFromSQL(api, 'SELECT city, COUNT(*) AS n FROM t GROUP BY 1 ORDER BY 2');
+  assert.deepEqual(json(graph.nodes.find(n => n.type === 'groupby').keys), ['city']);
+  assert.equal(graph.nodes.find(n => n.type === 'sort').by, 'n');
+  return 'ORDER BY 2 -> amt; GROUP BY 1 -> city; ORDER BY 2 -> alias n';
+});
+
+test('review: GROUP BY without aggregates adds no column', () => {
+  const graph = graphFromSQL(api, 'SELECT city FROM t GROUP BY city');
+  assert.deepEqual(json(graph.nodes.find(n => n.type === 'groupby').aggs), []);
+  const sql = roundTrip('SELECT city FROM t GROUP BY city');
+  assert.doesNotMatch(sql, /COUNT|row_count/);
+  return 'aggs stay empty; SQL selects only city';
+});
+
+test('review: windowed SUM with an order is a running total, ties together', () => {
+  /* SUM(v) OVER (PARTITION BY p ORDER BY o) — the default frame runs from the first
+     row to the current row and its ties. The preview used to show the group total. */
+  const schema = {t: {cols: [{name: 'p'}, {name: 'o'}, {name: 'v'}],
+                      rows: [['A', 1, 10], ['A', 2, 20], ['A', 2, 30], ['B', 1, 5]]}};
+  const win = {id: 'n2', type: 'window', fn: 'SUM', col: 'v', partitionBy: ['p'], orderBy: 'o', dir: 'ASC', as: 's'};
+  installGraph(api, {nodes: [{id: 'n1', type: 'table', table: 't'}, win, {id: 'n3', type: 'output'}],
+    edges: [{from: 'n1', to: 'n2', port: 0}, {from: 'n2', to: 'n3', port: 0}]}, schema);
+  assert.deepEqual(outRows().map(r => r[3]), [10, 60, 60, 5]);
+  win.orderBy = '';
+  assert.deepEqual(outRows().map(r => r[3]), [60, 60, 60, 5]);
+  return 'ordered: 10, 60, 60 (tie shares) | unordered: whole group 60';
+});
+
+test('review: SQL Server and Oracle ranking always gets an ORDER BY', () => {
+  const sql = 'SELECT ROW_NUMBER() OVER (PARTITION BY city) AS rn FROM t';
+  assert.match(roundTrip(sql, 'mssql'), /OVER \(PARTITION BY city ORDER BY \(SELECT NULL\)\)/);
+  assert.match(roundTrip(sql, 'oracle'), /OVER \(PARTITION BY city ORDER BY NULL\)/);
+  assert.match(roundTrip(sql, 'postgres'), /OVER \(PARTITION BY city\)/);
+  return 'mssql (SELECT NULL), oracle NULL, postgres none — all re-import unordered';
+});
+
+test('review: switching COUNT to SUM never leaves SUM(*)', () => {
+  const app = loadApp();
+  const change = (node, dataset, value) => {
+    app.state.sel = node.id;
+    app.document.getElementById('inspector').listeners.change({target: {dataset, value}});
+  };
+  let graph = graphFromSQL(app, 'SELECT city, COUNT(*) AS n FROM t GROUP BY city');
+  change(graph.nodes.find(n => n.type === 'groupby'), {a: '0', f: 'fn'}, 'SUM');
+  assert.match(app.buildSQL(), /SUM\(city\) AS n/);
+  graph = graphFromSQL(app, 'SELECT COUNT(*) OVER (PARTITION BY city) AS c FROM t');
+  change(graph.nodes.find(n => n.type === 'window'), {f: 'fn'}, 'SUM');
+  assert.match(app.buildSQL(), /SUM\(city\) OVER/);
+  return 'GROUP BY and window both move off * to a real column';
+});
+
+test('review: HTML inside pasted values is shown as text', () => {
+  let graph = graphFromSQL(api, "SELECT * FROM t WHERE city = '<img src=x onerror=alert(1)>'");
+  assert.doesNotMatch(api.nodeSummary(graph.nodes.find(n => n.type === 'filter')), /<img/);
+  assert.doesNotMatch(api.buildSteps().find(s => s.title === 'WHERE').cap, /<img/);
+  graphFromSQL(api, "SELECT CASE WHEN qq = 5 THEN '<img src=x onerror=alert(2)>' ELSE 'b' END AS lbl FROM fresh");
+  assert.doesNotMatch(api.buildSteps().find(s => s.title === 'CASE WHEN').cap, /<img/);
+  graph = graphFromSQL(api, "SELECT x + '<b>hi</b>' AS y FROM t");
+  assert.doesNotMatch(api.nodeSummary(graph.nodes.find(n => n.type === 'derive')), /<b>/);
+  graphFromSQL(api, "SELECT '<img src=x onerror=alert(3)>' AS k FROM t");
+  assert.doesNotMatch(api.buildSteps().find(s => s.title === '固定值欄位').cap, /<img/);
+  /* a string alias becomes a column name, drawn raw in tables and chips */
+  sqlError("SELECT x AS '<img src=x onerror=alert(4)>' FROM t");
+  return 'filter value, CASE label, derive operand, literal column escaped; HTML alias refused';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {
