@@ -1085,8 +1085,13 @@ function evalNode(node, ctx){
           vals[i] = node.fn === 'RANK' ? rank : dense;
         });
       } else {
-        const agg = aggregate({fn:node.fn, col:node.col}, list.map(i=>s.rows[i]), s.cols);
-        list.forEach(i=>{ vals[i] = agg; });
+        /* 有組內排序時，資料庫算的是「從第一列累加到這一列」，跟這列同分的也算進來；
+           沒排序才是整組一個數 */
+        ordered.forEach((i,k)=>{
+          let end = ordered.length - 1;
+          if(oi >= 0){ end = k; while(end+1 < ordered.length && cmpVal(s.rows[ordered[end+1]][oi], s.rows[i][oi]) === 0) end++; }
+          vals[i] = aggregate({fn:node.fn, col:node.col}, ordered.slice(0, end+1).map(x=>s.rows[x]), s.cols);
+        });
       }
     });
     return {cols:s.cols.concat([node.as]), rows:s.rows.map((r,i)=>r.concat([vals[i]]))};
@@ -1151,16 +1156,18 @@ function likeRe(pat){
   const body = String(pat).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*').replace(/_/g, '.');
   return new RegExp('^' + body + '$', 'i');
 }
+/* 值是貼上的 SQL 或使用者打的字，放進 HTML 前一定要先跳脫 */
 function opWords(n){
+  const col = esc(n.col), val = esc(n.val);
   switch(n.op){
-    case 'IN':           return '<code>'+n.col+'</code> 是這幾個之一：<code>'+n.val+'</code>';
-    case 'NOT IN':       return '<code>'+n.col+'</code> 不是這幾個：<code>'+n.val+'</code>';
-    case 'LIKE':         return '<code>'+n.col+'</code> 長得像 <code>'+n.val+'</code>（<code>%</code> 代表任意長度）';
-    case 'NOT LIKE':     return '<code>'+n.col+'</code> 不像 <code>'+n.val+'</code>';
-    case 'IS NULL':      return '<code>'+n.col+'</code> 是空的';
-    case 'IS NOT NULL':  return '<code>'+n.col+'</code> 不是空的';
+    case 'IN':           return '<code>'+col+'</code> 是這幾個之一：<code>'+val+'</code>';
+    case 'NOT IN':       return '<code>'+col+'</code> 不是這幾個：<code>'+val+'</code>';
+    case 'LIKE':         return '<code>'+col+'</code> 長得像 <code>'+val+'</code>（<code>%</code> 代表任意長度）';
+    case 'NOT LIKE':     return '<code>'+col+'</code> 不像 <code>'+val+'</code>';
+    case 'IS NULL':      return '<code>'+col+'</code> 是空的';
+    case 'IS NOT NULL':  return '<code>'+col+'</code> 不是空的';
   }
-  return '<code>'+n.col+' '+n.op+' '+n.val+'</code>';
+  return '<code>'+col+' '+n.op+' '+val+'</code>';
 }
 
 function cmp(v, op, target){
@@ -1502,8 +1509,8 @@ function buildSQL(){
       sql = '  SELECT * FROM '+ref(A)+'\n  UNION'+(n.all ? ' ALL' : '')+'\n  SELECT * FROM '+ref(B);
 
     } else if(n.type === 'case'){
-      const w = n.branches.map(b=>'    WHEN '+q(n.col)+' '+b.op+' '+lit(b.val)+' THEN '+lit(b.then));
-      sql = '  SELECT *,\n    CASE\n'+w.join('\n')+'\n    ELSE '+lit(n.other)+'\n    END AS '+q(n.as)+
+      const w = n.branches.map(b=>'    WHEN '+q(n.col)+' '+b.op+' '+lit(b.val)+' THEN '+sqlLit(b.then));
+      sql = '  SELECT *,\n    CASE\n'+w.join('\n')+'\n    ELSE '+sqlLit(n.other)+'\n    END AS '+q(n.as)+
             '\n  FROM '+ref(s0);
 
     } else if(n.type === 'derive'){
@@ -1516,25 +1523,28 @@ function buildSQL(){
           '\n  FROM '+ref(s0);
 
     } else if(n.type === 'window'){
-      const call = (n.fn === 'ROW_NUMBER' || n.fn === 'RANK' || n.fn === 'DENSE_RANK')
-        ? n.fn+'()' : n.fn+'('+(n.col === '*' || !n.col ? '*' : q(n.col))+')';
+      const rankish = (n.fn === 'ROW_NUMBER' || n.fn === 'RANK' || n.fn === 'DENSE_RANK');
+      const call = rankish ? n.fn+'()' : n.fn+'('+(n.col === '*' || !n.col ? '*' : q(n.col))+')';
       const over = [];
       if(n.partitionBy.length) over.push('PARTITION BY '+n.partitionBy.map(q).join(', '));
       if(n.orderBy) over.push('ORDER BY '+q(n.orderBy)+' '+n.dir);
+      /* SQL Server 和 Oracle 的排名函數一定要有 ORDER BY；「不排」就給一個不影響順序的 */
+      else if(rankish && state.dialect === 'mssql') over.push('ORDER BY (SELECT NULL)');
+      else if(rankish && state.dialect === 'oracle') over.push('ORDER BY NULL');
       sql = '  SELECT *,\n    '+call+' OVER ('+over.join(' ')+') AS '+q(n.as)+
             '\n  FROM '+ref(s0);
 
     } else if(n.type === 'filter'){
       const conds = [];
-      let walk = n, base = s0;
+      let walk = n;
       for(;;){
         conds.unshift(walk);
         const up = srcOf(walk.id, 0);
         if(up && up.type === 'filter' && absorbed[up.id]) walk = up;
-        else { base = up; break; }
+        else break;
       }
-      const inh = inheritedCols(walk);
-      if(inh) base = realSource(walk);
+      /* 一個欄位都沒勾的「選欄位」也會被併掉，所以來源一律跳過它，不能只看有沒有欄位清單 */
+      const inh = inheritedCols(walk), base = realSource(walk);
       /* 同一塊裡用 AND 串的條件攤開，跟一塊接一塊寫出來的一模一樣 */
       const terms = [];
       conds.forEach(c=>{ if(isOrFilter(c) && c.any.length === 1) c.any[0].forEach(t=>terms.push(t)); else terms.push(c); });
@@ -1549,12 +1559,12 @@ function buildSQL(){
 
     } else if(n.type === 'distinct'){
       const inh = inheritedCols(n);
-      sql = '  SELECT DISTINCT '+(inh ? list(inh.map(q), 18) : '*')+'\n  FROM '+ref(inh ? realSource(n) : s0);
+      sql = '  SELECT DISTINCT '+(inh ? list(inh.map(q), 18) : '*')+'\n  FROM '+ref(realSource(n));
 
     } else if(n.type === 'sort'){
       const lim = Number(n.limit) || 0;
       const offset = Math.max(0, Number(n.offset) || 0);
-      const inh = inheritedCols(n), from = inh ? realSource(n) : s0;
+      const inh = inheritedCols(n), from = realSource(n);
       sql = lim > 0 || offset > 0 || n.limitZero
         ? '  '+(inh ? limHead(lim, offset, n.limitZero).replace(/\*$/, list(inh.map(q), 9)) : limHead(lim, offset, n.limitZero))+
           '\n  FROM '+ref(from)+(n.by ? '\n  ORDER BY '+orderSQL(n) : '')+limTail(lim, offset, '  ', !!n.by, n.limitZero)
@@ -1705,7 +1715,7 @@ function nodeSummary(n){
       }
       const v = String(n.val == null ? '' : n.val);
       const shown = v.length > 22 ? v.slice(0, 22)+'…' : v;
-      const line = '<code>'+n.col+' '+n.op+(needsVal(n.op) ? ' '+shown : '')+'</code>';
+      const line = '<code>'+esc(n.col+' '+n.op+(needsVal(n.op) ? ' '+shown : ''))+'</code>';
       /* 空的 IN 清單會把整批資料篩光，但看起來只是「還沒填」—— 直接講明 */
       const emptyIn = (n.op === 'IN' || n.op === 'NOT IN') && !inListRaw(n.val).length;
       return line + (emptyIn ? '<br><span class="warn">清單是空的，'+
@@ -1716,11 +1726,11 @@ function nodeSummary(n){
       return s.rows.length ? '砍掉 '+(s.rows.length - d.rows.length)+' 列重複' : '整列一模一樣就砍';
     }
     case 'sort':   return '<code>'+orderText(n)+'</code>'+(Number(n.limit)>0 ? '<br>只留前 '+n.limit+' 筆' : '');
-    case 'case':   return '看 <code>'+n.col+'</code><br>分成 '+(n.branches.length+1)+' 類 → <code>'+n.as+'</code>';
+    case 'case':   return '看 <code>'+esc(n.col)+'</code><br>分成 '+(n.branches.length+1)+' 類 → <code>'+esc(n.as)+'</code>';
     case 'derive': return Object.prototype.hasOwnProperty.call(n, 'literal')
-      ? '<code>'+sqlLit(n.literal)+'</code><br>→ <code>'+n.as+'</code>' : n.fn
-      ? '<code>'+n.fn+'('+n.left+')</code><br>→ <code>'+n.as+'</code>'
-      : '<code>'+n.left+' '+n.op+' '+n.right+'</code><br>→ <code>'+n.as+'</code>';
+      ? '<code>'+esc(sqlLit(n.literal))+'</code><br>→ <code>'+esc(n.as)+'</code>' : n.fn
+      ? '<code>'+esc(n.fn+'('+n.left+')')+'</code><br>→ <code>'+esc(n.as)+'</code>'
+      : '<code>'+esc(n.left+' '+n.op+' '+n.right)+'</code><br>→ <code>'+esc(n.as)+'</code>';
     case 'window': return '<code>'+n.fn+'</code><br>每個 <code>'+(n.partitionBy.join(',')||'全部')+'</code> 內排名';
     case 'select': {
       const avail = colsInto(n.id).length;
@@ -2351,7 +2361,7 @@ function renderInspector(){
   }
 
   if(n.type === 'derive' && Object.prototype.hasOwnProperty.call(n, 'literal')){
-    h += '<div class="rowf"><label>固定值</label><code>'+sqlLit(n.literal)+'</code></div>';
+    h += '<div class="rowf"><label>固定值</label><code>'+esc(sqlLit(n.literal))+'</code></div>';
     h += '<div class="rowf"><label>新欄名</label><input type="text" data-f="as" value="'+esc(n.as)+'"></div>';
   } else if(n.type === 'derive' && n.fn){
     h += '<div class="rowf"><label>函式</label><input type="text" data-f="fn" value="'+esc(n.fn)+'" style="max-width:120px"></div>';
@@ -2382,13 +2392,14 @@ function renderInspector(){
       opt('MAX', n.fn, 'MAX 整組最大')+
       opt('COUNT', n.fn, 'COUNT 整組幾筆')+'</select></div>';
     if(!rankish)
-      h += '<div class="rowf"><label>算哪欄</label><select data-f="col">'+opt('*', n.col)+colChoices(avail, n.col, ['*'])+'</select></div>';
+      h += '<div class="rowf"><label>算哪欄</label><select data-f="col">'+(n.fn === 'COUNT' ? opt('*', n.col) : '')+colChoices(avail, n.col, n.fn === 'COUNT' ? ['*'] : [])+'</select></div>';
     h += '<div class="sec">Partition by — 怎麼分組</div><div class="chips">'+
       avail.map(c=>colChip(c, n.partitionBy.indexOf(c) >= 0, 'data-part')).join('')+'</div>';
     h += '<div class="rowf"><label>組內排序</label><select data-f="orderBy">'+opt('', n.orderBy, '（不排）')+colChoices(avail, n.orderBy, [''])+'</select></div>';
     h += '<div class="rowf"><label>方向</label><select data-f="dir">'+opt('DESC', n.dir)+opt('ASC', n.dir)+'</select></div>';
     h += '<div class="rowf"><label>新欄名</label><input type="text" data-f="as" value="'+esc(n.as)+'"></div>';
-    h += '<p class="note">跟 GROUP BY 最大的差別：<b>列數完全不變</b>。<br>它只是在每一列旁邊多寫一個「你在你那組裡排第幾」。</p>';
+    h += '<p class="note">跟 GROUP BY 最大的差別：<b>列數完全不變</b>。<br>它只是在每一列旁邊多寫一個「你在你那組裡排第幾」。'+
+         (!rankish && n.orderBy ? '<br>有選「組內排序」時，'+n.fn+' 算的是<b>從第一列累加到這一列</b>，不是整組。要整組的話選（不排）。' : '')+'</p>';
   }
 
   if(n.type === 'select'){
@@ -2410,7 +2421,7 @@ function renderInspector(){
     n.aggs.forEach((a,i)=>{
       h += '<div class="agg"><select data-a="'+i+'" data-f="fn" style="max-width:78px">'+
         ['COUNT','SUM','AVG','MAX','MIN'].map(f=>opt(f, a.fn)).join('')+'</select>'+
-        '<select data-a="'+i+'" data-f="col">'+opt('*', a.col)+colChoices(avail, a.col, ['*'])+'</select>'+
+        '<select data-a="'+i+'" data-f="col">'+(a.fn === 'COUNT' ? opt('*', a.col) : '')+colChoices(avail, a.col, a.fn === 'COUNT' ? ['*'] : [])+'</select>'+
         '<input type="text" data-a="'+i+'" data-f="as" value="'+esc(a.as)+'" style="max-width:100px">'+
         '<button class="x" data-del-agg="'+i+'" aria-label="刪掉">×</button></div>';
     });
@@ -2604,6 +2615,10 @@ function prune(n){
     n.cols = kept.map(x=>x.col);
     if(n.outCols) n.outCols = kept.map(x=>x.out);
   }
+  /* 只有 COUNT 能用 *：COUNT 換成 SUM 之類時改抓第一個欄位，不然 SQL 會寫出 SUM(*) */
+  const noStar = a => { if(a.fn !== 'COUNT' && a.col === '*' && avail.length) a.col = avail[0]; };
+  if(n.type === 'groupby') n.aggs.forEach(noStar);
+  if(n.type === 'window' && ['ROW_NUMBER','RANK','DENSE_RANK'].indexOf(n.fn) < 0) noStar(n);
 }
 
 /* ============================================================
@@ -3105,7 +3120,7 @@ function buildSteps(){
       const D = evalNode(n);
       steps.push(Object.prototype.hasOwnProperty.call(n, 'literal') ? {
         title:'固定值欄位',
-        cap:'每列填入 <code>'+sqlLit(n.literal)+'</code>，存成新欄 <code>'+n.as+'</code>。',
+        cap:'每列填入 <code>'+esc(sqlLit(n.literal))+'</code>，存成新欄 <code>'+esc(n.as)+'</code>。',
         render: box => {
           box.appendChild(miniTable('之前', S));
           box.appendChild(mark('→'));
@@ -3113,7 +3128,7 @@ function buildSteps(){
         }
       } : n.fn ? {
         title:'算欄位（函式）',
-        cap:'呼叫函式 <code>'+n.fn+'('+n.left+')</code>，結果存進新欄 <code>'+n.as+'</code>。列數不變；示範資料只是照抄原始值，真正的換算結果請看下面的 SQL。',
+        cap:'呼叫函式 <code>'+esc(n.fn+'('+n.left+')')+'</code>，結果存進新欄 <code>'+esc(n.as)+'</code>。列數不變；示範資料只是照抄原始值，真正的換算結果請看下面的 SQL。',
         render: box => {
           box.appendChild(miniTable('算之前', S));
           box.appendChild(mark('→'));
@@ -3121,7 +3136,7 @@ function buildSteps(){
         }
       } : {
         title:'算欄位',
-        cap:'純算術，<strong>一列算一列</strong>：<code>'+n.left+' '+n.op+' '+n.right+'</code> 存進新欄 <code>'+n.as+'</code>。列數一點都沒變。',
+        cap:'純算術，<strong>一列算一列</strong>：<code>'+esc(n.left+' '+n.op+' '+n.right)+'</code> 存進新欄 <code>'+esc(n.as)+'</code>。列數一點都沒變。',
         render: box => {
           box.appendChild(miniTable('算之前', S));
           box.appendChild(mark('→'));
@@ -3137,7 +3152,7 @@ function buildSteps(){
       const lc = new Map(labels.map((l,i)=>[l, TINTS[i % TINTS.length]]));
       steps.push({
         title:'CASE WHEN',
-        cap:'CASE WHEN 不刪也不合，只是<strong>多貼一張標籤</strong>。看 <code>'+n.col+'</code> 的大小，貼上 '+labels.map(l=>'「'+l+'」').join('、')+'，存進 <code>'+n.as+'</code>。規則由上往下比，<strong>中了就停</strong>。',
+        cap:'CASE WHEN 不刪也不合，只是<strong>多貼一張標籤</strong>。看 <code>'+esc(n.col)+'</code> 的大小，貼上 '+labels.map(l=>'「'+esc(l)+'」').join('、')+'，存進 <code>'+esc(n.as)+'</code>。規則由上往下比，<strong>中了就停</strong>。',
         render: box => {
           box.appendChild(miniTable('貼標籤前', S));
           box.appendChild(mark('→'));
@@ -3245,8 +3260,8 @@ function buildSteps(){
       });
       steps.push({
         title:'GROUP 結果',
-        cap:'每一堆<strong>壓扁成一列</strong>。'+n.aggs.map(a=>'<code>'+a.fn+'</code> 幫你'+(FNWORD[a.fn]||'算')).join('，')+
-            '。'+S.rows.length+' 列變 <strong>'+G.rows.length+' 列</strong> —— 這就是它跟視窗函數最大的不同。',
+        cap:'每一堆<strong>壓扁成一列</strong>。'+(n.aggs.length ? n.aggs.map(a=>'<code>'+a.fn+'</code> 幫你'+(FNWORD[a.fn]||'算')).join('，')+'。' : '')+
+            S.rows.length+' 列變 <strong>'+G.rows.length+' 列</strong> —— 這就是它跟視窗函數最大的不同。',
         render: box => box.appendChild(miniTable('彙總結果', G, {tint:(r,i)=>TINTS[i % TINTS.length]}))
       });
     }
@@ -3683,7 +3698,7 @@ function tokenize(sql){
 function parseSQLText(text){
   QUOTED_SRC.clear();              /* 每段查詢重新認一次哪些名字本來有引號 */
   const T = tokenize(text);
-  let p = 0;
+  let p = 0, inHaving = false;
   const warn = [];
   const at = k => T[p + (k||0)];
   const up = t => (t && t.t === 'word' && !t.quoted) ? t.v.toUpperCase() : null;
@@ -3702,7 +3717,11 @@ function parseSQLText(text){
 
   function maybeAlias(){
     if(eatKw('AS')){
-      if(at().t === 'str') return take().v;      /* SQL Server 的 AS 'deal_date' */
+      if(at().t === 'str'){                      /* SQL Server 的 AS 'deal_date' */
+        /* 別名會變成欄名畫進 HTML，跟有引號的名字一樣在入口就擋掉 */
+        if(/[<>&"']/.test(at().v)) fail('名稱裡不能有 < > & " \' 這些符號');
+        return take().v;
+      }
       return nameTok();
     }
     const t = at();
@@ -3731,17 +3750,27 @@ function parseSQLText(text){
       const all = eatKw('ALL');
       unions.push({all:all, core:parseCore()});
     }
-    return {ctes:ctes, core:core, unions:unions, tail:parseTail()};
+    return {ctes:ctes, core:core, unions:unions, tail:parseTail(core.items)};
   }
 
-  function parseTail(){
+  /* ORDER BY 2、GROUP BY 1：數字指的是 SELECT 清單的第幾個，不是一個叫 "2" 的欄位。
+     ORDER BY 排的是輸出的欄名（有別名用別名）；GROUP BY 分的是來源那一欄 */
+  function byPos(items, out){
+    const t0 = at(), e = parseExpr();
+    if(e.kind !== 'lit' || typeof e.v !== 'number') return e;
+    const it = items[e.v - 1];
+    if(!it || it.kind !== 'expr') fail('SELECT 清單沒有第 '+e.v+' 個欄位可以對', t0);
+    return out && it.alias ? {kind:'col', tbl:null, col:it.alias} : it.expr;
+  }
+
+  function parseTail(items){
     const t = {orderBy:null, dir:'ASC', limit:0, offset:0, limitZero:false};
     if(isKw('ORDER') && isKw('BY',1)){
       p += 2;
-      t.orderBy = exprName(parseExpr());
+      t.orderBy = exprName(byPos(items, true));
       if(eatKw('DESC')) t.dir = 'DESC'; else { eatKw('ASC'); }
       t.more = [];
-      while(eatOp(',')){ const by = exprName(parseExpr()); t.more.push({by:by, dir:eatKw('DESC') ? 'DESC' : (eatKw('ASC'), 'ASC')}); }
+      while(eatOp(',')){ const by = exprName(byPos(items, true)); t.more.push({by:by, dir:eatKw('DESC') ? 'DESC' : (eatKw('ASC'), 'ASC')}); }
     }
     if(eatKw('LIMIT')){
       const first = Number(take().v) || 0;
@@ -3773,8 +3802,8 @@ function parseSQLText(text){
       for(;;){ const j = parseJoin(); if(!j) break; core.joins.push(j); }
     }
     if(eatKw('WHERE')) core.where = parseConds();
-    if(isKw('GROUP') && isKw('BY',1)){ p += 2; do { core.groupBy.push(parseExpr()); } while(eatOp(',')); }
-    if(eatKw('HAVING')) core.having = parseConds();
+    if(isKw('GROUP') && isKw('BY',1)){ p += 2; do { core.groupBy.push(byPos(items)); } while(eatOp(',')); }
+    if(eatKw('HAVING')){ inHaving = true; core.having = parseConds(); inHaving = false; }
     return core;
   }
 
@@ -3878,18 +3907,23 @@ function parseSQLText(text){
           if(isKw('PARTITION') && isKw('BY',1)){ p += 2; do { w.partitionBy.push(exprName(parseExpr())); } while(eatOp(',')); }
           if(isKw('ORDER') && isKw('BY',1)){
             p += 2;
-            w.orderBy = exprName(parseExpr());
-            if(eatKw('DESC')) w.dir = 'DESC'; else eatKw('ASC');
-            if(isOp(',')){ while(eatOp(',')){ parseExpr(); if(!eatKw('DESC')) eatKw('ASC'); }
-              warn.push('視窗的 ORDER BY 只畫第一個欄位，其他的忽略了 — 同分時名次可能不同'); }
+            /* ORDER BY NULL、ORDER BY (SELECT NULL) 是 Oracle / SQL Server「不排」的寫法 */
+            if(isKw('NULL')) p++;
+            else if(isOp('(') && isKw('SELECT',1) && isKw('NULL',2) && isOp(')',3)) p += 4;
+            else {
+              w.orderBy = exprName(parseExpr());
+              if(eatKw('DESC')) w.dir = 'DESC'; else eatKw('ASC');
+              if(isOp(',')){ while(eatOp(',')){ parseExpr(); if(!eatKw('DESC')) eatKw('ASC'); }
+                warn.push('視窗的 ORDER BY 只畫第一個欄位，其他的忽略了 — 同分時名次可能不同'); }
+            }
           }
           let guard = 0;
           while(!isOp(')') && at().t !== 'eof' && guard++ < 40) p++;   /* ROWS BETWEEN … 先跳過 */
-          if(guard > 1) warn.push('視窗的框架設定（ROWS/RANGE BETWEEN）被忽略，整組一起算');
+          if(guard > 1) warn.push('視窗的框架設定（ROWS/RANGE BETWEEN）被忽略，改用資料庫預設的範圍');
           needOp(')');
           return {kind:'window', fn:fn, args:args, w:w};
         }
-        return {kind:'call', fn:fn, args:args, raws:raws, castType:castType, castRaw:castRaw};
+        return {kind:'call', fn:fn, args:args, raws:raws, castType:castType, castRaw:castRaw, p:t.p};
       }
       let tbl = null, col = keepQuoted(take());
       if(isOp('.')){ p++; tbl = col; col = nameTok(); }
@@ -3903,13 +3937,19 @@ function parseSQLText(text){
     if(!isKw('WHEN')) fail('只看得懂 CASE WHEN <條件> 這種寫法，不支援 CASE <欄位> WHEN');
     const branches = [];
     let other = null;
+    /* 分類步驟只存固定值：THEN 後面寫欄位的話，存起來會變成那個欄名的字串 */
+    const fixed = () => {
+      const t0 = at(), e = parseExpr();
+      if(e.kind !== 'lit') fail('CASE 的 THEN / ELSE 目前只能是固定值（字串、數字或 NULL），不能是欄位或算式', t0);
+      return e;
+    };
     while(eatKw('WHEN')){
-      const c = parseCond();
+      const c = litCond();
       if(c.kind !== 'cmp') fail('CASE WHEN 裡目前只支援簡單比較（= > < >= <= <>）');
       needKw('THEN');
-      branches.push({cond:c, then:parseExpr()});
+      branches.push({cond:c, then:fixed()});
     }
-    if(eatKw('ELSE')) other = parseExpr();
+    if(eatKw('ELSE')) other = fixed();
     needKw('END');
     return {kind:'case', branches:branches, other:other};
   }
@@ -3968,6 +4008,10 @@ function parseSQLText(text){
   function litCond(){
     const t0 = at(), c = parseCond();
     if(c.kind === 'cmp' && c.right.kind !== 'lit') fail('條件右邊目前只能是固定值，不能是欄位或算式', t0);
+    /* 左邊包了函式或算式的話，步驟只記得裡面的欄名，UPPER() 這種會被默默丟掉 */
+    const l = c.left;
+    if(l.kind !== 'col' && !(inHaving && l.kind === 'call' && AGG_FNS.indexOf(l.fn) >= 0))
+      fail('條件左邊目前只能是欄位'+(inHaving ? '或 SUM(x) 這種彙總' : '')+'，不能包函式或算式', t0);
     return c;
   }
   function parseConds(){
@@ -4048,6 +4092,9 @@ function astToGraph(parsed){
     /* 一整組 OR 放進同一塊篩選：any 裡每一支是用 AND 串的條件 */
     if(c.kind === 'or')
       return [{op:'OR', any:c.branches.map(b=>[].concat.apply([], b.map(x=>condFilters(x, aliases))))}];
+    /* HAVING 用到 SELECT 裡沒算的彙總（像只寫在 HAVING 的 COUNT(*)），步驟裡沒有那一欄可以篩 */
+    if(aliases && c.left.kind === 'call' && !aliases[exprName(c.left)])
+      throw {sqlErr:true, msg:'HAVING 用到的 '+c.left.fn+'(…) 也要寫在 SELECT 裡，步驟才算得到它', pos:c.left.p, got:c.left.fn};
     const col = (aliases && aliases[exprName(c.left)]) || exprName(c.left);
     if(c.kind === 'between'){
       const lo = litOf(c.lo), hi = litOf(c.hi);
@@ -4196,11 +4243,11 @@ function astToGraph(parsed){
         const n = add('case', {
           col: e.branches.length ? exprName(e.branches[0].cond.left) : '',
           as: alias,
-          branches: e.branches.map(b=>({op:b.cond.op, val:(b.cond.right.kind === 'lit' ? b.cond.right.v : 0),
-                                        then:(b.then.kind === 'lit' ? b.then.v : exprName(b.then))})),
-          other: e.other ? (e.other.kind === 'lit' ? e.other.v : exprName(e.other)) : 'NULL'
+          /* 解析時已經擋掉非固定值，這裡都是字面值；沒寫 ELSE 就是 NULL */
+          branches: e.branches.map(b=>({op:b.cond.op, val:b.cond.right.v, then:b.then.v})),
+          other: e.other ? e.other.v : null
         });
-        if(n.col) noteHint(n.col, e.branches.map(b=>b.cond.right.kind === 'lit' ? b.cond.right.v : null).filter(v=>v !== null));
+        if(n.col) noteHint(n.col, e.branches.map(b=>b.cond.right.v));
         if(e.branches.some(b=>exprName(b.cond.left) !== exprName(e.branches[0].cond.left)))
           warn.push('CASE 的每個 WHEN 看的欄位不一樣，步驟只支援看同一欄 — 用了第一個');
         conn(cur, n); cur = n;
@@ -4245,7 +4292,8 @@ function astToGraph(parsed){
     });
     if(c.groupBy.length || aggs.length){
       const keys = c.groupBy.map(g=>g.kind === 'case' ? (caseAlias || 'label') : exprName(g));
-      const g = add('groupby', {keys:keys, aggs:aggs.length ? aggs : [{fn:'COUNT', col:'*', as:'row_count'}]});
+      /* 沒有彙總就不要自己補一欄 COUNT —— 結果會多出原本沒有的欄位 */
+      const g = add('groupby', {keys:keys, aggs:aggs});
       conn(cur, g); cur = g;
       cols = g.keys.concat(g.aggs.map(a=>a.as));
     }
