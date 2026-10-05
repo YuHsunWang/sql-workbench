@@ -591,9 +591,9 @@ test('graph: chainOrder without output is empty', () => {
   return '[]';
 });
 
-test('deferred NULL comparison semantics; IS NULL excludes empty string', () => {
+test('NULL comparisons do not pass; IS NULL excludes empty string', () => {
   const actual = [api.cmp(null,'<>','x'), api.cmp(null,'NOT IN','x'), api.cmp('','IS NULL','')];
-  assert.deepEqual(actual, [true,true,false]);
+  assert.deepEqual(actual, [false,false,false]);
   return `cmp(null,'<>','x'), cmp(null,'NOT IN','x'), cmp('','IS NULL') => ${actual.join(',')}`;
 });
 
@@ -1941,6 +1941,159 @@ test('review: HTML inside pasted values is shown as text', () => {
   /* a string alias becomes a column name, drawn raw in tables and chips */
   sqlError("SELECT x AS '<img src=x onerror=alert(4)>' FROM t");
   return 'filter value, CASE label, derive operand, literal column escaped; HTML alias refused';
+});
+
+test('DEV-237: NULL filters and CASE previews match SQLite', () => {
+  const app = loadApp(), db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE t(id INTEGER, x INTEGER); INSERT INTO t VALUES (1,NULL),(2,3),(3,9);');
+  const schema = {t:{cols:[{name:'id'}, {name:'x'}], rows:[[1,null],[2,3],[3,9]]}};
+  const predicates = ['x <= 5', 'x <> 3', 'x NOT IN (1, 2)', 'x IN (3, 9)',
+    "x LIKE '%'", "x NOT LIKE '3'", 'x IS NULL', 'x IS NOT NULL',
+    'x > 1 AND x < 5', 'x <= 5 OR id = 3'];
+  for (const predicate of predicates) {
+    const sql = 'SELECT * FROM t WHERE ' + predicate;
+    const graph = graphFromSQL(app, sql);
+    installGraph(app, graph, schema);
+    assert.deepEqual(json(app.evalNode(graph.nodes.find(n => n.type === 'output')).rows),
+      db.prepare(sql).all().map(r => [r.id, r.x]), predicate);
+  }
+  const sql = "SELECT CASE WHEN x <= 5 THEN 'low' ELSE 'high' END AS bucket FROM t";
+  const graph = graphFromSQL(app, sql);
+  installGraph(app, graph, schema);
+  assert.deepEqual(json(app.evalNode(graph.nodes.find(n => n.type === 'output')).rows),
+    db.prepare(sql).all().map(r => [r.bucket]));
+  db.close();
+  return 'NULL predicates, AND/OR and CASE agree with SQLite';
+});
+
+test('DEV-237: JOIN NULL keys never match, including composite and cast keys', () => {
+  const app = loadApp(), db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE a(k INTEGER, x TEXT); CREATE TABLE b(k INTEGER, y TEXT);
+    INSERT INTO a VALUES (NULL,'a-null'),(3,'ok'),(3,NULL);
+    INSERT INTO b VALUES (NULL,'b-null'),(3,'ok'),(3,NULL);`);
+  const schema = {
+    a:{cols:[{name:'k'},{name:'x'}],rows:[[null,'a-null'],[3,'ok'],[3,null]]},
+    b:{cols:[{name:'k'},{name:'y'}],rows:[[null,'b-null'],[3,'ok'],[3,null]]},
+  };
+  for (const type of ['INNER','LEFT']) {
+    for (const on of ['a.k = b.k', 'a.k = b.k AND a.x = b.y', 'CAST(a.k AS TEXT) = CAST(b.k AS TEXT)']) {
+      const sql = `SELECT a.k, a.x FROM a ${type} JOIN b ON ${on}`;
+      const graph = graphFromSQL(app, sql);
+      installGraph(app, graph, schema);
+      const sorted = rows => rows.map(JSON.stringify).sort();
+      assert.deepEqual(sorted(json(app.evalNode(graph.nodes.find(n => n.type === 'output')).rows)),
+        sorted(db.prepare(sql).all().map(r => [r.k,r.x])), sql);
+      const join = graph.nodes.find(n => n.type === 'join');
+      const venn = app.joinPairsVenn(join);
+      assert.match(venn, /左表對不上的/);
+      if (on === 'a.k = b.k') assert.match(venn, /對得上：左表 2 列、右表 2 列/);
+      const steps = app.buildSteps(), box = app.document.createElement('div');
+      steps.find(s => s.title === 'JOIN 配對').render(box);
+      if (on === 'a.k = b.k') assert.match(box.children.at(-1).innerHTML, /對得上：左表 2 列、右表 2 列/);
+    }
+  }
+  db.close();
+  return 'INNER/LEFT, compound keys, casts and matching diagrams agree';
+});
+
+test('DEV-237: filters after LEFT JOIN discard NULL-extended rows', () => {
+  const app = loadApp(), db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE a(k INTEGER); CREATE TABLE b(k INTEGER, y INTEGER);
+    INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (1,3);`);
+  const sql = 'SELECT a.k, b.y FROM a LEFT JOIN b ON a.k = b.k WHERE b.y <= 5';
+  const graph = graphFromSQL(app, sql);
+  installGraph(app, graph, {a:{cols:[{name:'k'}],rows:[[1],[2]]},
+    b:{cols:[{name:'k'},{name:'y'}],rows:[[1,3]]}});
+  assert.deepEqual(json(app.evalNode(graph.nodes.find(n => n.type === 'output')).rows),
+    db.prepare(sql).all().map(r => [r.k,r.y]));
+  db.close();
+  return 'unmatched left row no longer passes y <= 5';
+});
+
+test('DEV-238: UNION width mismatches block SQL and previews', () => {
+  const app = loadApp();
+  const schema = {a:{cols:[{name:'id'},{name:'x'}],rows:[[1,2]]},
+    b:{cols:[{name:'id'},{name:'x'},{name:'y'}],rows:[[3,4,5]]}};
+  for (const mode of ['UNION','UNION ALL']) {
+    const graph = graphFromSQL(app, `SELECT * FROM a ${mode} SELECT * FROM b`);
+    installGraph(app, graph, schema);
+    assert.match(app.buildSQL(), /^-- 無法產生 SQL：UNION 兩邊欄位數不一樣/);
+    assert.deepEqual(json(app.evalNode(graph.nodes.find(n => n.type === 'output'))), {cols:[],rows:[]});
+    const steps = app.buildSteps();
+    assert.equal(steps.at(-1).title, '無法預覽');
+    assert.match(steps.at(-1).cap, /2 vs 3/);
+    app.state.sel = graph.nodes.find(n => n.type === 'union').id;
+    app.renderInspector();
+    assert.doesNotMatch(app.document.getElementById('inspector').innerHTML, /多的會被切掉/);
+    // Validation depends on columns, even when both inputs contain no rows.
+    installGraph(app, graph, {a:{...schema.a,rows:[]},b:{...schema.b,rows:[]}});
+    assert.match(app.buildSQL(), /^-- 無法產生 SQL：UNION/);
+  }
+  const graph = graphFromSQL(app, 'SELECT id, x FROM a UNION ALL SELECT id, x FROM b');
+  installGraph(app, graph, schema);
+  assert.doesNotMatch(app.buildSQL(), /^-- 無法/);
+  assert.deepEqual(json(app.evalNode(graph.nodes.find(n => n.type === 'output')).rows), [[1,2],[3,4]]);
+  return 'both modes reject unequal widths, matching widths still work';
+});
+
+test('DEV-239: qualified tables retain and render the source step', () => {
+  const app = loadApp();
+  app.state.schema = {'analytic.trans_detail':{label:'交易明細',cols:[{name:'sale_qty'}],rows:[[1],[2]]}};
+  graphFromSQL(app, 'SELECT * FROM analytic.trans_detail WHERE sale_qty > 1');
+  const steps = app.buildSteps();
+  assert.equal(steps[0].title, '來源');
+  const box = app.document.createElement('div');
+  steps[0].render(box);
+  assert.match(box.children[0].innerHTML, /交易明細/);
+  assert.match(box.children[0].innerHTML, /sale_qty/);
+  return 'source tab and qualified schema render correctly';
+});
+
+test('DEV-240: failed SQL imports leave the graph and quoting unchanged', () => {
+  const app = loadApp();
+  app.state.dialect = 'postgres';
+  const paste = sql => {
+    app.document.getElementById('sqlin').value = sql;
+    app.document.getElementById('do-parse').listeners.click();
+  };
+  paste('SELECT "CamelCol" FROM "MyTable"');
+  const before = app.buildSQL(), canvas = JSON.stringify(app.state.nodes);
+  for (const sql of ['SELECT FROM', "SELECT 'unfinished", 'SELECT x FROM t GROUP BY x HAVING SUM(x) > 1']) {
+    paste(sql);
+    assert.match(app.document.getElementById('parse-out').innerHTML, /class="perr"/);
+    assert.equal(app.buildSQL(), before, sql);
+    assert.equal(JSON.stringify(app.state.nodes), canvas, sql);
+  }
+  paste('SELECT CamelCol FROM MyTable');
+  assert.doesNotMatch(app.buildSQL(), /"CamelCol"|"MyTable"/);
+  return 'tokenizer, parser and graph failures preserve quotes; successful import replaces them';
+});
+
+test('DEV-241: malformed notes are skipped individually during SQL import', () => {
+  const app = loadApp();
+  const graph = graphFromSQL(app, '/* sqlblocks-notes filter#1=%E0 sort#1=有效%20註記 */ SELECT * FROM t WHERE x = 1 ORDER BY x');
+  assert.equal(graph.nodes.find(n => n.type === 'filter').note, undefined);
+  assert.equal(graph.nodes.find(n => n.type === 'sort').note, '有效 註記');
+  assert.match(app.buildSQL(), /有效%20註記/);
+  return 'query imports and valid neighboring notes survive';
+});
+
+test('DEV-242: negative numeric literals round-trip and execute', () => {
+  const app = loadApp(), db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE t(x REAL, amount REAL); INSERT INTO t VALUES (-6,10),(-2,-3),(0,5);');
+  const queries = ['SELECT * FROM t WHERE x > -5', 'SELECT amount * -1 AS refund FROM t',
+    'SELECT -0.5 AS n FROM t', 'SELECT * FROM t WHERE x BETWEEN -5 AND -1',
+    'SELECT * FROM t WHERE x IN (-6, -2)', "SELECT CASE WHEN x > -5 THEN -1 ELSE -2 END AS n FROM t",
+    'SELECT amount - 1 AS n FROM t', 'SELECT amount - -1 AS n FROM t'];
+  for (const sql of queries) {
+    const graph = graphFromSQL(app, sql), generated = app.buildSQL();
+    assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()), sql);
+    const second = app.astToGraph(app.parseSQLText(generated));
+    assert.equal(signature(second), signature(graph), sql);
+  }
+  assert.throws(() => app.parseSQLText('SELECT -amount AS n FROM t'), err => err.sqlErr === true);
+  db.close();
+  return 'thresholds, arithmetic, decimals, BETWEEN, IN and CASE preserve negative values';
 });
 
 let passed = 0;
