@@ -11,10 +11,10 @@ never imported as something close, dropped, or rewritten into another query.
 A silent change is worse than a refusal: the user trusts the steps and runs
 the wrong SQL.
 
-- Seen in: 1dbd068, 5af49f2, 4908f8d, af7a840 (CASE without ELSE became the
+- Seen in: 1dbd068, 5af49f2, af7a840 (CASE without ELSE became the
   text 'null'; ORDER BY 2 lost its position; CONVERT dropped from a JOIN key).
 - Check: every new branch in `parseSQLText` / `astToGraph` either builds an
-  equivalent graph or throws an `sqlErr` with a position.
+  equivalent graph or throws `{sqlErr:true, msg, pos}`.
 
 ## 2. SQL → steps → SQL keeps its meaning
 
