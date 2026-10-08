@@ -49,8 +49,9 @@ New tests call what `tests/loader.mjs` exports (`loadApp`, `graphFromSQL`,
 reach internals: such a test breaks on a rename and passes on a real bug.
 If a needed function is not exported, add it to `exported`.
 
-- Existing source-slicing tests (H1 prune, honesty footer) are known debt,
-  not precedent.
+- Exception: lint-style checks over the markup and stylesheet as a file
+  (the `css:` and `html:` tests) read the source on purpose; they check the
+  file, not the program's internals.
 - A test asserts behaviour that matters to the user, so it can fail when the
   logic changes. Restating a constant (`assert.equal(LIMIT, 280)`) is not a
   test.

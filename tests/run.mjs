@@ -339,16 +339,13 @@ test('M10: MySQL integer casts use and parse SIGNED or UNSIGNED', () => {
 });
 
 test('H1: JOIN pruning validates each side without deleting valid keys', () => {
-  const html = fs.readFileSync(new URL('../sql-blocks.html', import.meta.url), 'utf8');
-  const start = html.indexOf('function prune(n){');
-  const end = html.indexOf('\n\n/* ============================================================', start);
-  const makePrune = new Function('colsInto', 'joinKeys', html.slice(start, end) + '\nreturn prune;');
-  const prune = makePrune((id, port) => port === 1 ? ['id','day'] : ['id','date'], n => n.keys);
-  const join = {id:'j', type:'join', joinType:'LEFT', keys:[
-    {left:'id',right:'id'}, {left:'date',right:'day'}, {left:'missing',right:'id'},
-  ]};
-  prune(join);
-  assert.deepEqual(join.keys, [{left:'id',right:'id'}, {left:'date',right:'day'}]);
+  /* fresh table names: import reuses tables earlier tests left in the schema */
+  const graph = graphFromSQL(api,
+    'SELECT * FROM h1_l LEFT JOIN h1_r ON h1_l.id = h1_r.id AND h1_l.date = h1_r.day');
+  const join = graph.nodes.find(n => n.type === 'join');
+  join.keys.push({left:'missing', right:'id'}, {left:'id', right:'missing'});
+  api.prune(join);
+  assert.deepEqual(json(join.keys.map(k => [k.left, k.right])), [['id','id'], ['date','day']]);
   return 'JOIN type update keeps two valid keys and drops only the invalid key';
 });
 
@@ -1318,16 +1315,18 @@ test('notes: a table step shows its Chinese name unless told otherwise', () => {
    number on that screen. Whatever the wording becomes, the footer shown under
    every step has to say the data is illustrative. */
 test('honesty: the step-through says its data is made up', () => {
-  const html = fs.readFileSync(new URL('../sql-blocks.html', import.meta.url), 'utf8');
-  const foot = /getElementById\('foot'\)\.textContent\s*=\s*([\s\S]{0,300}?);/.exec(html);
-  assert.ok(foot, "the footer text could not be found");
-  assert.match(foot[1], /示意|編的|編出來/, 'the footer must say the rows are invented');
-  assert.doesNotMatch(foot[1], /不是假圖|會回給你的結果/, 'and must not claim they are real');
+  graphFromSQL(api, 'SELECT * FROM t WHERE x > 1');
+  api.state.steps = api.buildSteps();
+  api.state.step = 0;
+  api.renderStage();
+  const foot = api.document.getElementById('foot').textContent;
+  assert.match(foot, /示意|編的|編出來/, 'the footer must say the rows are invented');
+  assert.doesNotMatch(foot, /不是假圖|會回給你的結果/, 'and must not claim they are real');
 
   /* and the first step, which introduces the table, says the same */
-  const first = /cap:\s*'先看原料[^']*'/.exec(html);
-  assert.ok(first, 'the opening caption could not be found');
-  assert.match(first[0], /示意|編出來/, 'the opening caption must not present the rows as real');
+  const first = api.state.steps[0];
+  assert.equal(first.title, '來源');
+  assert.match(first.cap, /示意|編出來/, 'the opening caption must not present the rows as real');
   return 'footer and opening caption both state the rows are illustrative';
 });
 
