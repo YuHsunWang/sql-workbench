@@ -31,3 +31,19 @@ You review one branch of the repo at the current working directory.
 </prompt>
 
 When the subagent returns, relay its reply to the user as is.
+
+## Then open the PR
+
+If both test commands passed and the subagent's questions need no change,
+the main session (not the subagent) ships the branch:
+
+1. `git push -u origin HEAD` (never main).
+2. If the branch has no open PR, `gh pr create --base main` with a body
+   filled from `.github/pull_request_template.md`: pick Door and Blast
+   radius from the diff (one value each, not the placeholder), a few
+   pseudo-code lines under What changed, the test summary lines under
+   Verified. If a PR is already open, the push updates it; edit its body
+   only if the door or radius changed.
+3. Give the user the PR link. Merging stays with the user.
+
+If a question does need a change, stop after relaying and ask.
