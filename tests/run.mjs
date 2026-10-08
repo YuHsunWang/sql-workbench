@@ -96,6 +96,18 @@ test('regression: NULLS LAST is refused when ordering cannot preserve it', () =>
   return 'NULLS LAST raises sqlErr';
 });
 
+/* x <> NULL and IN (…, NULL) used to import with NULL stored as the text 'null',
+   so the regenerated SQL returned rows the original never could. */
+test('regression: comparing to a NULL literal is refused, not turned into text', () => {
+  for (const sql of ['SELECT id FROM t WHERE note <> NULL', 'SELECT id FROM t WHERE note = NULL',
+                     "SELECT id FROM t WHERE s IN ('a', NULL)", "SELECT id FROM t WHERE s NOT IN ('a', NULL)"]) {
+    const error = (() => { try { graphFromSQL(api, sql); } catch (e) { return e; } })();
+    assert.equal(error?.sqlErr, true, sql);
+    assert.match(error.msg, /IS NULL/, sql);
+  }
+  return '= / <> NULL and IN (…, NULL) raise sqlErr pointing to IS NULL';
+});
+
 test('regression: EXCEPT is refused instead of dropping its second query', () => {
   sqlError('SELECT id FROM a EXCEPT SELECT id FROM b');
   return 'EXCEPT raises sqlErr';
@@ -226,6 +238,37 @@ test('security: pasted DDL column names are plain identifiers only', () => {
   return 'kept ok, bx, c_2; dropped a<img';
 });
 
+/* Unescaped pasted text was fixed one output at a time (5cebbfd, PR #4, af7a840),
+   and each fix checked only the output it touched. This puts the same payload in
+   every place a value can sit and reads every output that renders it. */
+test('security: a pasted value carrying HTML is text in every block, step and panel', () => {
+  const bad = `"><img src=x onerror=alert(1)>`;
+  const positions = [
+    `SELECT * FROM t WHERE city = '${bad}'`,
+    `SELECT * FROM t WHERE city IN ('a', '${bad}')`,
+    `SELECT * FROM t WHERE city LIKE '${bad}%'`,
+    `SELECT * FROM t WHERE city BETWEEN '${bad}' AND 'z'`,
+    `SELECT CASE WHEN qq = 5 THEN '${bad}' ELSE 'b' END AS lbl FROM t`,
+    `SELECT CASE WHEN qq = 5 THEN 'a' ELSE '${bad}' END AS lbl FROM t`,
+    `SELECT '${bad}' AS k FROM t`,
+    `SELECT COALESCE(city, '${bad}') AS c FROM t`,
+    `SELECT city, COUNT(*) AS n FROM t GROUP BY city HAVING city <> '${bad}'`,
+  ];
+  for (const sql of positions) {
+    const graph = graphFromSQL(api, sql);
+    const outputs = [...graph.nodes.map(n => ['block ' + n.type, api.nodeSummary(n)]),
+                     ...api.buildSteps().map(s => ['step ' + s.title, s.cap])];
+    for (const n of graph.nodes) {
+      api.state.sel = n.id;
+      api.state.inspOpen = true;
+      api.renderInspector();
+      outputs.push(['panel ' + n.type, api.inspector.innerHTML]);
+    }
+    for (const [where, html] of outputs) assert.doesNotMatch(String(html), /<img/, `${where} for ${sql}`);
+  }
+  return `${positions.length} positions × every block, step and panel`;
+});
+
 /* A pasted name reaches the canvas, the table list and the step-through as raw
    HTML, so it has to be stopped before any of them render — not escaped in one. */
 test('security: a pasted name that carries HTML never reaches the page', () => {
@@ -339,16 +382,13 @@ test('M10: MySQL integer casts use and parse SIGNED or UNSIGNED', () => {
 });
 
 test('H1: JOIN pruning validates each side without deleting valid keys', () => {
-  const html = fs.readFileSync(new URL('../sql-blocks.html', import.meta.url), 'utf8');
-  const start = html.indexOf('function prune(n){');
-  const end = html.indexOf('\n\n/* ============================================================', start);
-  const makePrune = new Function('colsInto', 'joinKeys', html.slice(start, end) + '\nreturn prune;');
-  const prune = makePrune((id, port) => port === 1 ? ['id','day'] : ['id','date'], n => n.keys);
-  const join = {id:'j', type:'join', joinType:'LEFT', keys:[
-    {left:'id',right:'id'}, {left:'date',right:'day'}, {left:'missing',right:'id'},
-  ]};
-  prune(join);
-  assert.deepEqual(join.keys, [{left:'id',right:'id'}, {left:'date',right:'day'}]);
+  /* fresh table names: import reuses tables earlier tests left in the schema */
+  const graph = graphFromSQL(api,
+    'SELECT * FROM h1_l LEFT JOIN h1_r ON h1_l.id = h1_r.id AND h1_l.date = h1_r.day');
+  const join = graph.nodes.find(n => n.type === 'join');
+  join.keys.push({left:'missing', right:'id'}, {left:'id', right:'missing'});
+  api.prune(join);
+  assert.deepEqual(json(join.keys.map(k => [k.left, k.right])), [['id','id'], ['date','day']]);
   return 'JOIN type update keeps two valid keys and drops only the invalid key';
 });
 
@@ -1318,16 +1358,18 @@ test('notes: a table step shows its Chinese name unless told otherwise', () => {
    number on that screen. Whatever the wording becomes, the footer shown under
    every step has to say the data is illustrative. */
 test('honesty: the step-through says its data is made up', () => {
-  const html = fs.readFileSync(new URL('../sql-blocks.html', import.meta.url), 'utf8');
-  const foot = /getElementById\('foot'\)\.textContent\s*=\s*([\s\S]{0,300}?);/.exec(html);
-  assert.ok(foot, "the footer text could not be found");
-  assert.match(foot[1], /示意|編的|編出來/, 'the footer must say the rows are invented');
-  assert.doesNotMatch(foot[1], /不是假圖|會回給你的結果/, 'and must not claim they are real');
+  graphFromSQL(api, 'SELECT * FROM t WHERE x > 1');
+  api.state.steps = api.buildSteps();
+  api.state.step = 0;
+  api.renderStage();
+  const foot = api.document.getElementById('foot').textContent;
+  assert.match(foot, /示意|編的|編出來/, 'the footer must say the rows are invented');
+  assert.doesNotMatch(foot, /不是假圖|會回給你的結果/, 'and must not claim they are real');
 
   /* and the first step, which introduces the table, says the same */
-  const first = /cap:\s*'先看原料[^']*'/.exec(html);
-  assert.ok(first, 'the opening caption could not be found');
-  assert.match(first[0], /示意|編出來/, 'the opening caption must not present the rows as real');
+  const first = api.state.steps[0];
+  assert.equal(first.title, '來源');
+  assert.match(first.cap, /示意|編出來/, 'the opening caption must not present the rows as real');
   return 'footer and opening caption both state the rows are illustrative';
 });
 
