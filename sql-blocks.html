@@ -911,6 +911,11 @@ function joinKeys(n){
   if(n.keys && n.keys.length) return n.keys;
   return (n.leftCol || n.rightCol) ? [{left:n.leftCol || '', right:n.rightCol || '', lfn:'', rfn:''}] : [];
 }
+/* NULL 不能跟任何 JOIN key 配對；逐步檢視與實際預覽共用同一份 key。 */
+function joinKey(row, pairs, side){
+  const values = pairs.map(p=>castRun(side === 'l' ? p.lfn : p.rfn)(row[side === 'l' ? p.l : p.r]));
+  return values.some(v=>v == null) ? null : JSON.stringify(values.map(String));
+}
 /* 右邊如果有跟左邊撞名的非 key 欄位，改名成 x_2、x_3。不改名的話 SQL Server
    的 CTE 會因為欄名重複直接報錯，而且下游的 WHERE 也分不出指的是哪一邊。
    逐步檢視和 SQL 共用這一份，才不會兩邊各算各的。 */
@@ -970,14 +975,11 @@ function evalNode(node, ctx){
     if(!pairs.length) return EMPTY;
     const lay = joinLayout(L.cols, R.cols, new Set(pairs.map(p=>p.right)));
     const cols = lay.cols, keep = lay.keep;
-    const key = (row, side) => pairs.map(p=>{
-      const raw = row[side === 'l' ? p.l : p.r];
-      return String(castRun(side === 'l' ? p.lfn : p.rfn)(raw));
-    }).join('\u0000');
+    const key = (row, side) => joinKey(row, pairs, side);
     const rows = [];
     L.rows.forEach(l=>{
       const k = key(l, 'l');
-      const hits = R.rows.filter(r=>key(r, 'r') === k);
+      const hits = k === null ? [] : R.rows.filter(r=>key(r, 'r') === k);
       if(hits.length) hits.forEach(r=>rows.push(l.concat(keep.map(k=>r[k.i]))));
       else if(node.joinType === 'LEFT') rows.push(l.concat(keep.map(()=>null)));
     });
@@ -986,11 +988,9 @@ function evalNode(node, ctx){
 
   case 'union': {
     const A = evalNode(srcOf(node.id,0), ctx), B = evalNode(srcOf(node.id,1), ctx);
-    if(!A.cols.length) return B;
-    if(!B.cols.length) return A;
-    const w = Math.min(A.cols.length, B.cols.length);
-    const cols = A.cols.slice(0, w);
-    let rows = A.rows.map(r=>r.slice(0,w)).concat(B.rows.map(r=>r.slice(0,w)));
+    if(!A.cols.length || A.cols.length !== B.cols.length) return EMPTY;
+    const cols = A.cols.slice();
+    let rows = A.rows.map(r=>r.slice()).concat(B.rows.map(r=>r.slice()));
     if(!node.all) rows = dedupe(rows);
     return {cols:cols, rows:rows};
   }
@@ -1174,6 +1174,8 @@ function cmp(v, op, target){
   const empty = (v === null || v === undefined);
   if(op === 'IS NULL')     return empty;
   if(op === 'IS NOT NULL') return !empty;
+  /* WHERE / CASE 只留下 TRUE；NULL 的一般比較是 UNKNOWN，不成立。 */
+  if(empty) return false;
   if(op === 'IN' || op === 'NOT IN'){
     const hit = inList(target).some(x=>String(x) === String(v));
     return op === 'IN' ? hit : !hit;
@@ -1375,6 +1377,10 @@ function graphIssue(last){
       if(!s) return META[n.type].label+' 缺少第 '+(port+1)+' 個來源連線。';
       const problem = missing(s); if(problem) return problem;
     }
+    if(n.type === 'union'){
+      const a = evalNode(srcOf(n.id, 0)).cols.length, b = evalNode(srcOf(n.id, 1)).cols.length;
+      if(a !== b) return 'UNION 兩邊欄位數不一樣（'+a+' vs '+b+'），請先調整選欄位。';
+    }
     const need = (COL_FIELDS[n.type] || []).filter(f=>!OPTIONAL_COL[f]);
     if(!(n.type === 'filter' && isOrFilter(n)) &&
        !(n.type === 'derive' && Object.prototype.hasOwnProperty.call(n, 'literal')) && need.some(f=>!n[f]))
@@ -1420,7 +1426,10 @@ function applyNotes(nodes, sql){
   const want = {};
   m[1].trim().split(/\s+/).forEach(pair=>{
     const at = pair.indexOf('=');
-    if(at > 0) want[pair.slice(0, at)] = decodeURIComponent(pair.slice(at + 1));
+    if(at > 0){
+      try { want[pair.slice(0, at)] = decodeURIComponent(pair.slice(at + 1)); }
+      catch(err){ /* 壞掉的註記略過，SQL 與其他註記仍可匯入。 */ }
+    }
   });
   const tags = noteTags(nodes);
   /* 形狀對不上就一個都不貼 —— 貼錯步驟比沒有註記更糟 */
@@ -2252,7 +2261,7 @@ function renderInspector(){
     h += '<div class="rowf"><label>模式</label><select data-f="all">'+
       opt('', n.all ? '' : 'x', 'UNION（一模一樣的列只留一筆）')+opt('x', n.all ? 'x' : '', 'UNION ALL（全部都留）')+'</select></div>';
     h += '<p class="note">UNION 是<b>照位置</b>對欄位，不是照名字。第一個來源的欄名會贏。'+
-         (a && b && a !== b ? '<br><b style="color:var(--drop)">現在兩邊欄位數不一樣（'+a+' vs '+b+'），多的會被切掉。</b>' : '')+'</p>';
+         (a && b && a !== b ? '<br><b style="color:var(--drop)">現在兩邊欄位數不一樣（'+a+' vs '+b+'），無法產生 SQL 或預覽，請先調整選欄位。</b>' : '')+'</p>';
   }
 
   if(n.type === 'filter' && isOrFilter(n)){
@@ -3044,16 +3053,23 @@ const FNWORD = {COUNT:'數幾筆', SUM:'加總', AVG:'算平均', MAX:'找最大
 
 function buildSteps(){
   const steps = [];
-  const tables = state.nodes.filter(n=>n.type === 'table' && state.schema[n.table]);
+  const tables = state.nodes.filter(n=>n.type === 'table' && schemaOf(n));
   if(tables.length) steps.push({
     title:'來源',
     cap:'先看原料。<strong>欄位是你 schema 裡真的有的，列是編出來的示意資料</strong>。後面每一步都只是把這些列搬來搬去。',
     render: box => tables.forEach((t,i)=>{
       if(i) box.appendChild(mark('＋'));
-      const s = state.schema[t.table];
+      const s = schemaOf(t);
       box.appendChild(miniTable(t.table + (s.label ? '（'+s.label+'）' : ''), evalNode(t)));
     })
   });
+
+  const out = state.nodes.find(n=>n.type === 'output');
+  const problem = graphIssue(out ? srcOf(out.id, 0) : null);
+  if(problem){
+    steps.push({title:'無法預覽', cap:esc(problem), render:box=>box.appendChild(mark('請先修正步驟'))});
+    return steps;
+  }
 
   chainOrder().forEach(n=>{
     const s0 = srcOf(n.id, 0);
@@ -3062,17 +3078,17 @@ function buildSteps(){
     if(n.type === 'join'){
       const L = evalNode(srcOf(n.id,0)), R = evalNode(srcOf(n.id,1));
       const pairs = joinKeys(n)
-        .map(k=>({l:L.cols.indexOf(k.left), r:R.cols.indexOf(k.right), left:k.left, right:k.right}))
+        .map(k=>({l:L.cols.indexOf(k.left), r:R.cols.indexOf(k.right), left:k.left, right:k.right, lfn:k.lfn, rfn:k.rfn}))
         .filter(x=>x.l >= 0 && x.r >= 0);
       if(!pairs.length) return;
-      const keyL = row => pairs.map(x=>String(row[x.l])).join(' ∥ ');
-      const keyR = row => pairs.map(x=>String(row[x.r])).join(' ∥ ');
+      const keyL = row => joinKey(row, pairs, 'l');
+      const keyR = row => joinKey(row, pairs, 'r');
       const keys = [];
-      L.rows.forEach(r=>{ const k = keyL(r); if(keys.indexOf(k) < 0) keys.push(k); });
-      R.rows.forEach(r=>{ const k = keyR(r); if(keys.indexOf(k) < 0) keys.push(k); });
+      L.rows.forEach(r=>{ const k = keyL(r); if(k !== null && keys.indexOf(k) < 0) keys.push(k); });
+      R.rows.forEach(r=>{ const k = keyR(r); if(k !== null && keys.indexOf(k) < 0) keys.push(k); });
       const col = new Map(keys.map((k,i)=>[k, TINTS[i % TINTS.length]]));
-      const lset = new Set(L.rows.map(keyL));
-      const rset = new Set(R.rows.map(keyR));
+      const lset = new Set(L.rows.map(keyL).filter(k=>k !== null));
+      const rset = new Set(R.rows.map(keyR).filter(k=>k !== null));
       const label = pairs.map(x=>x.left === x.right ? x.left : x.left+'='+x.right).join(' + ');
       steps.push({
         title:'JOIN 配對',
@@ -3267,7 +3283,6 @@ function buildSteps(){
     }
   });
 
-  const out = state.nodes.find(n=>n.type === 'output');
   if(out){
     const R = evalNode(out);
     if(R.cols.length) steps.push({
@@ -3412,7 +3427,7 @@ function andVenn(n, upToHere){
 }
 /* JOIN 的文氏圖：左表、右表各一個圈，重疊 = 對得上 */
 function joinVenn(n, L, R, keyL, keyR){
-  const lset = new Set(L.rows.map(keyL)), rset = new Set(R.rows.map(keyR));
+  const lset = new Set(L.rows.map(keyL).filter(k=>k !== null)), rset = new Set(R.rows.map(keyR).filter(k=>k !== null));
   const lHit = L.rows.filter(r=>rset.has(keyL(r))).length, rHit = R.rows.filter(r=>lset.has(keyR(r))).length;
   const count = {1:L.rows.length - lHit, 2:R.rows.length - rHit, 3:lHit};
   const left = n.joinType === 'LEFT';
@@ -3434,11 +3449,10 @@ function joinVenn(n, L, R, keyL, keyR){
 /* 屬性面板用：跟逐步檢視用同一套配對方式算 */
 function joinPairsVenn(n){
   const L = evalNode(srcOf(n.id,0)), R = evalNode(srcOf(n.id,1));
-  const pairs = joinKeys(n).map(k=>({l:L.cols.indexOf(k.left), r:R.cols.indexOf(k.right)}))
+  const pairs = joinKeys(n).map(k=>({l:L.cols.indexOf(k.left), r:R.cols.indexOf(k.right), lfn:k.lfn, rfn:k.rfn}))
     .filter(x=>x.l >= 0 && x.r >= 0);
   if(!pairs.length || !L.rows.length || !R.rows.length) return '';
-  return joinVenn(n, L, R, row=>pairs.map(x=>String(row[x.l])).join(' ∥ '),
-                           row=>pairs.map(x=>String(row[x.r])).join(' ∥ '));
+  return joinVenn(n, L, R, row=>joinKey(row, pairs, 'l'), row=>joinKey(row, pairs, 'r'));
 }
 function mark(ch){
   const d = document.createElement('div');
@@ -3696,7 +3710,7 @@ function tokenize(sql){
 }
 
 function parseSQLText(text){
-  QUOTED_SRC.clear();              /* 每段查詢重新認一次哪些名字本來有引號 */
+  const quoted = new Set();        /* 匯入成功才替換目前畫布的引號資訊 */
   const T = tokenize(text);
   let p = 0, inHaving = false;
   const warn = [];
@@ -3711,7 +3725,7 @@ function parseSQLText(text){
   function needKw(w){ if(!eatKw(w)) fail('這裡應該要有 '+w); }
   function needOp(v){ if(!eatOp(v)) fail('這裡應該要有 '+v); }
   /* 來源有引號、而且拿掉引號會變樣的名字要記下來，產生 SQL 時才還得回去 */
-  const keepQuoted = t => { if(t.quoted && t.v !== t.v.toLowerCase()) QUOTED_SRC.add(t.v); return t.v; };
+  const keepQuoted = t => { if(t.quoted && t.v !== t.v.toLowerCase()) quoted.add(t.v); return t.v; };
   function nameTok(){ const t = at(); if(t.t !== 'word') fail('這裡需要一個名稱'); p++; return keepQuoted(t); }
   const isStop = k => { const u = up(at(k)); return u !== null && KEYWORDS.has(u); };
 
@@ -3877,7 +3891,9 @@ function parseSQLText(text){
 
   function parseAtom(){
     const t = at();
+    if(isKw('FROM')) fail('SELECT 後面需要欄位或算式');
     if(isKw('CASE')) return parseCase();
+    if(isOp('-') && at(1).t === 'num'){ p += 2; return {kind:'lit', v:-Number(T[p-1].v)}; }
     if(t.t === 'num'){ p++; return {kind:'lit', v:Number(t.v)}; }
     if(t.t === 'str'){ p++; return {kind:'lit', v:t.v}; }
     if(isKw('NULL')){ p++; return {kind:'lit', v:null}; }
@@ -4029,7 +4045,7 @@ function parseSQLText(text){
   const stmt = parseStatement();
   eatOp(';');
   if(at().t !== 'eof') fail('SELECT 後面還有無法反解的語法');
-  return {stmt:stmt, warn:warn, src:text};
+  return {stmt:stmt, warn:warn, src:text, quoted:Array.from(quoted)};
 }
 
 /* ON 裡包了函數的話，記下是哪一種轉換 */
@@ -4399,6 +4415,8 @@ function astToGraph(parsed){
 
   applyNotes(chainOf(nodes, edges), parsed.src);   /* 把 SQL 帶回來的註記貼回步驟上 */
   layoutGraph(nodes, edges);
+  QUOTED_SRC.clear();
+  (parsed.quoted || []).forEach(name=>QUOTED_SRC.add(name));
   return {nodes:nodes, edges:edges, schema:schema, warn:warn, uid:uid, madeUp:madeUp};
 }
 
