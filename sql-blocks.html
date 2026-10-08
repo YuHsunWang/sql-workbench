@@ -4107,6 +4107,12 @@ function astToGraph(parsed){
       warn.push('BETWEEN 被拆成兩個條件（>= 和 <=）— 這就是它真正的意思');
       return [{col:col, op:'>=', val:lo, str:q2(c.lo)}, {col:col, op:'<=', val:hi, str:q2(c.hi)}];
     }
+    /* 跟 NULL 用 = <> IN 比，SQL 一律不成立；步驟存不了 NULL 值，存下去會變成文字 'null'，意思就變了 */
+    const isNull = e => e && e.kind === 'lit' && e.v === null;
+    if(c.kind === 'in' && c.vals.some(isNull))
+      throw {sqlErr:true, msg:'IN 清單裡的 NULL 永遠比不到任何列（NOT IN 甚至會一列都不回）；請拿掉 NULL，要找空值另外寫 IS NULL', pos:c.left.p ?? 0, got:'NULL'};
+    if(isNull(c.right))
+      throw {sqlErr:true, msg:'跟 NULL 用 '+c.op+' 比較永遠不成立；要找空值請寫 IS NULL 或 IS NOT NULL', pos:c.left.p ?? 0, got:'NULL'};
     if(c.kind === 'in'){
       const vals = c.vals.map(litOf);
       noteHint(col, vals);

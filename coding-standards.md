@@ -20,8 +20,9 @@ the wrong SQL.
 
 Any change to parsing (`parseSQLText`, `astToGraph`) or generation
 (`buildSQL`, `condSQL`, `lit`, `q`, `tableRef`) adds a round-trip case to
-`tests/run.mjs` and keeps `tests/roundtrip-fuzz/run.mjs` at different 0,
-fails 0.
+`tests/run.mjs`. A new SQL shape also gets a family in
+`tests/roundtrip-fuzz/run.mjs`, which fails (and CI with it) on any round
+trip that changes the result.
 
 - Seen in: 90aa0dc, 7f1b181, 2f0509f.
 
@@ -29,7 +30,8 @@ fails 0.
 
 Table names, aliases, column names, literal values and notes are escaped
 before they reach `innerHTML`. Quoted names or string aliases carrying HTML
-are refused at the tokenizer.
+are refused at the tokenizer. A new place that renders a value adds its
+SQL to the `positions` list in the "every block, step and panel" test.
 
 - Seen in: 5cebbfd, 1dbd068, af7a840.
 

@@ -31,6 +31,10 @@ jobs:
       - name: Run tests
         run: node tests/run.mjs
 
+      # 把 SQL 轉成步驟再轉回來，結果要跟原本一模一樣；不一樣就不部署
+      - name: Round-trip fuzz
+        run: node tests/roundtrip-fuzz/run.mjs
+
       - name: Build site
         run: |
           mkdir -p _site

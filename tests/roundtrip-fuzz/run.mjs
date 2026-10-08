@@ -41,6 +41,12 @@ case: i => `SELECT CASE WHEN amount >= ${pick([10,20,30])} THEN 'high' ELSE 'low
 cte: i => `WITH x AS (SELECT id, amount FROM orders WHERE amount >= ${pick([10,20,30])}) SELECT id FROM x${i%2?' ORDER BY id':''}`,
 union: i => `SELECT id FROM orders WHERE amount < ${pick([20,30])} UNION ${i%2?'ALL ':''}SELECT id FROM orders WHERE qty > ${pick([1,2])}`,
 subquery: i => `SELECT id FROM (SELECT id, amount FROM orders WHERE amount >= ${pick([10,20])}) AS x${i%2?' WHERE amount < 40':''}`,
+// NULL as a literal turned into the text 'null' twice (PR #4 WHERE, af7a840 CASE); every place it can sit is covered here.
+null_compare: i => `SELECT id FROM orders WHERE ${pick(['note','status','amount'])} ${i%2?'=':'<>'} NULL`,
+null_in: i => `SELECT id FROM orders WHERE status ${i%2?'NOT ':''}IN ('new', NULL)`,
+null_case: i => `SELECT id, CASE WHEN amount >= ${pick([10,20,30])} THEN ${i%2?"'high' ELSE NULL":"NULL ELSE 'low'"} END AS bucket FROM orders`,
+null_case_no_else: () => `SELECT id, CASE WHEN amount >= ${pick([10,20,30])} THEN 'high' END AS bucket FROM orders`,
+null_literal: i => `SELECT id, NULL AS ${pick(['x','missing'])} FROM orders${i%2?' WHERE id < 5':''}`,
 unsupported_in_subquery: () => `SELECT id FROM orders WHERE id IN (SELECT order_id FROM payments WHERE paid >= ${pick([0,10,20])})`,
 unsupported_count_distinct: () => `SELECT COUNT(DISTINCT ${pick(['status','qty'])}) AS n FROM orders`,
 };
@@ -101,3 +107,6 @@ for (const [key,x] of classes) console.log(`CLASS ${key}\n  minimal: ${x.sql}\n 
 if (counts.total!==Object.keys(families).length*16 || inputs.size<300 ||
     counts.total!==counts.identical_result+counts.different_result+counts.regenerated_sql_fails+counts.parse_unsupported)
   throw new Error('case count or uniqueness invariant failed');
+// A round trip that changes the result or writes SQL that will not run is the defect this suite exists to catch.
+if (counts.different_result || counts.regenerated_sql_fails)
+  throw new Error(`round trip broke: ${counts.different_result} different, ${counts.regenerated_sql_fails} failing (see CLASS lines)`);

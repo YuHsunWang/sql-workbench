@@ -96,6 +96,18 @@ test('regression: NULLS LAST is refused when ordering cannot preserve it', () =>
   return 'NULLS LAST raises sqlErr';
 });
 
+/* x <> NULL and IN (…, NULL) used to import with NULL stored as the text 'null',
+   so the regenerated SQL returned rows the original never could. */
+test('regression: comparing to a NULL literal is refused, not turned into text', () => {
+  for (const sql of ['SELECT id FROM t WHERE note <> NULL', 'SELECT id FROM t WHERE note = NULL',
+                     "SELECT id FROM t WHERE s IN ('a', NULL)", "SELECT id FROM t WHERE s NOT IN ('a', NULL)"]) {
+    const error = (() => { try { graphFromSQL(api, sql); } catch (e) { return e; } })();
+    assert.equal(error?.sqlErr, true, sql);
+    assert.match(error.msg, /IS NULL/, sql);
+  }
+  return '= / <> NULL and IN (…, NULL) raise sqlErr pointing to IS NULL';
+});
+
 test('regression: EXCEPT is refused instead of dropping its second query', () => {
   sqlError('SELECT id FROM a EXCEPT SELECT id FROM b');
   return 'EXCEPT raises sqlErr';
@@ -224,6 +236,37 @@ test('security: pasted DDL column names are plain identifiers only', () => {
   /* quotes are stripped from DDL names, so b"x becomes the harmless bx */
   assert.deepEqual(json(app.state.schema.t.cols.map(c => c.name)), ['ok', 'bx', 'c_2']);
   return 'kept ok, bx, c_2; dropped a<img';
+});
+
+/* Unescaped pasted text was fixed one output at a time (5cebbfd, PR #4, af7a840),
+   and each fix checked only the output it touched. This puts the same payload in
+   every place a value can sit and reads every output that renders it. */
+test('security: a pasted value carrying HTML is text in every block, step and panel', () => {
+  const bad = `"><img src=x onerror=alert(1)>`;
+  const positions = [
+    `SELECT * FROM t WHERE city = '${bad}'`,
+    `SELECT * FROM t WHERE city IN ('a', '${bad}')`,
+    `SELECT * FROM t WHERE city LIKE '${bad}%'`,
+    `SELECT * FROM t WHERE city BETWEEN '${bad}' AND 'z'`,
+    `SELECT CASE WHEN qq = 5 THEN '${bad}' ELSE 'b' END AS lbl FROM t`,
+    `SELECT CASE WHEN qq = 5 THEN 'a' ELSE '${bad}' END AS lbl FROM t`,
+    `SELECT '${bad}' AS k FROM t`,
+    `SELECT COALESCE(city, '${bad}') AS c FROM t`,
+    `SELECT city, COUNT(*) AS n FROM t GROUP BY city HAVING city <> '${bad}'`,
+  ];
+  for (const sql of positions) {
+    const graph = graphFromSQL(api, sql);
+    const outputs = [...graph.nodes.map(n => ['block ' + n.type, api.nodeSummary(n)]),
+                     ...api.buildSteps().map(s => ['step ' + s.title, s.cap])];
+    for (const n of graph.nodes) {
+      api.state.sel = n.id;
+      api.state.inspOpen = true;
+      api.renderInspector();
+      outputs.push(['panel ' + n.type, api.inspector.innerHTML]);
+    }
+    for (const [where, html] of outputs) assert.doesNotMatch(String(html), /<img/, `${where} for ${sql}`);
+  }
+  return `${positions.length} positions × every block, step and panel`;
 });
 
 /* A pasted name reaches the canvas, the table list and the step-through as raw
