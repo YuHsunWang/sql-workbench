@@ -3139,7 +3139,7 @@ test('expressions: tree rewritten per dialect, preview agrees with SQLite, missi
   assert.match(out('postgres'), /first \|\| ' ' \|\| last AS full_name/);
   assert.match(out('oracle'), /first \|\| ' ' \|\| last AS full_name/);
   assert.match(out('mysql'), /CONCAT\(first, ' ', last\) AS full_name/);
-  assert.match(out('mssql'), /first \+ ' ' \+ last AS full_name/);
+  assert.match(out('mssql'), /CAST\(first AS NVARCHAR\(MAX\)\) \+ ' ' \+ CAST\(last AS NVARCHAR\(MAX\)\) AS full_name/);
   roundTrip(concat);
 
   const app = loadApp(); app.state.dialect = 'postgres';
@@ -3221,6 +3221,122 @@ test('today / INTERVAL: kept as written; the preview admits it cannot judge', ()
   app.state.steps = app.buildSteps();
   assert.match(app.state.steps.find(s => s.title === 'WHERE').cap, /算不出要比的值/);
   return 'SQL kept; both sample rows kept; step explains';
+});
+
+/* Review of the import-coverage commits (seven findings). Each case reproduces the
+   reported input. */
+
+/* id || code was written for SQL Server as id + code. With two numbers that adds
+   (1 + 2 = 3, not '12'); a number next to text is a conversion error (rule 1). */
+test('stage-4 review #1: SQL Server concatenation joins text, never adds numbers', () => {
+  const app = loadApp(); app.state.dialect = 'mssql';
+  graphFromSQL(app, "SELECT id || '-' || code AS k FROM t");
+  assert.match(app.buildSQL(), /CAST\(id AS NVARCHAR\(MAX\)\) \+ '-' \+ CAST\(code AS NVARCHAR\(MAX\)\) AS k/);
+  return "id || '-' || code -> CAST(id …) + '-' + CAST(code …)";
+});
+
+/* The function name in the panel is free text, but the saved snapshot only accepts
+   identifiers. Clearing the field (or typing dbo.fmt) and reloading replaced the
+   whole canvas with the sample, and a share link made then would not open. */
+test('stage-4 review #2: a function name typed in the panel never makes the save unloadable', () => {
+  const app = loadApp();
+  const fn = graphFromSQL(app, 'SELECT UPPER(name) AS u FROM t').nodes.find(n => n.type === 'derive');
+  app.state.sel = fn.id;
+  const change = v => app.document.getElementById('inspector').listeners.change({target: {dataset: {f: 'fn'}, value: v}});
+  const reloads = () => app.validSnapshot(JSON.parse(JSON.stringify(app.snapshot())));
+  change('');
+  assert.equal(fn.fn, 'UPPER', 'an empty name is not taken');
+  change('LOWER(');
+  assert.equal(fn.fn, 'UPPER', 'a name SQL cannot use is not taken');
+  assert.equal(reloads(), true);
+  change(' dbo.fmt ');
+  assert.equal(fn.fn, 'dbo.fmt');
+  assert.equal(reloads(), true);
+  assert.match(app.buildSQL(), /dbo\.fmt\(name\) AS u/);
+  return "'' and 'LOWER(' ignored; dbo.fmt kept and reloadable";
+});
+
+/* SUM(CASE … THEN 1 ELSE 0 END) / COUNT(*) is integer division in PostgreSQL and
+   SQL Server (and SQLite): 2 of 3 is 0. The preview showed 0.67 — hiding exactly the
+   bug the AI check warns about (rule 4). MySQL and Oracle really do give a fraction. */
+test('stage-4 review #3: the preview truncates integer division where the database does', () => {
+  const schema = {scores:{label:'', cols:[{name:'course_id', type:'INT'}, {name:'score', type:'INT'}],
+                          rows:[[1, 70], [1, 50], [1, 80]]}};
+  const preview = (sql, dialect) => {
+    const app = loadApp(); app.state.dialect = dialect;
+    const g = graphFromSQL(app, sql); installGraph(app, g, schema);
+    return {app, rows: app.evalNode(g.nodes.find(n => n.type === 'output')).rows};
+  };
+  const ratio = 'SELECT course_id, SUM(CASE WHEN score >= 60 THEN 1 ELSE 0 END) / COUNT(*) AS r FROM scores GROUP BY course_id';
+  const pg = preview(ratio, 'postgres');
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE scores(course_id INTEGER, score INTEGER); INSERT INTO scores VALUES (1,70),(1,50),(1,80);');
+  assert.deepEqual(json(pg.rows), [[1, db.prepare(pg.app.buildSQL().replace(/^\/\*.*\*\/\n/, '')).all()[0].r]]);
+  assert.deepEqual(json(pg.rows), [[1, 0]]);
+  assert.deepEqual(json(preview(ratio, 'mssql').rows), [[1, 0]]);
+  assert.deepEqual(json(preview(ratio, 'mysql').rows), [[1, 0.667]]);
+  assert.deepEqual(json(preview('SELECT score / 7 AS s FROM scores', 'postgres').rows), [[10], [7], [11]]);
+  assert.deepEqual(json(preview('SELECT (score + 0) / 7 AS s FROM scores', 'postgres').rows), [[10], [7], [11]]);
+  assert.deepEqual(json(preview('SELECT score / 7.0 AS s FROM scores', 'postgres').rows), [[10], [7.143], [11.429]]);
+  db.close();
+  return '2/3 -> 0 in PostgreSQL / SQL Server (= SQLite), 0.667 in MySQL; 7.0 keeps the fraction';
+});
+
+/* Oracle treats NULL as '' in ||: 'Ann' || NULL is 'Ann'. The preview said NULL. */
+test('stage-4 review #4: the Oracle preview of || skips NULLs like Oracle does', () => {
+  const run = dialect => {
+    const app = loadApp(); app.state.dialect = dialect;
+    const g = graphFromSQL(app, 'SELECT first_name || middle AS n FROM p');
+    installGraph(app, g, {p:{label:'', cols:[{name:'first_name'}, {name:'middle'}], rows:[['Ann', null], [null, null]]}});
+    return json(app.evalNode(g.nodes.find(n => n.type === 'output')).rows);
+  };
+  assert.deepEqual(run('oracle'), [['Ann'], [null]]);
+  assert.deepEqual(run('postgres'), [[null], [null]]);
+  return "Oracle: 'Ann' || NULL = 'Ann', NULL || NULL = NULL; PostgreSQL: NULL";
+});
+
+/* DATENAME(month, '2024-03-01') became a function step whose source column was
+   "month", written back quoted — SQL Server then looks for a column named month. */
+test('stage-4 review #5: a date-part keyword is never turned into a source column', () => {
+  const app = loadApp(); app.state.dialect = 'mssql'; app.state.quoteAll = true;
+  graphFromSQL(app, "SELECT DATENAME(month, '2024-03-01') AS m, DATEADD(day, 1, '2024-03-01') AS d FROM t");
+  const sql = app.buildSQL();
+  assert.match(sql, /DATENAME\(month, '2024-03-01'\) AS \[m\]/);
+  assert.match(sql, /DATEADD\(day, 1, '2024-03-01'\) AS \[d\]/);
+  roundTrip("SELECT DATENAME(month, '2024-03-01') AS m, DATEADD(day, 1, '2024-03-01') AS d FROM t", 'mssql');
+  return 'month / day stay bare keywords';
+});
+
+/* MySQL DATEDIFF(end_d, start_d) and CONVERT(x, CHAR) take a column first. It was
+   written as a bare keyword: never quoted, and invisible to the missing-column check. */
+test('stage-4 review #6: a column in the first argument of DATEDIFF stays a column', () => {
+  const app = loadApp(); app.state.dialect = 'mysql'; app.state.quoteAll = true;
+  const g = graphFromSQL(app, 'SELECT DATEDIFF(end_d, start_d) AS days FROM t');
+  assert.match(app.buildSQL(), /DATEDIFF\(`end_d`, `start_d`\) AS `days`/);
+  assert.deepEqual(json(g.nodes.find(n => n.type === 'derive').expr.args.map(a => a.kind)), ['col', 'col']);
+  const ms = loadApp(); ms.state.dialect = 'mssql';
+  graphFromSQL(ms, 'SELECT DATEDIFF(day, start_d, end_d) AS days, CONVERT(INT, code) AS c FROM t');
+  assert.match(ms.buildSQL(), /DATEDIFF\(day, start_d, end_d\) AS days/);
+  assert.match(ms.buildSQL(), /CONVERT\(INT, code\) AS c/);
+  roundTrip('SELECT DATEDIFF(end_d, start_d) AS days, CONVERT(x, CHAR) AS t FROM t', 'mysql');
+  roundTrip('SELECT DATEDIFF(day, start_d, end_d) AS days, CONVERT(INT, code) AS c FROM t', 'mssql');
+  return 'MySQL end_d quoted as a column; SQL Server day / INT stay keywords';
+});
+
+/* ROUND(-2.5) is -3 in every database (half away from zero); Math.round gave -2.
+   SUBSTR(s, 0, 2) differs between databases; the preview picked one answer. */
+test('stage-4 review #7: ROUND and SUBSTR previews never show a value the database would not', () => {
+  const app = loadApp(); app.state.dialect = 'postgres';
+  const g = graphFromSQL(app, 'SELECT ROUND(x) AS r, ROUND(x, 1) AS r1, SUBSTR(s, 0, 2) AS p FROM t');
+  installGraph(app, g, {t:{label:'', cols:[{name:'x'}, {name:'s'}], rows:[[-2.5, 'abc'], [-0.25, 'abc']]}});
+  const rows = json(app.evalNode(g.nodes.find(n => n.type === 'output')).rows);
+  const db = new DatabaseSync(':memory:');
+  const lite = db.prepare('SELECT ROUND(-2.5) AS a, ROUND(-0.25, 1) AS b').get();
+  db.close();
+  assert.equal(rows[0][0], lite.a);
+  assert.equal(rows[1][1], lite.b);
+  assert.equal(rows[0][2], '（由資料庫計算）');
+  return `ROUND(-2.5) = ${lite.a}, ROUND(-0.25, 1) = ${lite.b} like SQLite; SUBSTR from 0 left to the database`;
 });
 
 let passed = 0;

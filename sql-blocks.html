@@ -1075,8 +1075,10 @@ function evalNode(node, ctx){
     const s = S();
     if(Object.prototype.hasOwnProperty.call(node, 'literal'))
       return {cols:s.cols.concat([node.as]), rows:s.rows.map(r=>r.concat([node.literal]))};
-    if(node.expr)
-      return {cols:s.cols.concat([node.as]), rows:s.rows.map(r=>r.concat([evalExpr(node.expr, r, s.cols)]))};
+    if(node.expr){
+      const intCol = intColsOf(srcOf(node.id, 0));
+      return {cols:s.cols.concat([node.as]), rows:s.rows.map(r=>r.concat([evalExpr(node.expr, r, s.cols, intCol)]))};
+    }
     if(node.fn && node.noArgs)
       return {cols:s.cols.concat([node.as]), rows:s.rows.map(r=>r.concat(['（由資料庫計算）']))};
     const li = s.cols.indexOf(node.left);
@@ -1086,15 +1088,18 @@ function evalNode(node, ctx){
          以前一律照抄原始值，REPLACE(s,'a','b') 的預覽看起來像沒換 —— 跟資料庫的結果不一樣 */
       return {cols: s.cols.concat([node.as]), rows: s.rows.map(r=>r.concat([fnDeriveValue(node, r[li])]))};
     }
-    const ri = s.cols.indexOf(node.right);
+    const ri = s.cols.indexOf(node.right), intDiv = simpleIntDiv(node);
     return {
       cols: s.cols.concat([node.as]),
       rows: s.rows.map(r=>{
+        /* NULL 參與運算得到 NULL —— Number(null) 是 0，不能直接轉 */
+        if(r[li] == null || (ri >= 0 && r[ri] == null)) return r.concat([null]);
         const a = Number(r[li]);
         const b = ri >= 0 ? Number(r[ri]) : Number(node.right);
         let v = null;
         if(!isNaN(a) && !isNaN(b)){
-          v = node.op === '+' ? a+b : node.op === '-' ? a-b : node.op === '*' ? a*b : (b === 0 ? null : a/b);
+          v = node.op === '+' ? a+b : node.op === '-' ? a-b : node.op === '*' ? a*b :
+              b === 0 ? null : intDiv ? Math.trunc(a/b) : a/b;
           if(v !== null) v = round(v);
         }
         return r.concat([v]);
@@ -1443,6 +1448,14 @@ function chainOf(nodes, edges){
 }
 function chainOrder(){ return chainOf(state.nodes, state.edges); }
 
+/* 上游一路往回找（略過不拿掉欄位的步驟）是不是一塊「選欄位」或 GROUP BY。
+   只有這兩種真的把欄位拿掉了，引用不到才算錯；來源表 schema 不完整
+   （貼的 SQL 用到 schema 沒列的欄）不擋 */
+function projectedAway(n){
+  let up = srcOf(n.id, 0);
+  while(up && ['filter','distinct','sort','derive','case','window'].indexOf(up.type) >= 0) up = srcOf(up.id, 0);
+  return !!up && (up.type === 'select' || up.type === 'groupby');
+}
 function graphIssue(last){
   const colour = new Map(), next = new Map();
   state.nodes.forEach(n=>next.set(n.id, []));
@@ -1474,13 +1487,8 @@ function graphIssue(last){
        !(n.type === 'derive' && (Object.prototype.hasOwnProperty.call(n, 'literal') || n.expr)) && need.some(f=>!n[f]))
       return META[n.type].label+' 還沒選要用哪一欄。';
     if(isExprDerive(n)){
-      /* 跟篩選一樣：只有上游真的有一塊「選欄位」或 GROUP BY 把欄位拿掉了才算錯；
-         來源表的 schema 不完整（貼的 SQL 用到 schema 沒列的欄）不擋 */
-      const cols = evalNode(srcOf(n.id, 0)).cols;
-      let up = srcOf(n.id, 0);
-      while(up && ['filter','distinct','sort','derive','case','window'].indexOf(up.type) >= 0) up = srcOf(up.id, 0);
-      const gone = exprCols(n.expr).find(c=>cols.indexOf(c) < 0);
-      if(gone && up && (up.type === 'select' || up.type === 'groupby')) return '算欄位的算式用到上一步已沒有的欄位 '+gone+'。';
+      const cols = evalNode(srcOf(n.id, 0)).cols, gone = exprCols(n.expr).find(c=>cols.indexOf(c) < 0);
+      if(gone && projectedAway(n)) return '算欄位的算式用到上一步已沒有的欄位 '+gone+'。';
     }
     if(n.type === 'semijoin'){
       const ks = n.keys || [], L = evalNode(srcOf(n.id,0)).cols, R = evalNode(srcOf(n.id,1)).cols;
@@ -1488,15 +1496,12 @@ function graphIssue(last){
       if(ks.some(k=>L.indexOf(k.left) < 0 || R.indexOf(k.right) < 0)) return '有沒有出現在另一份資料裡：請重新選擇兩邊存在的欄位。';
     }
     if(n.type === 'filter'){
-      const s = srcOf(n.id, 0), cols = evalNode(s).cols;
-      let projected = s;
-      while(projected && ['filter','distinct','sort'].indexOf(projected.type) >= 0)
-        projected = srcOf(projected.id, 0);
+      const cols = evalNode(srcOf(n.id, 0)).cols;
       const rhsGone = condLeaves(n).find(c=>c.valCol && cols.indexOf(c.val) < 0);
       if(rhsGone) return META[n.type].label+' 引用了上一步已沒有的欄位 '+rhsGone.val+'。';
       if(condLeaves(n).some(c=>c.valDate && (!dateValues(c).length || !dateValues(c).every(validDate)))) return '日期必須是有效的 YYYY-MM-DD。';
       const gone = condLeaves(n).find(c=>cols.indexOf(c.col) < 0);
-      if(projected && projected.type === 'select' && gone)
+      if(gone && projectedAway(n))
         return META[n.type].label+' 引用了上一步已沒有的欄位 '+gone.col+'。';
     }
     if(n.type === 'case'){
@@ -1761,7 +1766,29 @@ function fnCallSQL(n){
 const EXPR_KINDS = ['col','call','arith','concat','kw','interval'];
 const NOW_WORDS = ['CURRENT_DATE','CURRENT_TIMESTAMP','CURRENT_TIME','SYSDATE','SYSTIMESTAMP','LOCALTIMESTAMP'];
 const INTERVAL_UNITS = ['YEAR','QUARTER','MONTH','WEEK','DAY','HOUR','MINUTE','SECOND','YEARS','MONTHS','WEEKS','DAYS','HOURS','MINUTES','SECONDS'];
-const KW_ARG_FNS = {DATEADD:1, DATEDIFF:1, DATEPART:1, DATENAME:1, DATETRUNC:1, CONVERT:1, TRY_CONVERT:1};
+/* 有些函式的某個參數是關鍵字（日期單位、型別），不是欄位，不能加引號：
+   DATEADD(day, …)、DATENAME(month, …)、DATEDIFF(day, a, b)、CONVERT(INT, x)、MySQL 的 CONVERT(x, CHAR)。
+   但 MySQL 的 DATEDIFF(end_d, start_d) 第一個參數是欄位 —— 只有名字真的是日期單位或型別、
+   參數個數也對得上，才當關鍵字。回傳是第幾個參數，沒有就是 -1 */
+const DATE_PARTS = /^(year|yy|yyyy|quarter|qq|q|month|mm|m|dayofyear|dy|y|day|dd|d|week|wk|ww|iso_week|isowk|isoww|weekday|dw|w|hour|hh|minute|mi|n|second|ss|s|millisecond|ms|microsecond|mcs|nanosecond|ns|tzoffset|tz)$/i;
+const TYPE_WORDS = /^(int|integer|bigint|smallint|tinyint|bit|signed|unsigned|decimal|numeric|float|real|money|smallmoney|date|datetime|datetime2|smalldatetime|time|datetimeoffset|char|varchar|nchar|nvarchar|text|ntext|binary|varbinary|uniqueidentifier|xml)$/i;
+function kwArgIndex(fn, args){
+  const bare = (a, re) => !!a && a.kind === 'col' && !a.tbl && re.test(a.col);
+  const typeArg = a => bare(a, TYPE_WORDS) || (!!a && a.kind === 'call' && TYPE_WORDS.test(a.fn));
+  if(fn === 'CONVERT' || fn === 'TRY_CONVERT'){
+    if(args.length >= 2 && typeArg(args[0])) return 0;
+    if(args.length === 2 && bare(args[1], TYPE_WORDS)) return 1;
+    return -1;
+  }
+  if(fn === 'DATEDIFF') return args.length === 3 && bare(args[0], DATE_PARTS) ? 0 : -1;
+  if(['DATEADD','DATEPART','DATENAME','DATETRUNC'].indexOf(fn) >= 0) return bare(args[0], DATE_PARTS) ? 0 : -1;
+  return -1;
+}
+/* 彙總呼叫、算式裡有沒有包彙總（a、b 兩邊和函式參數往下找） */
+const isAggCall = e => !!e && e.kind === 'call' && AGG_FNS.indexOf(e.fn) >= 0;
+const containsAgg = e => !!e && typeof e === 'object' &&
+  (isAggCall(e) || ['a','b'].some(k=>containsAgg(e[k])) || (e.args || []).some(containsAgg));
+const FN_NAME = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/;
 const SAFE_TYPE = /^[A-Za-z_][A-Za-z0-9_ ]*(\(\s*\d+\s*(,\s*\d+\s*)?\))?$/;
 function exprCols(t){
   if(!t || typeof t !== 'object') return [];
@@ -1780,10 +1807,14 @@ function exprSQL(t){
     case 'lit':  return t.v === null ? 'NULL' : typeof t.v === 'number' ? decText(t.v, t.dec) : strLit(t.v);
     case 'arith':return wrapExpr(t.a)+' '+t.op+' '+wrapExpr(t.b);
     case 'concat': {
-      /* || 在 MySQL 預設是 OR、在 SQL Server 不存在 —— 換方言就換寫法；三種寫法遇到 NULL 都得到 NULL */
+      /* || 在 MySQL 預設是 OR、在 SQL Server 不存在 —— 換方言就換寫法。
+         SQL Server 的 + 遇到兩個數字會相加（1 + 2 = 3，不是 '12'），數字碰文字會報錯，
+         所以不是字串常值的部分先轉成文字。遇到 NULL：MySQL、PostgreSQL、SQL Server 都得到 NULL；
+         Oracle 的 || 把 NULL 當空字串（預覽照 Oracle 的規則算） */
       const parts = concatParts(t);
       if(state.dialect === 'mysql') return 'CONCAT('+parts.map(exprSQL).join(', ')+')';
-      if(state.dialect === 'mssql') return parts.map(wrapExpr).join(' + ');
+      if(state.dialect === 'mssql')
+        return parts.map(p=>p.kind === 'lit' && typeof p.v === 'string' ? exprSQL(p) : castSQL('TEXT', exprSQL(p))).join(' + ');
       return parts.map(wrapExpr).join(' || ');
     }
     case 'call': return t.fn+'('+t.args.map(exprSQL).join(', ')+(t.castType ? ' AS '+t.castType : '')+')';
@@ -1806,18 +1837,62 @@ const EXPR_FNS = {
   RTRIM:a=>a[0] == null ? null : String(a[0]).replace(/\s+$/, ''),
   LENGTH:a=>a[0] == null ? null : String(a[0]).length,
   ABS:a=>a[0] == null || isNaN(Number(a[0])) ? null : Math.abs(Number(a[0])),
+  /* 資料庫的 ROUND 是「四捨五入、離零遠的那邊」：ROUND(-2.5) = -3；Math.round 會給 -2 */
   ROUND:a=>{ if(a[0] == null || isNaN(Number(a[0]))) return null;
-    const d = Number(a[1] || 0), f = Math.pow(10, d); return Math.round(Number(a[0]) * f) / f; },
+    const x = Number(a[0]), f = Math.pow(10, Number(a[1] || 0));
+    return Math.sign(x) * Math.round(Math.abs(x) * f) / f; },
   FLOOR:a=>a[0] == null || isNaN(Number(a[0])) ? null : Math.floor(Number(a[0])),
   CEIL:a=>a[0] == null || isNaN(Number(a[0])) ? null : Math.ceil(Number(a[0])),
-  SUBSTR:a=>a[0] == null ? null : String(a[0]).substr(Math.max(0, Number(a[1]) - 1), a.length > 2 ? Number(a[2]) : undefined),
+  /* 起點小於 1、長度是負的：每家資料庫的答案不一樣，交給資料庫 */
+  SUBSTR:a=>{
+    if(a[0] == null || a[1] == null || (a.length > 2 && a[2] == null)) return null;
+    const from = Number(a[1]), len = a.length > 2 ? Number(a[2]) : undefined;
+    if(!Number.isInteger(from) || from < 1 || (len !== undefined && !(Number.isInteger(len) && len >= 0))) return BY_DB;
+    return String(a[0]).substr(from - 1, len);
+  },
   REPLACE:a=>a.some(x=>x == null) ? null : String(a[0]).split(String(a[1])).join(String(a[2]))
 };
 EXPR_FNS.IFNULL = EXPR_FNS.NVL = EXPR_FNS.ISNULL = EXPR_FNS.COALESCE;
 EXPR_FNS.LEN = EXPR_FNS.CHAR_LENGTH = EXPR_FNS.LENGTH;
 EXPR_FNS.CEILING = EXPR_FNS.CEIL;
 EXPR_FNS.SUBSTRING = EXPR_FNS.SUBSTR;
-function evalExpr(t, row, cols){
+/* PostgreSQL、SQL Server（和 SQLite）整數除以整數會捨去小數：7 / 2 = 3。MySQL、Oracle 得到 3.5 */
+const intDivides = () => state.dialect === 'postgres' || state.dialect === 'mssql';
+/* 算式的結果是不是整數型別。intCol(欄名) 說來源欄是不是整數欄；不知道就當不是 */
+function isIntExpr(t, intCol){
+  if(!t || !intCol) return false;
+  switch(t.kind){
+    case 'col':   return !!intCol(t.col);
+    case 'lit':   return typeof t.v === 'number' && Number.isInteger(t.v) && !t.dec;
+    case 'arith': return isIntExpr(t.a, intCol) && isIntExpr(t.b, intCol) && (t.op !== '/' || intDivides());
+    case 'case':  return t.branches.every(b=>isIntExpr(b.then, intCol)) &&
+                         (!t.other || isIntExpr(t.other, intCol) || (t.other.kind === 'lit' && t.other.v === null));
+    case 'call':  return ['LENGTH','LEN','CHAR_LENGTH'].indexOf(t.fn) >= 0;
+  }
+  return false;
+}
+/* 整數欄判斷：沿著上游追型別，同一個來源只追一次 */
+function intColsOf(src){
+  const memo = new Map();
+  return col => {
+    if(!memo.has(col)) memo.set(col, INT_TYPE.test(colType(src, col)));
+    return memo.get(col);
+  };
+}
+/* 「欄位 / 欄位或數字」這種算欄位步驟是不是整數除法 */
+function simpleIntDiv(n){
+  if(!n || n.type !== 'derive' || n.expr || n.fn || n.op !== '/' || !intDivides()) return false;
+  const src = srcOf(n.id, 0), cols = evalNode(src).cols, intCol = intColsOf(src);
+  return intCol(n.left) && (cols.indexOf(n.right) >= 0 ? intCol(n.right) : /^-?\d+$/.test(String(n.right)));
+}
+/* 算式樹裡有沒有一個整數除以整數 */
+function exprIntDiv(t, intCol){
+  return !!t && typeof t === 'object' &&
+    ((t.kind === 'arith' && t.op === '/' && isIntExpr(t.a, intCol) && isIntExpr(t.b, intCol)) ||
+     Object.values(t).some(x=>exprIntDiv(x, intCol)));
+}
+function evalExpr(t, row, cols, intCol){
+  const ev = x => evalExpr(x, row, cols, intCol);
   switch(t.kind){
     case 'col': { const i = cols.indexOf(t.col); return i < 0 ? BY_DB : row[i]; }
     case 'lit': return t.v;
@@ -1825,28 +1900,34 @@ function evalExpr(t, row, cols){
     case 'kw':  return BY_DB;
     case 'case': {
       for(const b of t.branches){
-        const hit = evalCond(b.when, row, cols);
+        const hit = evalCond(b.when, row, cols, intCol);
         if(hit === BY_DB) return BY_DB;
-        if(hit === true) return evalExpr(b.then, row, cols);
+        if(hit === true) return ev(b.then);
       }
-      return t.other ? evalExpr(t.other, row, cols) : null;
+      return t.other ? ev(t.other) : null;
     }
     case 'arith': {
-      const a = evalExpr(t.a, row, cols), b = evalExpr(t.b, row, cols);
+      const a = ev(t.a), b = ev(t.b);
       if(a === BY_DB || b === BY_DB) return BY_DB;
       if(a == null || b == null) return null;
       const x = Number(a), y = Number(b);
       if(isNaN(x) || isNaN(y)) return BY_DB;
+      if(t.op === '/' && y !== 0 && intDivides() && isIntExpr(t.a, intCol) && isIntExpr(t.b, intCol)) return Math.trunc(x / y);
       const v = t.op === '+' ? x+y : t.op === '-' ? x-y : t.op === '*' ? x*y : (y === 0 ? null : x/y);
       return v === null ? null : round(v);
     }
     case 'concat': {
-      const a = evalExpr(t.a, row, cols), b = evalExpr(t.b, row, cols);
+      const a = ev(t.a), b = ev(t.b);
       if(a === BY_DB || b === BY_DB) return BY_DB;
+      /* Oracle 的 || 把 NULL 當空字串（兩邊都是 NULL 才是 NULL） */
+      if(state.dialect === 'oracle'){
+        const s = String(a == null ? '' : a) + String(b == null ? '' : b);
+        return s === '' ? null : s;           /* Oracle 的空字串就是 NULL */
+      }
       return a == null || b == null ? null : String(a) + String(b);
     }
     case 'call': {
-      const args = t.args.map(x=>evalExpr(x, row, cols));
+      const args = t.args.map(ev);
       if(args.indexOf(BY_DB) >= 0) return BY_DB;
       if(t.fn === 'CAST'){
         const ty = String(t.castType || '').toUpperCase();
@@ -1891,9 +1972,10 @@ function cleanExpr(e){
       if(e.distinct) refuse(e.fn+'(DISTINCT …) 目前做不出對應的步驟');
       if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(e.fn)) refuse('看不懂函式名稱 '+e.fn);
       if(e.castType && !SAFE_TYPE.test(e.castRaw || '')) refuse('看不懂 CAST 的型別寫法');
+      const kwAt = kwArgIndex(e.fn, e.args);
       const args = e.args.map((a, i)=>{
-        /* DATEADD(day, …)、CONVERT(date, …) 的第一個參數是關鍵字，不是欄位，不能加引號 */
-        if(i === 0 && KW_ARG_FNS[e.fn] && a.kind === 'col' && !a.tbl && /^[A-Za-z_]\w*$/.test(a.col)) return {kind:'kw', v:a.col};
+        /* DATEADD(day, …)、CONVERT(INT, …) 的日期單位、型別是關鍵字，不是欄位，不能加引號 */
+        if(i === kwAt && a.kind === 'col') return {kind:'kw', v:a.col};
         if(a.kind === 'star') refuse(e.fn+'(*) 目前做不出對應的步驟');
         return cleanExpr(a);
       });
@@ -1942,17 +2024,17 @@ function condExprSQL(c){
 }
 /* SQL 的三值邏輯：true / false / null（UNKNOWN）。CASE 只走 true 的那支；
    算不出來（BY_DB）就整個 CASE 都算不出來 */
-function evalCond(c, row, cols){
-  const ev = t => evalExpr(t, row, cols);
+function evalCond(c, row, cols, intCol){
+  const ev = t => evalExpr(t, row, cols, intCol);
   switch(c.kind){
     case 'and': {
       let res = true;
-      for(const x of c.items){ const v = evalCond(x, row, cols); if(v === BY_DB) return BY_DB; if(v === false) return false; if(v === null) res = null; }
+      for(const x of c.items){ const v = evalCond(x, row, cols, intCol); if(v === BY_DB) return BY_DB; if(v === false) return false; if(v === null) res = null; }
       return res;
     }
     case 'or': {
       let res = false;
-      for(const b of c.branches){ const v = evalCond(b, row, cols); if(v === BY_DB) return BY_DB; if(v === true) return true; if(v === null) res = null; }
+      for(const b of c.branches){ const v = evalCond(b, row, cols, intCol); if(v === BY_DB) return BY_DB; if(v === true) return true; if(v === null) res = null; }
       return res;
     }
     case 'null': { const v = ev(c.l); if(v === BY_DB) return BY_DB; return (v == null) !== c.neg; }
@@ -2338,10 +2420,8 @@ function lintGraph(){
     }
 
     /* 6. 整數除以整數：PostgreSQL / SQL Server 會捨去小數 */
-    if(n.type === 'derive' && n.op === '/' && !n.fn && (state.dialect === 'postgres' || state.dialect === 'mssql')){
-      const src = srcOf(n.id, 0), cols = evalNode(src).cols;
-      const isInt = v => cols.indexOf(v) >= 0 ? INT_TYPE.test(colType(src, v)) : /^-?\d+$/.test(String(v));
-      if(INT_TYPE.test(colType(src, n.left)) && isInt(n.right))
+    if(n.type === 'derive' && intDivides()){
+      if(simpleIntDiv(n) || (isExprDerive(n) && exprIntDiv(n.expr, intColsOf(srcOf(n.id, 0)))))
         add(n, 'warn', '兩邊都是整數：在 '+D().name+' 整數除以整數會<strong>捨去小數</strong>（7 / 2 = 3）。'+
           '要小數的話先轉成 DECIMAL，或把除數寫成 '+code('2.0')+' 這種帶小數點的數字。');
     }
@@ -3125,6 +3205,25 @@ function colType(node, col){
     return i >= 0 ? colType(srcOf(node.id, 0), node.cols[i]) : '';
   }
   const up = srcOf(node.id, 0);
+  /* 算出來的新欄位：型別看得出是整數的就說整數（整數除法的預覽和健檢要用），其他當不知道 */
+  if(node.type === 'groupby'){
+    const a = (node.aggs || []).find(a=>a.as === col);
+    if(a) return a.fn === 'COUNT' || a.fn === 'COUNT_DISTINCT' ? 'INT'
+               : (a.fn === 'SUM' || a.fn === 'MIN' || a.fn === 'MAX') ? colType(up, a.col) : '';
+  }
+  if(node.type === 'derive' && col === node.as){
+    if(node.expr) return isIntExpr(node.expr, intColsOf(up)) ? 'INT' : '';
+    if(Object.prototype.hasOwnProperty.call(node, 'literal'))
+      return typeof node.literal === 'number' && Number.isInteger(node.literal) ? 'INT' : '';
+    if(node.fn) return '';
+    const intRight = evalNode(up).cols.indexOf(node.right) >= 0 ? INT_TYPE.test(colType(up, node.right)) : /^-?\d+$/.test(String(node.right));
+    return INT_TYPE.test(colType(up, node.left)) && intRight && (node.op !== '/' || intDivides()) ? 'INT' : '';
+  }
+  if(node.type === 'case' && col === node.as){
+    const intVal = (v, isCol) => isCol ? INT_TYPE.test(colType(up, v)) : v === null || (typeof v === 'number' && Number.isInteger(v));
+    const all = node.branches.map(b=>[b.then, b.thenCol]).concat([[node.other === undefined ? null : node.other, node.otherCol]]);
+    return all.some(([v])=>v !== null) && all.every(([v, c])=>intVal(v, c)) ? 'INT' : '';
+  }
   return evalNode(up).cols.indexOf(col) >= 0 ? colType(up, col) : '';
 }
 /* MySQL 的 ENUM/SET 裡長得像數字的值也一定要加引號，不然會被當成第幾個選項 */
@@ -3139,6 +3238,12 @@ inspector.addEventListener('change', e=>{
   const t = e.target, f = t.dataset.f;
   if(!f) return;
   let v = t.value;
+  /* 函式名稱會原樣寫進 SQL，存檔和分享連結也只收識別字（UPPER、dbo.fmt）。
+     清空或打到一半（LOWER(）就不收、維持原本的名字 —— 不然重新整理時整張畫布會被當成不能載入 */
+  if(n.type === 'derive' && f === 'fn'){
+    v = v.trim();
+    if(!FN_NAME.test(v)){ renderInspector(); return; }
+  }
   if((n.type === 'case' && /^(then|other)(Type)?$/.test(f)) || (n.type === 'filter' && f === 'valType')){
     const obj = t.dataset.ob !== undefined ? n.any[Number(t.dataset.ob)][Number(t.dataset.oc)] : t.dataset.b !== undefined ? n.branches[Number(t.dataset.b)] : n;
     const field = f.replace(/Type$/, '');
@@ -4503,7 +4608,8 @@ function validSnapshot(s){
     if(typeof o === 'string'){
       if(key === 'op' || key === 'form'){ if(!SNAP_OPS.has(o)) ok = false; }
       /* 這幾個會原樣寫進 SQL：函式名、關鍵字參數只能是識別字，型別只能是 DECIMAL(10,2) 這種 */
-      else if(key === 'fn' || (key === 'v' && parent && parent.kind === 'kw')){ if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(o)) ok = false; }
+      else if(key === 'fn'){ if(!FN_NAME.test(o)) ok = false; }
+      else if(key === 'v' && parent && parent.kind === 'kw'){ if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(o)) ok = false; }
       else if(key === 'castType'){ if(!SAFE_TYPE.test(o)) ok = false; }
       else if(key === 'unit'){ if(INTERVAL_UNITS.indexOf(o) < 0) ok = false; }
       else if(/[<"]/.test(o) && !inRows && !(parent && !Array.isArray(parent) && valueOK(key, parent))) ok = false;
@@ -5105,8 +5211,7 @@ function parseSQLText(text){
     const l = c.left;
     if(EXPR_KINDS.indexOf(l.kind) < 0)
       fail('條件左邊目前只能是欄位、函式或算式，不能是 CASE 或子查詢', t0);
-    if(!inHaving && (function agg(e){ return !!e && typeof e === 'object' &&
-        ((e.kind === 'call' && AGG_FNS.indexOf(e.fn) >= 0) || ['a','b'].some(k=>agg(e[k])) || (e.args || []).some(agg)); })(l))
+    if(!inHaving && containsAgg(l))
       fail('WHERE 裡不能用彙總；要篩彙總結果請寫在 HAVING', t0);
     return c;
   }
@@ -5507,12 +5612,11 @@ function astToGraph(parsed){
     /* 「算欄位」只有「欄位 運算 欄位或數字」一層。兩邊包了函式（COALESCE(a,0)*b、
        a*CAST(b AS INT)）以前會被換成不存在的 coalesce_a，或默默拿掉 CAST */
     /* 其他的（多層、包函式、字串串接）存成算式樹，SQL 從樹重寫 */
-    const colRefsOf = colRefs;
     const appendDerive = (e, alias) => {
       const simple = e.kind === 'arith' && e.a.kind === 'col' &&
         (e.b.kind === 'col' || (e.b.kind === 'lit' && typeof e.b.v === 'number'));
       /* JOIN 時被拿掉或改名（x_2）的欄位，去掉表名後會指到另一邊的同名欄 */
-      colRefsOf(e).forEach(r=>{
+      colRefs(e).forEach(r=>{
         if(r.tbl && movedRefs.has(r.tbl+'.'+r.col))
           throw {sqlErr:true, msg:'算式引用的 '+r.tbl+'.'+r.col+' 在 JOIN 步驟已被移除或改名，目前無法精確對應', pos:e.p || 0};
       });
@@ -5521,10 +5625,13 @@ function astToGraph(parsed){
          來源不只一欄、或包了好幾層的，存成算式樹 —— 以前不是被擋，就是把 o.b 原文抄進
          沒有 o 這個別名的 CTE。三種的分法只寫在這裡，匯入和重新匯入才會分成同一種步驟。
          CONVERT(type, expr, style) 的來源欄位是第二個參數，第一個是型別。 */
-      const at0 = e.fn === 'CONVERT' ? 1 : 0, a0 = e.args ? e.args[at0] : null;
-      const plainCall = e.kind === 'call' && AGG_FNS.indexOf(e.fn) < 0 &&
+      /* 關鍵字參數（日期單位、型別）原文照抄、不能當來源欄：DATENAME(month, '2024-03-01') 的
+         month 不是欄位。CONVERT(INT, x) 的來源是第二個參數 */
+      const kwAt = e.kind === 'call' ? kwArgIndex(e.fn, e.args) : -1;
+      const at0 = (e.fn === 'CONVERT' || e.fn === 'TRY_CONVERT') && kwAt === 0 ? 1 : 0, a0 = e.args ? e.args[at0] : null;
+      const plainCall = e.kind === 'call' && AGG_FNS.indexOf(e.fn) < 0 && kwAt !== at0 &&
         (!a0 || a0.kind === 'col' || a0.kind === 'star') &&
-        e.args.every((a, i)=>i === at0 || a.kind === 'lit' || (e.fn === 'CONVERT' && i === 0));
+        e.args.every((a, i)=>i === at0 || i === kwAt || a.kind === 'lit');
       let spec;
       if(simple) spec = {left: e.a.col, op: e.op, right: (e.b.kind === 'lit' ? decText(e.b.v, e.b.dec) : e.b.col), as: alias};
       else if(plainCall){
@@ -5548,8 +5655,6 @@ function astToGraph(parsed){
     /* ROUND(AVG(x), 2)、SUM(a) * 1.0 / COUNT(*)：算式包著彙總。拆成三步 ——
        GROUP BY 先算出每個彙總（藏起來的 agg_value 欄），之後一塊「算欄位」用這些欄算出
        結果，最後「選欄位」把藏起來的欄拿掉、照原本順序排好 */
-    const hasAgg = e => !!e && typeof e === 'object' &&
-      ((e.kind === 'call' && AGG_FNS.indexOf(e.fn) >= 0) || ['a','b'].some(k=>hasAgg(e[k])) || (e.args || []).some(hasAgg));
     const hidden = [], postItems = [];
     const liftAggs = e => {
       if(e.kind === 'call' && AGG_FNS.indexOf(e.fn) >= 0){
@@ -5568,7 +5673,7 @@ function astToGraph(parsed){
           if(!a0 || a0.kind === 'star') col = '*';
           else if(a0.kind === 'col') col = a0.col;
           else if(e.fn === 'COUNT' && a0.kind === 'lit' && a0.v !== null) col = '*';
-          else if(['arith','concat','call','case'].indexOf(a0.kind) >= 0 && !hasAgg(a0)){
+          else if(['arith','concat','call','case'].indexOf(a0.kind) >= 0 && !containsAgg(a0)){
             const base = a0.kind === 'case' ? 'case_value' : 'calc_value';
             col = base; let s2 = 2;
             while(usedCols.has(col.toLowerCase())) col = base + '_' + (s2++);
@@ -5613,7 +5718,7 @@ function astToGraph(parsed){
     c.items.forEach(it=>{
       if(it.kind !== 'expr') return;
       const e = it.expr;
-      if(!(e.kind === 'call' && AGG_FNS.indexOf(e.fn) >= 0) && e.kind !== 'case' && hasAgg(e)){
+      if(!isAggCall(e) && e.kind !== 'case' && containsAgg(e)){
         postItems.push({it:it, tree:liftAggs(e)});
         return;
       }
@@ -5654,7 +5759,6 @@ function astToGraph(parsed){
     /* HAVING MAX(a) - MIN(a) > 5：左右邊是包著彙總的算式 —— 彙總先藏一欄，
        GROUP BY 之後再算成 having_value 來篩 */
     const havingLater = [];
-    const isAggCall = e => e && e.kind === 'call' && AGG_FNS.indexOf(e.fn) >= 0;
     (function liftHaving(list){
       list.forEach(x=>{
         if(x.kind === 'or') x.branches.forEach(liftHaving);
