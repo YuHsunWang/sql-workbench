@@ -2034,11 +2034,20 @@ test('review: SQL whose meaning the steps would change is refused, not imported'
   const parseRefused = [
     "SELECT CASE WHEN x = 1 THEN y * 2 ELSE 'n' END AS t FROM t", /* an expression cannot fit a branch */
     "SELECT CASE WHEN x > amt THEN 'a' ELSE 'b' END AS t FROM t",  /* x > amt became x > 0 */
-    "SELECT * FROM t WHERE UPPER(name) = 'A'",                     /* UPPER was dropped */
-    'SELECT * FROM t WHERE a + b > 3',                             /* became a_calc > 3 */
     'SELECT city, amt FROM t ORDER BY 3',                          /* no third item */
   ];
   parseRefused.forEach(sqlError);
+  /* UPPER was dropped and a + b > 3 became a_calc > 3; both are now a helper column
+     computed before the filter and dropped after it */
+  {
+    const db = new DatabaseSync(':memory:');
+    db.exec("CREATE TABLE w(name TEXT, a INTEGER, b INTEGER); INSERT INTO w VALUES ('a',1,1),('A',2,5),(NULL,4,0);");
+    for (const sql of ["SELECT name, a FROM w WHERE UPPER(name) = 'A'", 'SELECT name FROM w WHERE a + b > 3']) {
+      const generated = roundTrip(sql);
+      assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()), sql);
+    }
+    db.close();
+  }
   /* once refused because the count existed only in HAVING; now counted in a hidden
      column, filtered, and dropped again — the result has only city */
   const db = new DatabaseSync(':memory:');
@@ -2480,14 +2489,29 @@ test('filter inspector: column, fixed value and date modes survive grouping', ()
 /* Dynamic dates and expressions cannot be represented faithfully by either new
    operand mode. Invalid calendar dates and nontrivial lists must fail explicitly. */
 test('filter refusal: dynamic dates, arithmetic and nontrivial date lists', () => {
-  for(const rhs of ['CURRENT_DATE','NOW()','GETDATE()','SYSDATE','amt * 2','UPPER(cost)',"DATE '2026-01-01' + 1", "CAST(cost AS DATE)"])
-    assert.match(sqlError('SELECT * FROM t WHERE sale_date >= '+rhs).msg, /函式|日期|算式/);
+  /* a computed right side (today, amt * 2) is now a helper column the filter compares
+     against, then dropped; SELECT * needs the table's columns to drop it exactly */
+  const known = {t:{label:'', cols:['sale_date','amt','cost'].map(name=>({name})), rows:[]}};
+  const db = new DatabaseSync(':memory:');
+  db.exec("CREATE TABLE t(sale_date TEXT, amt INTEGER, cost TEXT); INSERT INTO t VALUES ('2000-01-01', 3, '5'), ('2999-01-01', 1, 'x'), (NULL, 2, '2');");
+  for(const rhs of ['CURRENT_DATE','NOW()','GETDATE()','SYSDATE','amt * 2','UPPER(cost)','CAST(cost AS DATE)']){
+    const app = loadApp(); app.state.dialect = 'postgres'; app.state.schema = known;
+    const sql = 'SELECT * FROM t WHERE sale_date >= '+rhs;
+    graphFromSQL(app, sql);
+    const generated = app.buildSQL();
+    assert.match(generated, /AS cond_value[\s\S]*WHERE sale_date >= cond_value[\s\S]*SELECT sale_date,\s*amt,\s*cost/, rhs);
+    if(['CURRENT_DATE','amt * 2','UPPER(cost)'].includes(rhs))
+      assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()), rhs);
+  }
+  assert.match(graphError("SELECT * FROM nowhere WHERE d >= CURRENT_DATE").msg, /CREATE TABLE/);
+  assert.match(graphError("SELECT * FROM t WHERE sale_date >= DATE '2026-01-01' + 1").msg, /函式|日期|算式/);
+  db.close();
   for(const bad of ['2026-02-30','2025-02-29','2026-1-01','0000-01-01','2026-13-01','not-a-date']){
     assert.match(sqlError("SELECT * FROM t WHERE sale_date = DATE '"+bad+"'").msg, /YYYY-MM-DD/);
     assert.match(sqlError("SELECT * FROM t WHERE sale_date = CAST('"+bad+"' AS DATE)").msg, /YYYY-MM-DD/);
   }
   graphFromSQL(api, "SELECT * FROM t WHERE sale_date = DATE '2024-02-29'");
-  for(const condition of ["sale_date IN (DATE '2026-01-01', '2026-02-01')", "sale_date IN (DATE '2026-01-01', NULL)", 'sale_date IN (cost)', 'sale_date BETWEEN cost AND amt', 'sale_date IN (amt * 2)', "sale_date BETWEEN DATE '2026-01-01' AND NULL", "UPPER(sale_date) = DATE '2026-01-01'", "amt * 2 > cost"])
+  for(const condition of ["sale_date IN (DATE '2026-01-01', '2026-02-01')", "sale_date IN (DATE '2026-01-01', NULL)", 'sale_date IN (cost)', 'sale_date BETWEEN cost AND amt', 'sale_date IN (amt * 2)', "sale_date BETWEEN DATE '2026-01-01' AND NULL"])
     sqlError('SELECT * FROM t WHERE '+condition);
   const app = loadApp();
   app.state.schema = {a:{cols:['id','price'].map(name=>({name})),rows:[]},b:{cols:['id','cost'].map(name=>({name})),rows:[]}};
@@ -3167,6 +3191,23 @@ test('post-aggregate expressions: hidden aggregates, exact columns, no double co
   assert.doesNotMatch(twice.split('picked AS')[1], /agg_value/, 'helpers are dropped before the result');
   db.close();
   return '4 shapes exact in SQLite and round-trip; shared COUNT(*); helpers dropped';
+});
+
+/* order_date >= CURRENT_DATE - INTERVAL '30 days' was refused. It imports now, but
+   the sample cannot know today's date: the preview must not pretend to filter (rule 4)
+   — rows it cannot judge stay, and the step says why. */
+test('today / INTERVAL: kept as written; the preview admits it cannot judge', () => {
+  const app = loadApp(); app.state.dialect = 'postgres';
+  const sql = "SELECT id FROM o WHERE order_date >= CURRENT_DATE - INTERVAL '30 days'";
+  const g = graphFromSQL(app, sql);
+  installGraph(app, g, {o:{label:'', cols:[{name:'id'}, {name:'order_date'}], rows:[[1, '2020-01-01'], [2, '2099-01-01']]}});
+  assert.match(app.buildSQL(), /CURRENT_DATE - INTERVAL '30 days' AS cond_value[\s\S]*WHERE order_date >= cond_value/);
+  roundTrip(sql);
+  roundTrip("SELECT id FROM o WHERE d < SYSDATE - INTERVAL '7' DAY");
+  assert.equal(app.evalNode(g.nodes.find(n => n.type === 'output')).rows.length, 2, 'nothing dropped on a guess');
+  app.state.steps = app.buildSteps();
+  assert.match(app.state.steps.find(s => s.title === 'WHERE').cap, /算不出要比的值/);
+  return 'SQL kept; both sample rows kept; step explains';
 });
 
 let passed = 0;

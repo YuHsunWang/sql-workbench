@@ -107,6 +107,13 @@ agg_post: i => `SELECT ${i%2?'customer_id, ':''}${pick([`ROUND(AVG(amount), ${i%
   '100.0 * SUM(qty) / SUM(amount)', 'ROUND(AVG(amount * qty), 1)', 'COUNT(*) * 2 + 1'])} AS v${i%3?', COUNT(*) AS n':''} FROM orders${i%2?' GROUP BY customer_id':''}${i%4===1?' HAVING SUM(amount) > 10':''}${i%2?' ORDER BY customer_id':''}`,
 // An aggregate used only in HAVING was refused; it is counted in a hidden column, filtered, then dropped.
 having_only: i => `SELECT customer_id FROM orders GROUP BY customer_id HAVING ${pick(['COUNT(*) > 1','SUM(amount) >= 30','MAX(qty) < 3','COUNT(DISTINCT status) > 1','AVG(amount) > 15 OR COUNT(*) = 1'])}`,
+// UPPER(x) = 'A' and a + b > 3 were refused (UPPER used to be dropped); a helper column is computed, filtered on, dropped.
+where_expr: i => `SELECT id, status FROM orders WHERE ${pick(["COALESCE(status, 'new') = 'new'", 'amount + qty > 20', "LOWER(status) LIKE 'p%'", 'amount * 2 >= qty * 10',
+  'LENGTH(note) IS NULL', "UPPER(COALESCE(note, '')) <> 'RUSH'", 'amount > qty * 5 OR COALESCE(qty, 0) = 0', 'id <= amount / 10.0', '(amount - qty >= 10)'])}${i%2?' ORDER BY id':''}`,
+// SELECT * keeps exactly the table's columns: the helper is dropped by an explicit column list.
+where_star_expr: i => `SELECT *${i%2?', amount * 2 AS d':''} FROM orders WHERE ${pick(['amount + qty > 20', "COALESCE(status, 'x') <> 'void'", 'qty * 10 < amount'])}`,
+// HAVING over an expression of aggregates.
+having_expr: i => `SELECT customer_id${i%2?', COUNT(*) AS n':''} FROM orders GROUP BY customer_id HAVING ${pick(['MAX(amount) - MIN(amount) > 5','SUM(amount) * 1.0 / COUNT(*) >= 20','COALESCE(SUM(qty), 0) > 2','COUNT(*) > AVG(qty)'])}`,
 // A column that is neither grouped nor aggregated inside such an expression cannot be rebuilt and must be refused.
 unsupported_post_stray: i => `SELECT customer_id, COUNT(*) + ${pick(['qty','amount'])} AS n FROM orders GROUP BY customer_id`,
 unsupported_aggregate_collision: i => `SELECT SUM(CASE WHEN qty > ${i%3} THEN amount END)${i%2?' AS n':''}, SUM(CASE WHEN qty = 0 THEN amount END)${i%2?' AS n':''} FROM orders`,
@@ -129,7 +136,7 @@ function diff(a,b) {
 const norm = sql => sql.replace(/\s+/g,' ').trim().replace(/;$/,'');
 const counts = {total:0,identical_result:0,different_result:0,regenerated_sql_fails:0,parse_unsupported:0,textual_identical:0};
 const unsupported = {}, classes = new Map(), inputs = new Set();
-const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_') || ['agg_arith','group_expression','count_literal','expr_nested','agg_expr','decimal_division','agg_post','having_only'].includes(k)));
+const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_') || ['agg_arith','group_expression','count_literal','expr_nested','agg_expr','decimal_division','agg_post','having_only','where_expr','where_star_expr','having_expr'].includes(k)));
 const mustRefuse = {
   unsupported_aggregate_order:/ORDER BY.*SELECT/,
   unsupported_case_group:/GROUP BY.*CASE/,

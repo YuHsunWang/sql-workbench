@@ -1261,6 +1261,8 @@ function condTest(n, cols){
   if(n.valCol && j < 0) return () => false;
   if(n.valDate || n.valCol) return r => {
     let left = r[i], right = n.valCol ? r[j] : n.val;
+    /* 比的是示意資料算不出來的值（CURRENT_DATE…）：判斷不了就先留著，逐步檢視會說明 */
+    if(left === BY_DB || right === BY_DB) return true;
     if(left == null || right == null) return false;
     if(n.valDate){
       if(!dateValues(n).every(validDate)) return false;
@@ -1275,7 +1277,12 @@ function condTest(n, cols){
     }
     return cmp(left, n.op, right);
   };
-  return r => cmp(r[i], n.op, n.val);
+  return r => r[i] === BY_DB ? true : cmp(r[i], n.op, n.val);
+}
+/* 這塊篩選有沒有哪一列是「判斷不了、先留著」 */
+function filterUnknown(n, S){
+  const idx = c => S.cols.indexOf(c);
+  return condLeaves(n).some(c=>S.rows.some(r=>r[idx(c.col)] === BY_DB || (c.valCol && r[idx(c.val)] === BY_DB)));
 }
 /* 給畫面看的條件文字，a >= 1 AND (b = 2 OR c = 3) 這種寫法 */
 function condText(n){
@@ -1751,6 +1758,9 @@ function fnCallSQL(n){
    UPPER(TRIM(name))、first || ' ' || last 這種多層的，存成一棵乾淨的樹（只有欄名、
    常值、運算、函式名，沒有表別名和原文位置），SQL 從樹重新寫出來 —— 所以
    o.qty 這種別名不會被原樣抄進沒有 o 的 CTE 裡。 */
+const EXPR_KINDS = ['col','call','arith','concat','kw','interval'];
+const NOW_WORDS = ['CURRENT_DATE','CURRENT_TIMESTAMP','CURRENT_TIME','SYSDATE','SYSTIMESTAMP','LOCALTIMESTAMP'];
+const INTERVAL_UNITS = ['YEAR','QUARTER','MONTH','WEEK','DAY','HOUR','MINUTE','SECOND','YEARS','MONTHS','WEEKS','DAYS','HOURS','MINUTES','SECONDS'];
 const KW_ARG_FNS = {DATEADD:1, DATEDIFF:1, DATEPART:1, DATENAME:1, DATETRUNC:1, CONVERT:1, TRY_CONVERT:1};
 const SAFE_TYPE = /^[A-Za-z_][A-Za-z0-9_ ]*(\(\s*\d+\s*(,\s*\d+\s*)?\))?$/;
 function exprCols(t){
@@ -1766,6 +1776,7 @@ function exprSQL(t){
   switch(t.kind){
     case 'col':  return q(t.col);
     case 'kw':   return t.v;
+    case 'interval': return 'INTERVAL '+(typeof t.v === 'number' ? String(t.v) : strLit(t.v))+(t.unit ? ' '+t.unit : '');
     case 'lit':  return t.v === null ? 'NULL' : typeof t.v === 'number' ? decText(t.v, t.dec) : strLit(t.v);
     case 'arith':return wrapExpr(t.a)+' '+t.op+' '+wrapExpr(t.b);
     case 'concat': {
@@ -1858,6 +1869,8 @@ function cleanExpr(e){
   const refuse = msg => { throw {sqlErr:true, msg:msg, pos:Number.isInteger(e.p) ? e.p : 0}; };
   switch(e.kind){
     case 'col':  return {kind:'col', col:e.col};
+    case 'kw':   if(NOW_WORDS.indexOf(e.v) < 0 && !/^[A-Za-z_]\w*$/.test(e.v)) refuse('看不懂 '+e.v); return {kind:'kw', v:e.v};
+    case 'interval': return e.unit ? {kind:'interval', v:e.v, unit:e.unit} : {kind:'interval', v:e.v};
     case 'lit':  return e.dec ? {kind:'lit', v:e.v, dec:true} : {kind:'lit', v:e.v};
     case 'arith':return {kind:'arith', op:e.op, a:cleanExpr(e.a), b:cleanExpr(e.b)};
     case 'concat': return {kind:'concat', a:cleanExpr(e.a), b:cleanExpr(e.b)};
@@ -3850,7 +3863,8 @@ function buildSteps(){
               : isOrFilter(n)
               ? '只留下 <code>'+esc(condText(n))+'</code> 的列 —— <code>OR</code> 是<strong>任何一邊成立</strong>就留下，其他丟掉。'
               : '只留下 '+opWords(n)+' 的列，其他丟掉。')+
-            (s0 && s0.type === 'groupby' ? '<br>接在 GROUP BY 後面時，這其實就是 <code>HAVING</code> 在做的事。' : ''),
+            (s0 && s0.type === 'groupby' ? '<br>接在 GROUP BY 後面時，這其實就是 <code>HAVING</code> 在做的事。' : '')+
+            (filterUnknown(n, S) ? '<br><strong>示意資料算不出要比的值</strong>（像 CURRENT_DATE），判斷不了的列先全部留著 —— 實際留下哪幾列要看資料庫。' : ''),
         render: box => {
           /* 跟前後的篩選一起看：這串 AND 走到這一關，交集剩多少 */
           const addAnd = () => {
@@ -4400,6 +4414,7 @@ function validSnapshot(s){
       /* 這幾個會原樣寫進 SQL：函式名、關鍵字參數只能是識別字，型別只能是 DECIMAL(10,2) 這種 */
       else if(key === 'fn' || (key === 'v' && parent && parent.kind === 'kw')){ if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(o)) ok = false; }
       else if(key === 'castType'){ if(!SAFE_TYPE.test(o)) ok = false; }
+      else if(key === 'unit'){ if(INTERVAL_UNITS.indexOf(o) < 0) ok = false; }
       else if(/[<"]/.test(o) && !inRows && !(parent && !Array.isArray(parent) && valueOK(key, parent))) ok = false;
       return;
     }
@@ -4769,8 +4784,19 @@ function parseSQLText(text){
       if(!validDate(v)) fail('日期必須是有效的 YYYY-MM-DD', t);
       return {kind:'date', v:v, p:t.p};
     }
-    if(t.t === 'word' && !t.quoted && ['CURRENT_DATE','SYSDATE'].indexOf(t.v.toUpperCase()) >= 0)
-      fail('條件不支援目前日期或時間函式，請改用固定日期', t);
+    /* 今天、現在：示意資料算不出來，但 SQL 照原樣寫回去 */
+    if(t.t === 'word' && !t.quoted && NOW_WORDS.indexOf(t.v.toUpperCase()) >= 0 && !isOp('(',1)){
+      p++; return {kind:'kw', v:t.v.toUpperCase(), p:t.p};
+    }
+    /* INTERVAL '30 days'（PostgreSQL）、INTERVAL '30' DAY、INTERVAL 30 DAY（MySQL / Oracle） */
+    if(isKw('INTERVAL') && (at(1).t === 'str' || at(1).t === 'num')){
+      p++;
+      const v = take(), iv = {kind:'interval', v:v.t === 'num' ? Number(v.v) : v.v, p:t.p};
+      const u = up(at());
+      if(u && INTERVAL_UNITS.indexOf(u) >= 0){ p++; iv.unit = u; }
+      if(typeof iv.v === 'string' && !/^[0-9A-Za-z :.\-]+$/.test(iv.v)) fail('看不懂這個 INTERVAL 的寫法', t);
+      return iv;
+    }
     if(isKw('FROM')) fail('SELECT 後面需要欄位或算式');
     if(isKw('CASE')) return parseCase();
     /* 2.0 讀成數字會變成 2：qty / 2.0 寫回去成了 qty / 2，在 PostgreSQL、SQL Server
@@ -4950,8 +4976,11 @@ function parseSQLText(text){
         if(!validDate(e.args[0].v)) fail('日期必須是有效的 YYYY-MM-DD', t0);
         return {kind:'date', v:e.args[0].v, p:e.p};
       }
+      /* 比較的右邊可以是算式（CURRENT_DATE - INTERVAL '30 days'、price * 0.9）：
+         建圖時先算成一欄再比 */
+      if(column && EXPR_KINDS.indexOf(e.kind) >= 0 && e.kind !== 'col') return e;
       if(e.kind !== 'lit' && e.kind !== 'date' && !(column && e.kind === 'col'))
-        fail('條件右邊只支援固定值、固定日期或單一欄位，不能使用函式、目前日期或算式', t0);
+        fail('BETWEEN / IN 的值只支援固定值或固定日期，不能使用函式、目前日期或算式', t0);
       return e;
     };
     if(c.kind === 'cmp') c.right = value(c.right, true);
@@ -4965,10 +4994,14 @@ function parseSQLText(text){
         fail('日期 IN 清單目前只能全部使用固定日期，不能混合其他型別', t0);
     }
     if(c.kind === 'like' && c.pat.kind !== 'lit') fail('LIKE 右邊只能是固定文字，不能使用日期、欄位、函式或算式', t0);
-    /* 左邊包了函式或算式的話，步驟只記得裡面的欄名，UPPER() 這種會被默默丟掉 */
+    /* 左邊包了函式或算式（UPPER(name) = 'A'、YEAR(d) = 2024、a + b > 3）：以前會被擋，
+       因為步驟只記得欄名、UPPER 會被默默丟掉。現在建圖時先算成一欄（cond_value）再篩 */
     const l = c.left;
-    if(l.kind !== 'col' && !(inHaving && l.kind === 'call' && AGG_FNS.indexOf(l.fn) >= 0))
-      fail('條件左邊目前只能是欄位'+(inHaving ? '或 SUM(x) 這種彙總' : '')+'，不能包函式或算式', t0);
+    if(EXPR_KINDS.indexOf(l.kind) < 0)
+      fail('條件左邊目前只能是欄位、函式或算式，不能是 CASE 或子查詢', t0);
+    if(!inHaving && (function agg(e){ return !!e && typeof e === 'object' &&
+        ((e.kind === 'call' && AGG_FNS.indexOf(e.fn) >= 0) || ['a','b'].some(k=>agg(e[k])) || (e.args || []).some(agg)); })(l))
+      fail('WHERE 裡不能用彙總；要篩彙總結果請寫在 HAVING', t0);
     return c;
   }
   function parseConds(){
@@ -5028,6 +5061,7 @@ function exprName(e){
   if(e.kind === 'window') return e.fn.toLowerCase();
   if(e.kind === 'arith') return exprName(e.a) + '_calc';
   if(e.kind === 'concat') return exprName(e.a) + '_text';
+  if(e.kind === 'kw') return e.v.toLowerCase();
   if(e.kind === 'case') return 'label';
   return 'expr';
 }
@@ -5334,7 +5368,7 @@ function astToGraph(parsed){
       const n = add('semijoin', {form:w.form, keys:w.keys});
       conn(cur,n,0); conn(right,n,1); cur=n;
     });
-    condBlocks(c.where.filter(w=>w.kind !== 'semi')).forEach(spec=>{ const f = add('filter', spec); conn(cur, f); cur = f; });
+    /* （WHERE 的篩選步驟在下面，要先有 appendDerive 才能替算式條件建輔助欄） */
 
     /* SELECT 清單裡算出來的欄位：CASE 和四則運算在 GROUP BY 之前，視窗函數在之後 */
     const windows = [];
@@ -5439,6 +5473,30 @@ function astToGraph(parsed){
       if(e.args) out.args = e.args.map(liftAggs);
       return out;
     };
+
+    /* 條件的左邊或右邊是算式：先用「算欄位」算成一欄（cond_value），篩選再看那一欄。
+       這些輔助欄最後由「選欄位」拿掉，結果的欄位跟原本一模一樣 */
+    const helpers = [];
+    const helperFor = (e, base) => {
+      let as = base, suffix = 2;
+      while(usedCols.has(as.toLowerCase())) as = base + '_' + (suffix++);
+      appendDerive(e, as);
+      helpers.push(as);
+      return {kind:'col', col:as, p:e.p};
+    };
+    const isPlainCol = e => e.kind === 'col';
+    const colsAtWhere = cols ? cols.slice() : null;
+    (function lift(list){
+      list.forEach(x=>{
+        if(x.kind === 'or'){ x.branches.forEach(lift); return; }
+        if(x.kind === 'semi') return;
+        if(x.left && !isPlainCol(x.left)) x.left = helperFor(x.left, 'cond_value');
+        if(x.kind === 'cmp' && x.right && EXPR_KINDS.indexOf(x.right.kind) >= 0 && !isPlainCol(x.right))
+          x.right = helperFor(x.right, 'cond_value');
+      });
+    })(c.where);
+    condBlocks(c.where.filter(w=>w.kind !== 'semi')).forEach(spec=>{ const f = add('filter', spec); conn(cur, f); cur = f; });
+
     c.items.forEach(it=>{
       if(it.kind !== 'expr') return;
       const e = it.expr;
@@ -5465,7 +5523,7 @@ function astToGraph(parsed){
         while(usedCols.has(alias.toLowerCase())) alias = 'calc_value_' + (suffix++);
         appendDerive(e.args[0], alias);
         caseCols.set(it, alias);
-      } else if(e.kind === 'arith' || e.kind === 'concat'){
+      } else if(e.kind === 'arith' || e.kind === 'concat' || e.kind === 'kw' || e.kind === 'interval'){
         appendDerive(e, it.alias || exprName(e));
       } else if(e.kind === 'lit'){
         const n = add('derive', {literal:e.v, as:it.alias || exprName(e)});
@@ -5480,10 +5538,17 @@ function astToGraph(parsed){
 
     /* 只寫在 HAVING 的彙總（HAVING SUM(amount) > 10，SELECT 裡沒有 SUM）也藏一欄來算，
        篩完再由「選欄位」拿掉。以前會直接擋下 */
+    /* HAVING MAX(a) - MIN(a) > 5：左右邊是包著彙總的算式 —— 彙總先藏一欄，
+       GROUP BY 之後再算成 having_value 來篩 */
+    const havingLater = [];
+    const isAggCall = e => e && e.kind === 'call' && AGG_FNS.indexOf(e.fn) >= 0;
     (function liftHaving(list){
       list.forEach(x=>{
         if(x.kind === 'or') x.branches.forEach(liftHaving);
-        else if(x.left && x.left.kind === 'call' && AGG_FNS.indexOf(x.left.fn) >= 0) liftAggs(x.left);
+        else if(isAggCall(x.left)) liftAggs(x.left);
+        else if(x.left && x.left.kind !== 'col') havingLater.push({x:x, side:'left', tree:liftAggs(x.left)});
+        if(x.kind === 'cmp' && x.right && EXPR_KINDS.indexOf(x.right.kind) >= 0 && x.right.kind !== 'col')
+          havingLater.push({x:x, side:'right', tree:liftAggs(x.right)});
       });
     })(c.having);
 
@@ -5534,6 +5599,11 @@ function astToGraph(parsed){
         aggAliases[aggKey(it.expr)] = it.alias || exprName(it.expr);
     });
     hidden.forEach(h=>{ if(!aggAliases[h.key]) aggAliases[h.key] = h.as; });
+    havingLater.forEach(h=>{
+      const stray = exprCols(cleanExpr(h.tree)).find(col=>(cols || []).indexOf(col) < 0);
+      if(stray) throw {sqlErr:true, msg:'HAVING 裡的 '+stray+' 不在 GROUP BY 裡，也不是彙總，目前做不出對應的步驟', pos:h.tree.p || 0};
+      h.x[h.side] = helperFor(h.tree, 'having_value');
+    });
     condBlocks(c.having, aggAliases).forEach(spec=>{ const f = add('filter', spec); conn(cur, f); cur = f; });
 
     postItems.forEach(x=>{
@@ -5563,7 +5633,25 @@ function astToGraph(parsed){
        少了這塊，反解出來的 SQL 會變成整張表抓 —— 原本只要 4 欄的查詢會拖回 40 欄。
        彙總通常已經只吐 key + 聚合欄；新彙總若改了順序或 key 別名，仍要補選欄位。 */
     const hasStar = c.items.some(it=>it.kind === 'star');
-    if(!hasStar && ((!c.groupBy.length && !aggs.length) || caseCols.size || postItems.length || hidden.length || aggs.some(a=>a.fn === 'COUNT_DISTINCT'))){
+    /* SELECT * 又有條件輔助欄：要把 * 展開成真正的欄位清單才拿得掉輔助欄，
+       所以得知道來源有哪些欄位；不知道就擋下，不然結果會少欄或多一欄 cond_value */
+    if(hasStar && helpers.length && !c.groupBy.length && !aggs.length){
+      if(!colsAtWhere || !colsKnown)
+        throw {sqlErr:true, msg:'SELECT * 搭配條件裡的函式或算式，要先知道資料表有哪些欄位 —— 請在左邊「資料表」貼上 CREATE TABLE', pos:0};
+      const keep = [], outCols = [];
+      c.items.forEach(it=>{
+        if(it.kind === 'star') colsAtWhere.forEach(col=>{ keep.push(col); outCols.push(col); });
+        else if(it.kind === 'expr'){
+          const source = it.expr.kind === 'col' ? exprName(it.expr) : (it.alias || exprName(it.expr));
+          keep.push(source); outCols.push(it.alias || source);
+        }
+      });
+      const pk = add('select', {cols:keep});
+      if(!sameCols(keep, outCols)) pk.outCols = outCols;
+      conn(cur, pk); cur = pk;
+      cols = outCols;
+    }
+    else if(!hasStar && ((!c.groupBy.length && !aggs.length) || caseCols.size || postItems.length || hidden.length || havingLater.length || aggs.some(a=>a.fn === 'COUNT_DISTINCT'))){
       const keep = [], outCols = [];
       c.items.forEach(it=>{
         if(it.kind !== 'expr') return;
