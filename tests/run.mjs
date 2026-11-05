@@ -335,6 +335,102 @@ test('regression: imports never swap a function, drop a layer or invent a column
   return `${refused.length + refusedAtBuild.length} shapes refused; SUM(a*b), GROUP BY expr, COUNT(1), NOW() exact in SQLite`;
 });
 
+/* One CTE per step is easy to match against the canvas but too long to paste back
+   into a project (issue #3). The compact format folds steps into one SELECT, but must
+   never fold across what changes the meaning: a filter after a window function, after
+   GROUP BY or after LIMIT stays a separate level. Each level still maps to its steps. */
+test('format: compact folds what it can and keeps every step linked', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE t(id INTEGER, g TEXT, v INTEGER); INSERT INTO t VALUES (1,'a',5),(2,'a',7),(3,'b',2),(4,'b',9),(5,'c',NULL);`);
+  const rows = sql => json(db.prepare(sql).all().map(r => Object.values(r)));
+  const app = loadApp();
+  app.document.getElementById('ddl').value = 'CREATE TABLE t (id INT, g TEXT, v INT);';
+  app.document.getElementById('btn-parse').listeners.click();
+  const compact = (sql, dialect = 'postgres') => { app.state.dialect = dialect; graphFromSQL(app, sql); return app.buildCompactSQL(); };
+  /* filter + new column + pick + sort + limit: one SELECT, no WITH */
+  const one = compact("SELECT id, v * 2 AS d FROM t WHERE g <> 'c' AND v > 1 ORDER BY d DESC LIMIT 3");
+  assert.doesNotMatch(one, /WITH/);
+  assert.match(one, /SELECT id,\s+v \* 2 AS d\s+FROM t\s+WHERE g <> 'c'\s+AND v > 1\s+ORDER BY \(v \* 2\) DESC\s+LIMIT 3;/);
+  assert.deepEqual(rows(one), rows("SELECT id, v * 2 AS d FROM t WHERE g <> 'c' AND v > 1 ORDER BY d DESC LIMIT 3"));
+  /* every step is in exactly one level */
+  const linked = Object.values(app.state.sqlSegs).flat();
+  for (const n of app.state.nodes.filter(n => n.type !== 'table')) assert.ok(linked.includes(n.id), n.type);
+  /* a filter on a window result, after GROUP BY and after LIMIT is never folded into the WHERE before it */
+  for (const sql of [
+    'SELECT * FROM (SELECT id, g, ROW_NUMBER() OVER (PARTITION BY g ORDER BY v DESC) AS rk FROM t) x WHERE rk = 1',
+    'SELECT * FROM (SELECT id, g, v, RANK() OVER (ORDER BY v) AS r FROM t) x WHERE g = \'a\'',
+    'SELECT * FROM (SELECT g, SUM(v) AS s FROM t GROUP BY g) x WHERE s > 7',
+    'SELECT * FROM (SELECT id, v FROM t ORDER BY v DESC LIMIT 3) x WHERE v > 5',
+  ]) {
+    const out = compact(sql);
+    assert.match(out, /WITH /, sql);
+    assert.deepEqual(rows(out).sort(), rows(sql).sort(), out);
+  }
+  /* dialects: TOP for SQL Server, FETCH FIRST and an alias for SELECT src.* in Oracle */
+  assert.match(compact('SELECT * FROM t ORDER BY v DESC LIMIT 2', 'mssql'), /SELECT TOP 2 \*\s+FROM t\s+ORDER BY v DESC;/);
+  assert.match(compact('SELECT id, v + 1 AS w FROM t ORDER BY id LIMIT 2', 'oracle'), /FROM t src[\s\S]*FETCH FIRST 2 ROWS ONLY;/);
+  assert.match(compact('SELECT *, v + 1 AS w FROM t', 'oracle'), /SELECT src\.\*,\s+v \+ 1 AS w\s+FROM t src;/);
+  /* the format picker switches what the SQL panel shows and copies */
+  app.state.dialect = 'postgres';
+  graphFromSQL(app, "SELECT id FROM t WHERE g = 'a' ORDER BY id");
+  const pick = app.document.getElementById('sqlfmt');
+  pick.value = 'compact'; pick.listeners.change();
+  assert.doesNotMatch(app.document.getElementById('sql').innerHTML, /WITH/);
+  assert.match(app.document.getElementById('fmt-note').innerHTML, /摺成同一層/);
+  pick.value = 'cte'; pick.listeners.change();
+  assert.match(app.document.getElementById('sql').innerHTML, /WITH/);
+  return 'one-level fold exact in SQLite; window, GROUP BY and LIMIT boundaries kept; TOP / FETCH / src.*';
+});
+
+/* Pipe syntax (BigQuery) is one step per line, so each line links to its step. The
+   fuzz suite checks it by turning each operator back into a nested SELECT; here the
+   shape: a projection that drops the sort key comes after ORDER BY / LIMIT, and a
+   LEFT JOIN with no condition (a scalar subquery) is ON TRUE, never CROSS JOIN. */
+test('format: pipe syntax is one step per line', () => {
+  const app = loadApp();
+  app.state.dialect = 'postgres';
+  graphFromSQL(app, "SELECT o.id, c.city FROM orders o JOIN customers c ON o.cid = c.id WHERE o.amount > 10 ORDER BY c.id DESC LIMIT 3");
+  const pipe = app.buildPipeSQL();
+  assert.match(pipe, /^FROM orders\n\|> AS a\n\|> INNER JOIN customers AS b ON a\.cid = b\.id\n\|> SELECT a\.\*, b\.city\n\|> WHERE amount > 10\n\|> ORDER BY cid DESC\n\|> LIMIT 3\n\|> SELECT id, city;$/m);
+  assert.equal(app.state.dialect, 'postgres', 'the chosen dialect is left alone');
+  app.state.fmt = 'pipe';
+  const html = app.sqlHTML(app.shownSQL());
+  const lines = [...html.matchAll(/data-seg="(@\d+)"/g)].map(m => app.state.sqlSegs[m[1]][0]);
+  for (const n of app.state.nodes.filter(n => !['table', 'output'].includes(n.type))) assert.ok(lines.includes(n.id), n.type);
+  graphFromSQL(app, 'SELECT id, (SELECT MAX(v) FROM t WHERE v > 100) AS m FROM orders');
+  assert.match(app.buildPipeSQL(), /LEFT JOIN \(\n[\s\S]*\) AS b ON TRUE/);
+  assert.match(app.buildPipeSQL(), /\|> AGGREGATE MAX\(v\) AS sub_value/);
+  return 'JOIN, WHERE, ORDER BY, LIMIT then SELECT; every step on a line; scalar subquery ON TRUE';
+});
+
+/* After editing the steps the user could not tell what changed against the SQL the
+   AI wrote (issue #3). Both versions are written in the compact format, one clause
+   per line, and compared line by line; each changed line names the step it came from.
+   The pasted SQL is shown too — escaped, it is pasted text. */
+test('diff: an edit shows as changed lines credited to its step', () => {
+  const app = loadApp();
+  app.state.dialect = 'postgres';
+  app.document.getElementById('sqlin').value = "SELECT id, amount FROM orders WHERE status = 'paid' ORDER BY amount DESC";
+  app.document.getElementById('do-parse').listeners.click();
+  let r = app.diffReport();
+  assert.equal(r.changed, 0);
+  assert.equal(app.document.getElementById('diffbox').hidden, false);
+  assert.match(app.document.getElementById('diff').innerHTML, /意思沒變/);
+  const filter = app.state.nodes.find(n => n.type === 'filter');
+  filter.note = '只看付款';
+  app.state.sel = filter.id;
+  app.document.getElementById('inspector').listeners.change({target: {dataset: {f: 'val'}, value: 'new'}});
+  r = app.diffReport();
+  assert.ok(r.ops.some(o => o.op === '-' && /'paid'/.test(o.text)) && r.ops.some(o => o.op === '+' && /'new'/.test(o.text)));
+  assert.deepEqual(json(r.steps.map(n => n.id)), [filter.id]);
+  assert.match(app.document.getElementById('diff').innerHTML, /WHERE「只看付款」/);
+  /* the pasted text and the lines are escaped */
+  app.document.getElementById('sqlin').value = `SELECT id FROM orders WHERE status = '"><img src=x onerror=alert(1)>'`;
+  app.document.getElementById('do-parse').listeners.click();
+  assert.doesNotMatch(app.document.getElementById('diff').innerHTML, /<img/);
+  return 'unchanged says so; edited value shows -/+ lines credited to WHERE「只看付款」 only; pasted SQL escaped';
+});
+
 /* Column descriptions were thrown away: users saw stu_nm, not 學生姓名 (issue #4).
    MySQL COMMENT, PostgreSQL COMMENT ON and SQL Server sp_addextendedproperty all
    become the column's label — shown beside the name, never written into the SQL.

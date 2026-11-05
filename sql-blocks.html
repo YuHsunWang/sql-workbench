@@ -249,6 +249,11 @@ details.imp summary::-webkit-details-marker{display:none}
 details.imp summary::before{content:"▸";transition:transform .15s;display:inline-block}
 details.imp[open] summary::before{transform:rotate(90deg)}
 details.sub-imp{margin-top:8px}
+.diffpre{margin:6px 0;padding:8px;max-height:320px;overflow:auto;white-space:pre;font-family:var(--mono);font-size:11px;line-height:1.55;
+  background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--ink)}
+.diffpre .dadd{color:var(--accent-ink);background:var(--accent-soft)}
+.diffpre .ddel{color:var(--drop);text-decoration:line-through}
+.diffpre .deq{color:var(--ink-3)}
 details.sub-imp summary{cursor:pointer;font-size:11.5px;color:var(--ink-2)}
 .info-sql{margin:6px 0;padding:8px;max-height:180px;overflow:auto;white-space:pre;
   font-family:var(--mono);font-size:10.5px;line-height:1.5;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--ink)}
@@ -701,8 +706,18 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
           <option value="mssql">SQL Server</option>
           <option value="oracle">Oracle</option>
         </select>
+        <select id="sqlfmt" aria-label="SQL 格式">
+          <option value="cte">一步一段</option>
+          <option value="compact">精簡</option>
+          <option value="pipe">pipe（BigQuery）</option>
+        </select>
       </div>
       <pre class="sqlbox" id="sql"></pre>
+      <p class="dnote" id="fmt-note" hidden></p>
+      <details class="imp diffbox" id="diffbox" hidden>
+        <summary>跟原本貼的 SQL 比一比</summary>
+        <div id="diff"></div>
+      </details>
       <div class="dopt"><label><input type="checkbox" id="quote-all"> 識別字一律加引號（貼進挑剔的工具時比較保險）</label></div>
       <p class="dnote" id="dnote"></p>
       <div class="lint" id="lint"></div>
@@ -1542,8 +1557,12 @@ const isNum = v => numish(v) !== null;
 const strLit = v => "'"+String(v).replace(/\\/g, state.dialect === 'mysql' ? '\\\\' : '\\').replace(/'/g,"''")+"'";
 const lit = v => isNum(v) ? String(numish(v)) : strLit(v);
 const sqlLit = (v, str) => v === null ? 'NULL' : str ? strLit(v) : lit(v);
+/* 欄位參照（不是新欄名）：平常就是 q(名字)；精簡格式把好幾步併成一層時，
+   換成那一層裡真正的寫法（JOIN 後的 b.x、前面算好的式子） */
+let colHook = null;
+const qc = name => colHook ? colHook(name) : q(name);
 function operand(v, cols){
-  if(cols.indexOf(v) >= 0) return q(v);
+  if(cols.indexOf(v) >= 0) return qc(v);
   /* 2.0 原樣保留：寫成 '2.0' 是字串，寫成 2 是整數除法 —— 都不是使用者填的意思 */
   if(/^-?\d+\.\d+$/.test(String(v).trim())) return String(v).trim();
   return isNum(v) ? String(Number(v)) : lit(v);
@@ -1563,23 +1582,23 @@ function condSQL(n){
     const s = b.map(t=>isOrFilter(t) ? '('+condSQL(t)+')' : condSQL(t)).join(' AND ');
     return b.length > 1 && n.any.length > 1 ? '('+s+')' : s;
   }).join(' OR ');
-  if(!needsVal(n.op)) return q(n.col)+' '+n.op;
-  if(n.valCol) return q(n.col)+' '+n.op+' '+q(n.val);
+  if(!needsVal(n.op)) return qc(n.col)+' '+n.op;
+  if(n.valCol) return qc(n.col)+' '+n.op+' '+qc(n.val);
   if(n.valDate){
     const vals = dateValues(n);
     if(!vals.length || !vals.every(validDate)) throw {sqlErr:true, msg:'日期必須是有效的 YYYY-MM-DD', pos:0};
-    return q(n.col)+' '+n.op+' '+(n.op === 'IN' || n.op === 'NOT IN' ? '('+vals.map(dateSQL).join(', ')+')' : dateSQL(n.val));
+    return qc(n.col)+' '+n.op+' '+(n.op === 'IN' || n.op === 'NOT IN' ? '('+vals.map(dateSQL).join(', ')+')' : dateSQL(n.val));
   }
-  if(n.str && n.op !== 'IN' && n.op !== 'NOT IN') return q(n.col)+' '+n.op+' '+strLit(n.val);
+  if(n.str && n.op !== 'IN' && n.op !== 'NOT IN') return qc(n.col)+' '+n.op+' '+strLit(n.val);
   if(n.op === 'IN' || n.op === 'NOT IN'){
     const vals = inListRaw(n.val);
     if(!vals.length) return '/* '+n.op+' 清單是空的 */ '+(n.op === 'IN' ? '1 = 0' : '1 = 1');
     /* 原本寫成 '116' 的就繼續當字串 —— 代號欄位是 VARCHAR，拿掉引號會變成隱式轉型 */
-    return q(n.col)+' '+n.op+' ('+vals.map(x=>x.quoted || n.str ? strLit(x.v) : lit(x.v)).join(', ')+')';
+    return qc(n.col)+' '+n.op+' ('+vals.map(x=>x.quoted || n.str ? strLit(x.v) : lit(x.v)).join(', ')+')';
   }
   if(n.op === 'LIKE' || n.op === 'NOT LIKE')
-    return q(n.col)+' '+n.op+' '+strLit(n.val);
-  return q(n.col)+' '+n.op+' '+lit(n.val);
+    return qc(n.col)+' '+n.op+' '+strLit(n.val);
+  return qc(n.col)+' '+n.op+' '+lit(n.val);
 }
 
 /* 任何一張圖的執行順序。反解回來的圖也用同一套走法，
@@ -1781,55 +1800,15 @@ function buildSQL(){
       sql = '  SELECT lhs.*\n  FROM '+ref(s0)+tblAs+'lhs\n  WHERE '+cond;
 
     } else if(n.type === 'join'){
-      const L = srcOf(n.id,0), R = srcOf(n.id,1);
-      const Lc = evalNode(L).cols, Rc = evalNode(R).cols;
-      const ks = joinKeys(n).filter(k=>k.left && k.right);
-      const lay = joinLayout(Lc, Rc, joinDrop(n));
-      /* 左邊整批帶過去 —— 左邊的欄位不會被丟掉也不會改名，一欄一欄列出來的話，
-         兩張寬表一 JOIN 就是七十行沒人讀得完的清單。
-         右邊沒辦法這樣：key 欄要拿掉、撞名的要改名，只能一欄一欄寫。 */
-      /* 別名平常用 a、b；表本身就叫 a 或 b 時換一組，不然 FROM b AS a 會把人看糊塗 */
-      const bare = [L, R].map(x=>(x && x.type === 'table' ? String(x.table) : ref(x)).toLowerCase());
-      const [A, B] = [['a','b'], ['l','r'], ['t1','t2'], ['lhs','rhs']]
-        .find(p=>p.every(x=>bare.indexOf(x) < 0)) || ['a','b'];
-      const sel = [A+'.*'].concat(lay.keep.map(k=>
-        B+'.'+q(k.src) + (k.name !== k.src ? ' AS '+q(k.name) : '')));
-      const on = ks.length
-        ? ks.map(k=>castSQL(k.lfn, A+'.'+q(k.left))+' '+keyOp(k)+' '+castSQL(k.rfn, B+'.'+q(k.right))).join('\n   AND ')
-        : n.cross ? '1 = 1' : '1 = 1 /* 還沒選 JOIN 條件 */';
-      const part = type => '  SELECT '+list(sel, 9)+
-            '\n  FROM '+ref(L)+tblAs+A+'\n  '+type+' JOIN '+ref(R)+tblAs+B+'\n    ON '+on;
-      /* MySQL 沒有 FULL JOIN：先 LEFT JOIN，再補上右表沒配到的列（右表 LEFT JOIN 左表、左邊是 NULL 的）。
-         配得到的列，左邊第一組條件的欄位一定不是 NULL（NULL 配不上任何東西），所以拿它分辨 */
-      if(n.joinType === 'FULL' && state.dialect === 'mysql')
-        sql = ks.length
-          ? part('LEFT')+'\n  UNION ALL\n  SELECT '+list(sel, 9)+'\n  FROM '+ref(R)+tblAs+B+'\n  LEFT JOIN '+ref(L)+tblAs+A+'\n    ON '+on+
-            '\n  WHERE '+castSQL(ks[0].lfn, A+'.'+q(ks[0].left))+' IS NULL'
-          : part('LEFT')+' /* MySQL 的 FULL JOIN 要有對照條件 */';
-      else sql = part(n.joinType);
+      const j = joinSQLParts(n, ref, tblAs);
+      sql = j.opaque || '  SELECT '+list(j.sel, 9)+'\n  FROM '+j.from;
 
     } else if(n.type === 'union'){
       const A = srcOf(n.id,0), B = srcOf(n.id,1);
       sql = '  SELECT * FROM '+ref(A)+'\n  UNION'+(n.all ? ' ALL' : '')+'\n  SELECT * FROM '+ref(B);
 
-    } else if(n.type === 'case'){
-      const w = n.branches.map(b=>'    WHEN '+q(n.col)+' '+b.op+' '+sqlLit(b.val, b.str)+' THEN '+(b.thenCol ? q(b.then) : sqlLit(b.then, b.thenStr)));
-      sql = '  SELECT '+starOf()+',\n    CASE\n'+w.join('\n')+'\n    ELSE '+(n.otherCol ? q(n.other) : sqlLit(n.other, n.otherStr))+'\n    END AS '+q(n.as)+
-            '\n  FROM '+fromOf(s0);
-
-    } else if(n.type === 'derive'){
-      sql = n.expr
-        ? '  SELECT '+starOf()+',\n    '+exprSQL(n.expr)+' AS '+q(n.as)+'\n  FROM '+fromOf(s0)
-        : Object.prototype.hasOwnProperty.call(n, 'literal')
-        ? '  SELECT '+starOf()+',\n    '+sqlLit(n.literal)+' AS '+q(n.as)+'\n  FROM '+fromOf(s0)
-        : n.fn
-        ? '  SELECT '+starOf()+',\n    '+fnCallSQL(n)+' AS '+q(n.as)+
-          '\n  FROM '+fromOf(s0)
-        : '  SELECT '+starOf()+',\n    '+q(n.left)+' '+n.op+' '+operand(n.right, up)+' AS '+q(n.as)+
-          '\n  FROM '+fromOf(s0);
-
-    } else if(n.type === 'window'){
-      sql = '  SELECT '+starOf()+',\n    '+windowSQL(n)+' AS '+q(n.as)+
+    } else if(n.type === 'case' || n.type === 'derive' || n.type === 'window'){
+      sql = '  SELECT '+starOf()+',\n    '+newColSQL(n, up)+' AS '+q(n.as)+
             '\n  FROM '+fromOf(s0);
 
     } else if(n.type === 'filter'){
@@ -1902,6 +1881,450 @@ function buildSQL(){
   }
   return out_sql;
 }
+/* ---- 精簡格式 ----
+   CTE 格式一步一層，方便跟步驟對照，貼回專案卻太長。這裡把能合併的連續步驟摺成同一層 SELECT：
+   篩選併進 WHERE、加欄位和選欄位併進 SELECT 清單、GROUP BY、DISTINCT、排序和取前幾筆放最後。
+   合併後意思會變的就另起一層，前一層變成 CTE：
+     WHERE 不能跨過 GROUP BY、LIMIT、視窗函數往前併（視窗會少算幾列）；
+     WHERE 和 GROUP BY 用不到視窗或彙總算出來的欄；同一層 SELECT 裡的新欄名不能互相引用（改成內嵌式子）。
+   每一層記得是哪幾個步驟併成的，三邊連動照樣對得到；對不到的不標。 */
+function buildCompactSQL(){
+  const out = state.nodes.find(n=>n.type === 'output');
+  const last = out ? srcOf(out.id, 0) : null;
+  state.sqlSegs = {};
+  const problem = graphIssue(last);
+  if(problem) return '-- 無法產生 SQL：'+problem;
+  if(!last) return '-- 把步驟接到「結果」，SQL 就會長出來。';
+  const oracle = state.dialect === 'oracle', tblAs = oracle ? ' ' : ' AS ';
+  const chain = chainOrder();
+  const blockOf = {}, blocks = [];
+  const taken = new Set(state.nodes.filter(n=>n.type === 'table' && !n.ns).map(n=>String(n.table).toLowerCase()));
+  const usedNames = {};
+  const ref = n => n.type === 'table' ? tableRef(n) : blockOf[n.id].name;
+  const fresh = (first, from, srcCols) => {
+    const b = {nodes:[], name:'', from:from, star:oracle ? 'src.*' : '*', src:{}, extras:[], items:null,
+               where:[], groupBy:null, distinct:false, order:null, lim:null, opaque:null};
+    srcCols.forEach(c=>{ b.src[c] = {sql:q(c), kind:'col'}; });
+    blocks.push(b);
+    return b;
+  };
+  /* 這一層看得到的欄：選過欄位就是那份清單，不然是來源欄加上新算的欄 */
+  const look = (b, name) => b.items ? b.items.find(i=>i.name === name) || null
+    : b.extras.find(e=>e.name === name) || b.src[name] || null;
+  /* 新開的一層一定照寫：來源欄位不在示意資料裡（推測的表）時就直接寫名字 */
+  const lookOr = (b, name) => look(b, name) || {sql:q(name), kind:'col'};
+  const usable = x => x && (x.kind === 'col' || x.kind === 'expr');
+  const inline = x => x.kind === 'expr' ? '('+x.sql+')' : x.sql;
+  const hasWin = b => (b.items || b.extras).some(x=>x.kind === 'win');
+  /* 用 b 這一層的寫法產生 SQL：欄名換成來源欄或內嵌的式子 */
+  const inBlock = (b, fn) => { const keep = colHook; colHook = name => { const x = look(b, name); return usable(x) ? inline(x) : q(name); }; try { return fn(); } finally { colHook = keep; } };
+  const refsOf = n => {
+    if(n.type === 'filter') return condLeaves(n).map(c=>c.col).concat(condLeaves(n).filter(c=>c.valCol).map(c=>c.val));
+    if(n.type === 'case') return [n.col].concat(n.branches.filter(b=>b.thenCol).map(b=>b.then), n.otherCol ? [n.other] : []);
+    if(n.type === 'window') return [n.col].concat(n.partitionBy, winKeys(n).map(k=>k.col)).filter(c=>c && c !== '*');
+    if(n.type === 'derive'){
+      if(n.expr) return exprCols(n.expr);
+      if(Object.prototype.hasOwnProperty.call(n, 'literal')) return [];
+      const up = evalNode(srcOf(n.id, 0)).cols;
+      return (n.left && n.left !== '*' ? [n.left] : []).concat(!n.fn && up.indexOf(n.right) >= 0 ? [n.right] : []);
+    }
+    if(n.type === 'groupby') return n.keys.concat(n.aggs.map(a=>a.col).filter(c=>c && c !== '*'));
+    return [];
+  };
+  const sortRefs = n => sortKeys(n).map(k=>k.by);
+  /* ORDER BY 用這一層的原始寫法（a.id、(a + b)），不用輸出名：JOIN 併掉的 b.id 還在 FROM 裡，
+     ORDER BY id 在 SQLite 會撞名。彙總、視窗算出來的欄才用輸出名。
+     被「選欄位」拿掉的欄，沒有 DISTINCT / GROUP BY 時照樣排得到；排不到就回 null */
+  const sortExpr = (b, key) => {
+    const item = b.items ? b.items.find(i=>i.name === key) : b.extras.find(e=>e.name === key);
+    if(item) return usable(item) ? inline(item) : q(key);
+    if(b.groupBy || b.distinct) return null;
+    const x = b.items ? (b.extras.find(e=>e.name === key) || b.src[key]) : b.src[key];
+    return usable(x) ? inline(x) : null;
+  };
+  /* n 能不能併進 b（b 的最後一步就是 n 的來源，而且只餵給 n） */
+  function canMerge(b, n){
+    if(b.opaque || b.lim) return false;
+    const refs = refsOf(n);
+    switch(n.type){
+      case 'filter':   return !b.groupBy && !hasWin(b) && refs.every(c=>usable(look(b, c)));
+      case 'case': case 'derive': case 'window':
+                       return !b.groupBy && !b.distinct && refs.every(c=>usable(look(b, c)));
+      case 'select':   return !b.distinct && (n.cols || []).every(c=>look(b, c));
+      case 'groupby':  return !b.groupBy && !b.distinct && !hasWin(b) && refs.every(c=>usable(look(b, c)));
+      case 'distinct': return true;
+      case 'sort':     return sortRefs(n).every(c=>sortExpr(b, c) !== null);
+    }
+    return false;
+  }
+  function apply(b, n){
+    b.nodes.push(n.id); blockOf[n.id] = b;
+    const up = evalNode(srcOf(n.id, 0)).cols;
+    if(n.type === 'filter'){
+      const conds = isOrFilter(n) && n.any.length === 1 ? n.any[0] : [n];
+      conds.forEach(c=>{ const s = inBlock(b, ()=>condSQL(c)); b.where.push(isOrFilter(c) && c.any.length > 1 ? '('+s+')' : s); });
+    } else if(n.type === 'case' || n.type === 'derive' || n.type === 'window'){
+      const x = {name:n.as, sql:inBlock(b, ()=>newColSQL(n, up)), kind:n.type === 'window' ? 'win' : 'expr'};
+      (b.items || b.extras).push(x);
+    } else if(n.type === 'select'){
+      if(n.cols && n.cols.length)
+        b.items = n.cols.map((c, i)=>Object.assign({}, lookOr(b, c), {name:(n.outCols || n.cols)[i]}));
+    } else if(n.type === 'groupby'){
+      const keyOf = k => inline(lookOr(b, k));
+      /* SELECT 和 GROUP BY 寫一模一樣的式子（SQL Server 要求一致） */
+      b.groupBy = n.keys.map(keyOf);
+      b.items = n.keys.map(k=>({name:k, sql:keyOf(k), kind:lookOr(b, k).kind}))
+        .concat(n.aggs.map(a=>({name:a.as, kind:'agg',
+          sql:(a.fn === 'COUNT_DISTINCT' ? 'COUNT(DISTINCT ' : a.fn+'(')+(a.col === '*' ? '*' : keyOf(a.col))+')'})));
+    } else if(n.type === 'distinct'){
+      b.distinct = true;
+    } else if(n.type === 'sort'){
+      const lim = Number(n.limit) || 0, offset = Math.max(0, Number(n.offset) || 0);
+      b.order = sortKeys(n).map(k=>(sortExpr(b, k.by) || q(k.by))+' '+k.dir);
+      if(lim > 0 || offset > 0 || n.limitZero) b.lim = {lim:lim, offset:offset, zero:!!n.limitZero};
+    }
+  }
+  chain.forEach(n=>{
+    const s0 = srcOf(n.id, 0);
+    if(n.type === 'join'){
+      const j = joinSQLParts(n, ref, tblAs);
+      const b = fresh(n, j.from, []);
+      b.star = list(j.sel, 9); b.nodes.push(n.id); blockOf[n.id] = b;
+      Object.keys(j.cols).forEach(c=>{ b.src[c] = {sql:j.cols[c], kind:'col'}; });
+      if(j.opaque) b.opaque = j.opaque;
+      return;
+    }
+    if(n.type === 'union'){
+      const b = fresh(n, '', []);
+      b.opaque = '  SELECT * FROM '+ref(s0)+'\n  UNION'+(n.all ? ' ALL' : '')+'\n  SELECT * FROM '+ref(srcOf(n.id, 1));
+      b.nodes.push(n.id); blockOf[n.id] = b;
+      return;
+    }
+    if(n.type === 'semijoin'){
+      const R = srcOf(n.id,1), ks = n.keys || [];
+      const b = fresh(n, ref(s0)+tblAs+'lhs', []);
+      b.star = 'lhs.*';
+      evalNode(s0).cols.forEach(c=>{ b.src[c] = {sql:'lhs.'+q(c), kind:'col'}; });
+      b.where.push(n.form.indexOf('IN') >= 0
+        ? 'lhs.'+q(ks[0].left)+' '+n.form+' (SELECT rhs.'+q(ks[0].right)+' FROM '+ref(R)+tblAs+'rhs)'
+        : n.form+' (SELECT 1 FROM '+ref(R)+tblAs+'rhs'+(ks.length ? ' WHERE '+ks.map(k=>'rhs.'+q(k.right)+' = lhs.'+q(k.left)).join(' AND ') : '')+')');
+      b.nodes.push(n.id); blockOf[n.id] = b;
+      return;
+    }
+    const prev = s0 && s0.type !== 'table' ? blockOf[s0.id] : null;
+    const onlyMe = s0 && state.edges.filter(e=>e.from === s0.id).length === 1;
+    if(prev && onlyMe && prev.nodes[prev.nodes.length - 1] === s0.id && canMerge(prev, n)) return apply(prev, n);
+    apply(fresh(n, ref(s0)+(oracle ? ' src' : ''), evalNode(s0).cols), n);
+  });
+
+  const finalBlock = last.type === 'table' ? null : blockOf[last.id];
+  blocks.forEach(b=>{
+    if(b === finalBlock) return;
+    const base = CTE_BASE[nodeById(b.nodes[b.nodes.length - 1]).type] || 'step';
+    let name;
+    do { usedNames[base] = (usedNames[base] || 0) + 1; name = usedNames[base] === 1 ? base : base + '_' + usedNames[base]; } while(taken.has(name));
+    b.name = name;
+  });
+  /* 名字定了才寫得出 FROM（後面的層引用前面的層），所以重跑一次 FROM 的部分 */
+  const render = (b, ind) => {
+    if(b.opaque) return b.opaque;
+    const lim = b.lim ? b.lim.lim : 0, offset = b.lim ? b.lim.offset : 0, zero = b.lim ? b.lim.zero : false;
+    const top = b.lim && (lim > 0 || zero) && !offset && D().lim === 'top' ? 'TOP '+lim+' ' : '';
+    const named = x => x.sql === q(x.name) || x.sql.endsWith('.'+q(x.name)) ? x.sql : x.sql+' AS '+q(x.name);
+    const sel = b.items ? b.items.map(named) : [b.star].concat(b.extras.map(named));
+    const order = b.order && b.order.length && (b === finalBlock || b.lim) ? b.order : null;
+    return ind+'SELECT '+(b.distinct ? 'DISTINCT ' : '')+top+list(sel, ind.length + 7)+
+      '\n'+ind+'FROM '+b.from+
+      (b.where.length ? '\n'+ind+'WHERE '+b.where.join('\n'+ind+'  AND ') : '')+
+      (b.groupBy && b.groupBy.length ? '\n'+ind+'GROUP BY '+b.groupBy.join(', ') : '')+
+      (order ? '\n'+ind+'ORDER BY '+order.join(', ') : '')+
+      (b.lim ? limTail(lim, offset, ind, !!order, zero) : '');
+  };
+  /* FROM 裡引用的是前面那層的名字；建層時名字還沒定，這裡換上去 */
+  chain.forEach(n=>{
+    const b = blockOf[n.id];
+    if(!b || b.nodes[0] !== n.id || n.type === 'join' || n.type === 'union' || n.type === 'semijoin') return;
+    const s0 = srcOf(n.id, 0);
+    b.from = ref(s0)+(oracle ? ' src' : '');
+  });
+  chain.filter(n=>n.type === 'join' || n.type === 'semijoin' || n.type === 'union').forEach(n=>{
+    const b = blockOf[n.id];
+    if(n.type === 'join'){ const j = joinSQLParts(n, ref, tblAs); b.from = j.from; if(j.opaque) b.opaque = j.opaque; }
+    else if(n.type === 'union') b.opaque = '  SELECT * FROM '+ref(srcOf(n.id, 0))+'\n  UNION'+(n.all ? ' ALL' : '')+'\n  SELECT * FROM '+ref(srcOf(n.id, 1));
+    else {
+      const R = srcOf(n.id,1), ks = n.keys || [];
+      b.from = ref(srcOf(n.id, 0))+tblAs+'lhs';
+      b.where[0] = n.form.indexOf('IN') >= 0
+        ? 'lhs.'+q(ks[0].left)+' '+n.form+' (SELECT rhs.'+q(ks[0].right)+' FROM '+ref(R)+tblAs+'rhs)'
+        : n.form+' (SELECT 1 FROM '+ref(R)+tblAs+'rhs'+(ks.length ? ' WHERE '+ks.map(k=>'rhs.'+q(k.right)+' = lhs.'+q(k.left)).join(' AND ') : '')+')';
+    }
+  });
+
+  const segs = {'': [out.id]};
+  const parts = [];
+  blocks.forEach(b=>{
+    if(b === finalBlock) return;
+    parts.push(b.name+' AS (\n'+render(b, '  ')+'\n)');
+    segs[b.name] = b.nodes.slice();
+  });
+  if(finalBlock) finalBlock.nodes.forEach(id=>segs[''].push(id));
+  state.sqlSegs = segs;
+  let sql = noteManifest(chain);
+  if(parts.length) sql += 'WITH ' + parts.join(',\n') + '\n';
+  if(!finalBlock) return sql + 'SELECT *\nFROM ' + tableRef(last) + ';';
+  if(finalBlock.opaque) return sql + 'SELECT *\nFROM (\n' + finalBlock.opaque + '\n) ' + (oracle ? '' : 'AS ') + 'u;';
+  return sql + render(finalBlock, '') + ';';
+}
+/* ---- pipe syntax（BigQuery）----
+   一步一行：FROM t |> WHERE … |> EXTEND … AS x |> AGGREGATE … GROUP BY … |> ORDER BY … |> LIMIT …，
+   跟畫布上的步驟一一對應。兩個來源的步驟（JOIN、UNION、IN / EXISTS）把另一條線包成括號裡的子查詢；
+   被好幾步共用的中間結果放進 WITH。識別字用反引號，運算式照 MySQL 的寫法（/ 是小數除法、字串用 CONCAT），
+   BigQuery 也是這樣算 */
+function buildPipeSQL(){
+  const out = state.nodes.find(n=>n.type === 'output');
+  const last = out ? srcOf(out.id, 0) : null;
+  state.sqlSegs = {};
+  const problem = graphIssue(last);
+  if(problem) return '-- 無法產生 SQL：'+problem;
+  if(!last) return '-- 把步驟接到「結果」，SQL 就會長出來。';
+  const keep = state.dialect;
+  state.dialect = 'mysql';
+  try {
+    const chain = chainOrder();
+    const shared = new Set(chain.filter(n=>state.edges.filter(e=>e.from === n.id).length > 1).map(n=>n.id));
+    const names = {}, used = {};
+    chain.filter(n=>shared.has(n.id)).forEach(n=>{
+      const b = CTE_BASE[n.type] || 'step';
+      used[b] = (used[b] || 0) + 1;
+      names[n.id] = used[b] === 1 ? b : b + '_' + used[b];
+    });
+    const indent = (ls, pad) => ls.map(l=>({t:pad + l.t, id:l.id}));
+    /* 另一條線：表就寫表名，其他的包成括號 */
+    const branch = n => n.type === 'table' ? [{t:tableRef(n)}] : names[n.id] ? [{t:names[n.id]}]
+      : [{t:'('}].concat(indent(pipe(n), '  '), [{t:')'}]);
+    const inline = ls => ls.length === 1 ? ls[0].t : null;
+    function pipe(n, top){
+      if(!n) return [{t:'FROM ?'}];
+      if(n.type === 'table') return [{t:'FROM '+tableRef(n)}];
+      if(names[n.id] && !top) return [{t:'FROM '+names[n.id]}];
+      const s0 = srcOf(n.id, 0), up = evalNode(s0).cols;
+      /* 排序用到「選欄位」拿掉的欄：先排序、取前幾筆，再選欄位（pipe 的 SELECT 保留順序） */
+      if(n.type === 'sort' && s0 && s0.type === 'select' && !names[s0.id] && (s0.cols || []).length &&
+         state.edges.filter(e=>e.from === s0.id).length === 1 &&
+         sortKeys(n).some(k=>(s0.outCols || s0.cols).indexOf(k.by) < 0)){
+        const ls = pipe(srcOf(s0.id, 0));
+        const lim = Number(n.limit) || 0, offset = Math.max(0, Number(n.offset) || 0);
+        if(n.by) ls.push({t:'|> ORDER BY '+orderSQL(n), id:n.id});
+        if(lim > 0 || n.limitZero) ls.push({t:'|> LIMIT '+lim+(offset > 0 ? ' OFFSET '+offset : ''), id:n.id});
+        else if(offset > 0) ls.push({t:'|> LIMIT 9223372036854775807 OFFSET '+offset, id:n.id});
+        ls.push({t:'|> SELECT '+selectItems(s0).join(', '), id:s0.id});
+        return ls;
+      }
+      const ls = pipe(s0);
+      const op = t => ls.push({t:'|> '+t, id:n.id});
+      if(n.type === 'filter') op('WHERE '+condSQL(n));
+      else if(n.type === 'case' || n.type === 'derive' || n.type === 'window') op('EXTEND '+newColSQL(n, up).replace(/\n\s*/g, ' ')+' AS '+q(n.as));
+      else if(n.type === 'select'){ if((n.cols || []).length) op('SELECT '+selectItems(n).join(', ')); }
+      else if(n.type === 'groupby'){
+        const aggs = n.aggs.map(a=>(a.fn === 'COUNT_DISTINCT' ? 'COUNT(DISTINCT ' : a.fn+'(')+(a.col === '*' ? '*' : q(a.col))+') AS '+q(a.as));
+        op('AGGREGATE '+aggs.join(', ')+(n.keys.length ? (aggs.length ? ' ' : '')+'GROUP BY '+n.keys.map(q).join(', ') : ''));
+      }
+      else if(n.type === 'distinct') op('SELECT DISTINCT *');
+      else if(n.type === 'sort'){
+        const lim = Number(n.limit) || 0, offset = Math.max(0, Number(n.offset) || 0);
+        if(n.by) op('ORDER BY '+orderSQL(n));
+        if(lim > 0 || n.limitZero) op('LIMIT '+lim+(offset > 0 ? ' OFFSET '+offset : ''));
+        else if(offset > 0) op('LIMIT 9223372036854775807 OFFSET '+offset);
+      }
+      else if(n.type === 'join'){
+        const R = srcOf(n.id, 1), Rc = evalNode(R).cols;
+        const ks = joinKeys(n).filter(k=>k.left && k.right);
+        const lay = joinLayout(up, Rc, joinDrop(n));
+        const on = ks.map(k=>castSQL(k.lfn, 'a.'+q(k.left))+' '+keyOp(k)+' '+castSQL(k.rfn, 'b.'+q(k.right))).join(' AND ');
+        const rb = branch(R), one = inline(rb);
+        /* 沒有條件的 INNER 才是 CROSS JOIN；LEFT（純量子查詢接回來）要寫 ON TRUE，子查詢沒有列時才會補 NULL */
+        const type = (n.cross && !ks.length && n.joinType === 'INNER') ? 'CROSS JOIN' : n.joinType+' JOIN';
+        const tail = ' AS b'+(type === 'CROSS JOIN' ? '' : ' ON '+(on || 'TRUE'));
+        op('AS a');
+        if(one) op(type+' '+one+tail);
+        else { op(type+' ('); indent(rb.slice(1, -1), '     ').forEach(l=>ls.push(l)); ls.push({t:'   )'+tail, id:n.id}); }
+        op('SELECT '+['a.*'].concat(lay.keep.map(k=>'b.'+q(k.src)+(k.name !== k.src ? ' AS '+q(k.name) : ''))).join(', '));
+      }
+      else if(n.type === 'union'){
+        const rb = branch(srcOf(n.id, 1));
+        const sub = rb.length === 1 ? [{t:'(FROM '+rb[0].t+')'}] : rb;
+        op('UNION '+(n.all ? 'ALL' : 'DISTINCT')+' '+sub[0].t);
+        sub.slice(1).forEach(l=>ls.push({t:'   '+l.t, id:n.id}));
+      }
+      else if(n.type === 'semijoin'){
+        const R = srcOf(n.id, 1), ks = n.keys || [];
+        const rb = branch(R), from = (inline(rb) || rb.map(l=>l.t.trim()).join(' '))+' AS rhs';
+        op('AS lhs');
+        op('WHERE '+(n.form.indexOf('IN') >= 0
+          ? 'lhs.'+q(ks[0].left)+' '+n.form+' (SELECT rhs.'+q(ks[0].right)+' FROM '+from+')'
+          : n.form+' (SELECT 1 FROM '+from+(ks.length ? ' WHERE '+ks.map(k=>'rhs.'+q(k.right)+' = lhs.'+q(k.left)).join(' AND ') : '')+')'));
+      }
+      return ls;
+    }
+    const lines = [];
+    const withs = chain.filter(n=>shared.has(n.id));
+    withs.forEach((n, i)=>{
+      lines.push({t:(i ? '' : 'WITH ')+names[n.id]+' AS ('});
+      indent(pipe(n, true), '  ').forEach(l=>lines.push(l));
+      lines.push({t:i < withs.length - 1 ? '),' : ')'});
+    });
+    pipe(last).forEach(l=>lines.push(l));
+    lines[lines.length - 1] = {t:lines[lines.length - 1].t + ';', id:lines[lines.length - 1].id};
+    /* 三邊連動：一行一個步驟 */
+    const segs = {'': [out.id]};
+    lines.forEach((l, i)=>{ if(l.id) segs['@'+i] = [l.id]; });
+    state.sqlSegs = segs;
+    state.sqlLines = lines.map((l, i)=>l.id ? '@'+i : null);
+    return noteManifest(chain) + lines.map(l=>l.t).join('\n');
+  } finally { state.dialect = keep; }
+}
+/* ---- 跟原本貼的 SQL 比一比 ----
+   原文和產生的 SQL 長得完全不一樣（一個是 AI 寫的，一個是一步一段），逐字比沒有意義。
+   比的是「剛匯入時的步驟」和「現在的步驟」各自寫成精簡格式 —— 一個子句一行，
+   沒改到的地方一模一樣，改到的地方就是差異。每一行屬於哪一層、那一層是哪幾個步驟，都記得 */
+function compactOf(nodes, edges){
+  const keep = {nodes:state.nodes, edges:state.edges, segs:state.sqlSegs, lines:state.sqlLines};
+  state.nodes = nodes; state.edges = edges;
+  try { return {sql:buildCompactSQL(), segs:state.sqlSegs}; }
+  catch(err){ return {sql:'-- 無法產生 SQL', segs:{}}; }
+  finally { state.nodes = keep.nodes; state.edges = keep.edges; state.sqlSegs = keep.segs; state.sqlLines = keep.lines; }
+}
+/* 每一行屬於哪一層（CTE 名字，主查詢是 ''） */
+function lineBlocks(sql){
+  let cur = '';
+  return sql.split('\n').map(line=>{
+    const start = /^(?:WITH )?([A-Za-z_]\w*) AS \($/.exec(line);
+    if(start){ cur = start[1]; return cur; }
+    if(/^\),?$/.test(line)){ const was = cur; cur = ''; return was; }
+    return cur;
+  });
+}
+/* 一行一行比：最長共同子序列，其餘標成拿掉（-）或加上（+） */
+function diffLines(a, b){
+  const n = a.length, m = b.length, L = Array.from({length:n + 1}, ()=>new Array(m + 1).fill(0));
+  for(let i = n - 1; i >= 0; i--) for(let j = m - 1; j >= 0; j--)
+    L[i][j] = a[i] === b[j] ? L[i+1][j+1] + 1 : Math.max(L[i+1][j], L[i][j+1]);
+  const out = [];
+  let i = 0, j = 0;
+  while(i < n || j < m){
+    if(i < n && j < m && a[i] === b[j]){ out.push({op:' ', text:a[i], ia:i, ib:j}); i++; j++; }
+    else if(j < m && (i >= n || L[i][j+1] >= L[i+1][j])){ out.push({op:'+', text:b[j], ib:j}); j++; }
+    else { out.push({op:'-', text:a[i], ia:i}); i++; }
+  }
+  return out;
+}
+function stepName(n){ return n ? META[n.type].label + (n.note ? '「'+n.note+'」' : '') : ''; }
+function diffReport(){
+  if(!state.origin) return null;
+  /* 註記放在最上面那行註解裡，改註記不算改 SQL */
+  const strip = s => s.replace(/^\/\*\s*sqlblocks-notes[^*]*\*\/\n/, '');
+  const before = compactOf(state.origin.nodes, state.origin.edges), after = compactOf(state.nodes, state.edges);
+  before.sql = strip(before.sql); after.sql = strip(after.sql);
+  const a = before.sql.split('\n'), b = after.sql.split('\n');
+  const ops = diffLines(a, b);
+  const ba = lineBlocks(before.sql), bb = lineBlocks(after.sql);
+  /* 這一步跟匯入時比，設定或接線變了沒（位置、註記不算） */
+  const shape = (n, edges) => n ? JSON.stringify([Object.keys(n).filter(k=>!['x','y','note','minH'].includes(k)).sort().map(k=>[k, n[k]]),
+    edges.filter(e=>e.to === n.id).map(e=>[e.from, e.port || 0]).sort()]) : null;
+  const touched = id => shape(state.nodes.find(n=>n.id === id), state.edges) !== shape(state.origin.nodes.find(n=>n.id === id), state.origin.edges);
+  const steps = new Map();
+  const credit = (ids, nodes) => {
+    const all = (ids || []).map(id=>nodes.find(x=>x.id === id)).filter(n=>n && n.type !== 'output');
+    /* 一層裡真的改過的步驟才算；都沒改（改的是上游）就算整層 */
+    const mine = all.filter(n=>touched(n.id));
+    (mine.length ? mine : all).forEach(n=>{ if(!steps.has(n.id)) steps.set(n.id, n); });
+  };
+  ops.forEach(o=>{
+    if(o.op === '+') credit(after.segs[bb[o.ib]], state.nodes);
+    if(o.op === '-') credit(before.segs[ba[o.ia]], state.origin.nodes);
+  });
+  return {ops:ops, changed:ops.filter(o=>o.op !== ' ').length, steps:[...steps.values()]};
+}
+function renderDiff(){
+  const box = document.getElementById('diffbox');
+  if(!box) return;
+  const r = diffReport();
+  box.hidden = !r;
+  if(!r) return;
+  const sum = r.changed
+    ? '跟剛匯入時比，有 <b>'+r.changed+'</b> 行不一樣'+(r.steps.length ? '，來自這幾個步驟：'+r.steps.map(n=>'<code>'+esc(stepName(n))+'</code>').join('、') : '')+'。'
+    : '步驟跟剛匯入時一樣，產生的 SQL 意思沒變。';
+  document.getElementById('diff').innerHTML = '<p class="hint">'+sum+'下面兩邊都寫成精簡格式、一個子句一行再比，跟你貼的原文寫法不同沒關係。</p>'+
+    (r.changed ? '<pre class="diffpre">'+r.ops.map(o=>'<span class="d'+(o.op === '+' ? 'add' : o.op === '-' ? 'del' : 'eq')+'">'+o.op+' '+esc(o.text)+'</span>').join('\n')+'</pre>' : '')+
+    '<details class="sub-imp"><summary>原本貼的 SQL</summary><pre class="diffpre">'+esc(state.origin.sql)+'</pre></details>';
+}
+/* 現在選的輸出格式 */
+const SQL_FORMATS = {cte:'一步一段（對照步驟）', compact:'精簡（貼回專案）', pipe:'pipe syntax（BigQuery）'};
+function shownSQL(){
+  state.sqlLines = null;
+  const note = document.getElementById('fmt-note');
+  const say = html => { if(note){ note.hidden = !html; note.innerHTML = html || ''; } };
+  if(state.fmt === 'compact'){
+    const sql = buildCompactSQL();
+    say('把能合併的步驟摺成同一層 SELECT：'+chainOrder().length+' 個步驟寫成 '+(Object.keys(state.sqlSegs).length)+' 層。'+
+        '會改變意思的地方（篩選跨過 GROUP BY、LIMIT 或視窗函數）才另起一層。滑過一層，畫布照樣亮起它的步驟。');
+    return sql;
+  }
+  if(state.fmt === 'pipe'){
+    const sql = buildPipeSQL();
+    say('BigQuery 的 pipe syntax，一步一行，滑過一行就亮起那一步。不看上面選的方言：識別字用反引號，運算式照 MySQL 的寫法（BigQuery 也是 / 小數除法、CONCAT 串字）。'+
+        '這台工具跑不了 pipe syntax，它跟另外兩種格式寫的是同一份步驟。');
+    return sql;
+  }
+  say('');
+  return buildSQL();
+}
+/* JOIN 那一層的各部分：兩邊的別名、SELECT 清單、FROM … JOIN … ON …。
+   MySQL 的 FULL JOIN 寫不成一個 FROM，整段放在 opaque。cols 是輸出欄名 → 這一層裡的寫法 */
+function joinSQLParts(n, ref, tblAs){
+  const L = srcOf(n.id,0), R = srcOf(n.id,1);
+  const Lc = evalNode(L).cols, Rc = evalNode(R).cols;
+  const ks = joinKeys(n).filter(k=>k.left && k.right);
+  const lay = joinLayout(Lc, Rc, joinDrop(n));
+  /* 左邊整批帶過去 —— 左邊的欄位不會被丟掉也不會改名，一欄一欄列出來的話，
+     兩張寬表一 JOIN 就是七十行沒人讀得完的清單。
+     右邊沒辦法這樣：key 欄要拿掉、撞名的要改名，只能一欄一欄寫。 */
+  /* 別名平常用 a、b；表本身就叫 a 或 b 時換一組，不然 FROM b AS a 會把人看糊塗 */
+  const bare = [L, R].map(x=>(x && x.type === 'table' ? String(x.table) : ref(x)).toLowerCase());
+  const [A, B] = [['a','b'], ['l','r'], ['t1','t2'], ['lhs','rhs']]
+    .find(p=>p.every(x=>bare.indexOf(x) < 0)) || ['a','b'];
+  const sel = [A+'.*'].concat(lay.keep.map(k=>
+    B+'.'+q(k.src) + (k.name !== k.src ? ' AS '+q(k.name) : '')));
+  const on = ks.length
+    ? ks.map(k=>castSQL(k.lfn, A+'.'+q(k.left))+' '+keyOp(k)+' '+castSQL(k.rfn, B+'.'+q(k.right))).join('\n   AND ')
+    : n.cross ? '1 = 1' : '1 = 1 /* 還沒選 JOIN 條件 */';
+  const from = type => ref(L)+tblAs+A+'\n  '+type+' JOIN '+ref(R)+tblAs+B+'\n    ON '+on;
+  const cols = {};
+  Lc.forEach(c=>{ cols[c] = A+'.'+q(c); });
+  lay.keep.forEach(k=>{ cols[k.name] = B+'.'+q(k.src); });
+  /* MySQL 沒有 FULL JOIN：先 LEFT JOIN，再補上右表沒配到的列（右表 LEFT JOIN 左表、左邊是 NULL 的）。
+     配得到的列，左邊第一組條件的欄位一定不是 NULL（NULL 配不上任何東西），所以拿它分辨 */
+  let opaque = null;
+  if(n.joinType === 'FULL' && state.dialect === 'mysql')
+    opaque = ks.length
+      ? '  SELECT '+list(sel, 9)+'\n  FROM '+from('LEFT')+'\n  UNION ALL\n  SELECT '+list(sel, 9)+'\n  FROM '+ref(R)+tblAs+B+'\n  LEFT JOIN '+ref(L)+tblAs+A+'\n    ON '+on+
+        '\n  WHERE '+castSQL(ks[0].lfn, A+'.'+q(ks[0].left))+' IS NULL'
+      : '  SELECT '+list(sel, 9)+'\n  FROM '+from('LEFT')+' /* MySQL 的 FULL JOIN 要有對照條件 */';
+  return {sel:sel, from:from(n.joinType), cols:cols, opaque:opaque, out:lay.cols};
+}
+/* 「加一欄」的三種步驟（分類貼標、算欄位、視窗）算出那一欄的式子，不含 AS。
+   CTE 格式和精簡格式共用，欄位參照都走 qc() */
+function newColSQL(n, up){
+  if(n.type === 'case'){
+    const w = n.branches.map(b=>'    WHEN '+qc(n.col)+' '+b.op+' '+sqlLit(b.val, b.str)+' THEN '+(b.thenCol ? qc(b.then) : sqlLit(b.then, b.thenStr)));
+    return 'CASE\n'+w.join('\n')+'\n    ELSE '+(n.otherCol ? qc(n.other) : sqlLit(n.other, n.otherStr))+'\n    END';
+  }
+  if(n.type === 'window') return windowSQL(n);
+  if(n.expr) return exprSQL(n.expr);
+  if(Object.prototype.hasOwnProperty.call(n, 'literal')) return sqlLit(n.literal);
+  if(n.fn) return fnCallSQL(n);
+  return qc(n.left)+' '+n.op+' '+operand(n.right, up);
+}
 function list(items, pad){ return items.join(',\n' + ' '.repeat(pad)); }
 function selectItems(n){ return n.cols.map((c,i)=>q(c)+(n.outCols && n.outCols[i] !== c ? ' AS '+q(n.outCols[i]) : '')); }
 /* 來源欄位放回它原本的位置，其他參數照原文 */
@@ -1911,15 +2334,15 @@ function windowSQL(n){
   else if(n.fn === 'NTILE') call = 'NTILE('+winTiles(n)+')';
   else if(SHIFT_FNS.indexOf(n.fn) >= 0){
     /* LAG(x) 就是 LAG(x, 1)；有預設值時位移一定要寫出來 */
-    const args = [q(n.col)], off = winOffset(n);
+    const args = [qc(n.col)], off = winOffset(n);
     if(off !== 1 || n.def) args.push(String(off));
     if(n.def) args.push(exprSQL(n.def));
     call = n.fn+'('+args.join(', ')+')';
   }
-  else call = n.fn+'('+(n.col === '*' || !n.col ? '*' : q(n.col))+')';
+  else call = n.fn+'('+(n.col === '*' || !n.col ? '*' : qc(n.col))+')';
   const over = [], keys = winKeys(n);
-  if(n.partitionBy.length) over.push('PARTITION BY '+n.partitionBy.map(q).join(', '));
-  if(keys.length) over.push('ORDER BY '+keys.map(k=>q(k.col)+' '+k.dir).join(', '));
+  if(n.partitionBy.length) over.push('PARTITION BY '+n.partitionBy.map(qc).join(', '));
+  if(keys.length) over.push('ORDER BY '+keys.map(k=>qc(k.col)+' '+k.dir).join(', '));
   /* SQL Server 和 Oracle 的排名、NTILE、LAG / LEAD 一定要有 ORDER BY；「不排」就給一個不影響順序的 */
   else if(ORDERED_FNS.indexOf(n.fn) >= 0 && state.dialect === 'mssql') over.push('ORDER BY (SELECT NULL)');
   else if(ORDERED_FNS.indexOf(n.fn) >= 0 && state.dialect === 'oracle') over.push('ORDER BY NULL');
@@ -1928,7 +2351,7 @@ function windowSQL(n){
 }
 function fnCallSQL(n){
   if(n.noArgs) return n.fn+'()';
-  const col = n.left === '*' ? '*' : q(n.left);
+  const col = n.left === '*' ? '*' : qc(n.left);
   const inner = n.args ? n.args.map((a, i)=>i === (n.argAt || 0) ? col : a).join(', ') : col;
   return n.fn+'('+inner+(n.castAs && n.fn === 'CAST' ? ' AS '+n.castAs : '')+')';
 }
@@ -1975,7 +2398,7 @@ const wrapExpr = t => (t.kind === 'arith' || t.kind === 'concat') ? '('+exprSQL(
 function concatParts(t){ return t.kind === 'concat' ? concatParts(t.a).concat(concatParts(t.b)) : [t]; }
 function exprSQL(t){
   switch(t.kind){
-    case 'col':  return q(t.col);
+    case 'col':  return qc(t.col);
     case 'kw':   return t.v;
     case 'interval': return 'INTERVAL '+(typeof t.v === 'number' ? String(t.v) : strLit(t.v))+(t.unit ? ' '+t.unit : '');
     case 'lit':  return t.v === null ? 'NULL' : typeof t.v === 'number' ? decText(t.v, t.dec) : strLit(t.v);
@@ -2289,6 +2712,14 @@ function highlight(sql){
    點步驟時才標得出對應的那段，滑過那段也能反過來亮起步驟 */
 function sqlHTML(sql){
   const segs = state.sqlSegs || {};
+  /* pipe syntax：一行就是一個步驟，逐行標 */
+  if(state.sqlLines){
+    const all = sql.split('\n'), skip = all.length - state.sqlLines.length;
+    return all.map((line, i)=>{
+      const key = i >= skip ? state.sqlLines[i - skip] : null;
+      return key && segs[key] ? '<span class="seg" data-seg="'+esc(key)+'">'+highlight(line)+'</span>' : highlight(line);
+    }).join('\n');
+  }
   const out = [];
   let cur = null, buf = [];
   const flush = () => {
@@ -4970,7 +5401,7 @@ document.getElementById('btn-prev').addEventListener('click', ()=>{ state.step--
 document.getElementById('btn-next').addEventListener('click', ()=>{ state.step++; renderStage(); });
 document.getElementById('btn-copy').addEventListener('click', async e=>{
   const b = e.currentTarget;
-  try { await navigator.clipboard.writeText(buildSQL()); b.textContent = '已複製'; }
+  try { await navigator.clipboard.writeText(shownSQL()); b.textContent = '已複製'; }
   catch(err){ b.textContent = '複製失敗'; }
   setTimeout(()=>{ b.textContent = '複製 SQL'; }, 1600);
 });
@@ -5066,7 +5497,8 @@ function refresh(keepInspector){
   renderNodes();
   drawWires();
   if(!keepInspector) renderInspector();
-  document.getElementById('sql').innerHTML = sqlHTML(buildSQL());
+  document.getElementById('sql').innerHTML = sqlHTML(shownSQL());
+  renderDiff();
   renderLint();
   document.getElementById('dnote').innerHTML = dialectNote();
   renderInfoSQL();
@@ -6904,6 +7336,8 @@ function applyStatement(idx){
   state.schema = graph.schema;
   state.nodes = graph.nodes;
   state.edges = graph.edges;
+  /* 記下剛匯入時的樣子，之後才比得出「我改了哪裡」 */
+  state.origin = {sql:text, nodes:JSON.parse(JSON.stringify(graph.nodes)), edges:JSON.parse(JSON.stringify(graph.edges))};
   state.uid = graph.uid;
   state.sel = null;
   state.step = 0;
@@ -6955,6 +7389,14 @@ dsel.value = state.dialect;
 dsel.addEventListener('change', ()=>{
   state.dialect = dsel.value;
   try { localStorage.setItem('sqlblocks.dialect', state.dialect); } catch(err){}
+  refresh();
+});
+const fsel = document.getElementById('sqlfmt');
+try { const saved = localStorage.getItem('sqlblocks.fmt'); if(saved && SQL_FORMATS[saved]) state.fmt = saved; } catch(err){}
+fsel.value = state.fmt || 'cte';
+fsel.addEventListener('change', ()=>{
+  state.fmt = SQL_FORMATS[fsel.value] ? fsel.value : 'cte';
+  try { localStorage.setItem('sqlblocks.fmt', state.fmt); } catch(err){}
   refresh();
 });
 const edgeBox = document.getElementById('edge-data');

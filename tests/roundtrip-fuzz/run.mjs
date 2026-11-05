@@ -236,6 +236,123 @@ for (const [category, make] of Object.entries(families)) for (let i=0;i<16;i++) 
   const item={sql,regenerated,diff:failure?`original rows ${stable(original.rows.slice(0,4))}; regenerated: ${failure}`:diff(original,actual)};
   if (!classes.has(key)||sql.length<classes.get(key).sql.length) classes.set(key,item);
 }
+// The compact format folds steps into fewer SELECTs (issue #3). Folding must never change a result:
+// every input that round-trips is run again through the compact SQL.
+let compactSame = 0, compactShorter = 0;
+const compactBroken = [];
+for (const sql of inputs) {
+  let graphOK = true;
+  try { graphFromSQL(api, sql); } catch (error) { if (!error?.sqlErr) throw error; graphOK = false; }
+  if (!graphOK) continue;
+  const ordered = /\bORDER\s+BY\b/i.test(sql), unnamed = /COUNT\(DISTINCT amount\), COUNT/.test(sql);
+  const cte = api.buildSQL(), compact = api.buildCompactSQL();
+  let actual, failure;
+  try { actual = query(compact, ordered, unnamed); } catch (error) { failure = error.message; }
+  const original = query(sql, ordered, unnamed);
+  if (!failure && stable(original) === stable(actual)) { compactSame++; if (compact.length < cte.length) compactShorter++; continue; }
+  compactBroken.push({sql, compact, why: failure || diff(original, actual)});
+}
+console.log(`COMPACT same=${compactSame} shorter=${compactShorter} broken=${compactBroken.length}`);
+compactBroken.sort((a, b) => a.sql.length - b.sql.length).slice(0, 5)
+  .forEach(x => console.log(`COMPACT_BROKEN ${x.sql}\n  compact: ${x.compact.replace(/\s+/g, ' ')}\n  why: ${x.why}`));
+if (compactBroken.length) throw new Error(`compact format broke ${compactBroken.length} results`);
+// SQLite cannot run BigQuery pipe syntax, so each pipe operator is turned back into the nested SELECT it
+// stands for (WHERE, EXTEND, SELECT, AGGREGATE, ORDER BY + LIMIT, AS + JOIN + SELECT, UNION, AS + WHERE)
+// and the result must match the original. This checks the mapping from steps to pipe operators.
+function splitDepth0(s, sep) {
+  const parts = []; let depth = 0, cur = '', q = null;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (q) { cur += c; if (c === q) q = null; continue; }
+    if (c === "'" || c === '`' || c === '"') { q = c; cur += c; continue; }
+    if (c === '(') depth++;
+    if (c === ')') depth--;
+    if (depth === 0 && s.startsWith(sep, i)) { parts.push(cur); cur = ''; i += sep.length - 1; continue; }
+    cur += c;
+  }
+  parts.push(cur);
+  return parts.map(p => p.trim());
+}
+/* BigQuery's CONCAT is NULL when any argument is NULL, like ||; SQLite's concat() skips NULLs */
+function concatToPipes(s) {
+  let out = '', i = 0;
+  while (i < s.length) {
+    if (!/^CONCAT\(/.test(s.slice(i))) { out += s[i++]; continue; }
+    let depth = 0, j = i + 6;
+    for (; j < s.length; j++) { if (s[j] === '(') depth++; if (s[j] === ')' && --depth === 0) break; }
+    out += '(' + splitDepth0(concatToPipes(s.slice(i + 7, j)), ',').join(' || ') + ')';
+    i = j + 1;
+  }
+  return out;
+}
+function pipeToSQL(text) {
+  text = concatToPipes(text.replace(/^\/\*[\s\S]*?\*\/\n/, '').replace(/;\s*$/, '').replace(/\s*\n\s*/g, ' '));
+  /* inner pipelines first: ( FROM … |> … ) and (FROM t) */
+  const inner = s => {
+    let out = '', i = 0;
+    while (i < s.length) {
+      const m = /^\(\s*FROM /.exec(s.slice(i));
+      if (!m) { out += s[i++]; continue; }
+      let depth = 0, j = i;
+      for (; j < s.length; j++) { if (s[j] === '(') depth++; if (s[j] === ')' && --depth === 0) break; }
+      out += '(' + pipeToSQL(s.slice(i + 1, j)) + ')';
+      i = j + 1;
+    }
+    return out;
+  };
+  let withSQL = '';
+  if (/^WITH /.test(text)) {
+    const body = text.slice(5);
+    const entries = [];
+    let rest = body, m;
+    while ((m = /^([A-Za-z_]\w*) AS \(/.exec(rest))) {
+      let depth = 0, j = m[0].length - 1;
+      for (; j < rest.length; j++) { if (rest[j] === '(') depth++; if (rest[j] === ')' && --depth === 0) break; }
+      entries.push(m[1] + ' AS (' + pipeToSQL(rest.slice(m[0].length, j)) + ')');
+      rest = rest.slice(j + 1).replace(/^\s*,\s*/, '').trim();
+    }
+    withSQL = 'WITH ' + entries.join(', ') + ' ';
+    text = rest;
+  }
+  const ops = splitDepth0(inner(text), '|>');
+  let qy = 'SELECT * FROM ' + ops[0].replace(/^FROM /, ''), alias = 'p', join = null, ordered = false;
+  for (const op of ops.slice(1)) {
+    const wrap = () => '(' + qy + ') AS ' + alias;
+    let m;
+    if ((m = /^AS (\w+)$/.exec(op))) { alias = m[1]; continue; }
+    if ((m = /^((?:INNER|LEFT|FULL|CROSS) JOIN .*)$/.exec(op))) { join = wrap() + ' ' + m[1]; alias = 'p'; continue; }
+    if ((m = /^WHERE (.*)$/.exec(op))) qy = 'SELECT * FROM ' + wrap() + ' WHERE ' + m[1];
+    else if ((m = /^EXTEND (.*)$/.exec(op))) qy = 'SELECT *, ' + m[1] + ' FROM ' + wrap();
+    else if ((m = /^SELECT (.*)$/.exec(op))) qy = 'SELECT ' + m[1] + ' FROM ' + (join || wrap());
+    else if ((m = /^AGGREGATE (.*)$/.exec(op))) {
+      const parts = splitDepth0(m[1], 'GROUP BY ');
+      const aggs = parts[0].replace(/\s+$/, ''), keys = parts[1];
+      qy = 'SELECT ' + [keys, aggs].filter(Boolean).join(', ') + ' FROM ' + wrap() + (keys ? ' GROUP BY ' + keys : '');
+    }
+    else if ((m = /^ORDER BY (.*)$/.exec(op))) { qy = 'SELECT * FROM ' + wrap() + ' ORDER BY ' + m[1]; alias = 'p'; ordered = true; continue; }
+    else if ((m = /^LIMIT (.*)$/.exec(op))) qy = ordered ? qy + ' LIMIT ' + m[1] : 'SELECT * FROM ' + wrap() + ' LIMIT ' + m[1];
+    else if ((m = /^UNION (ALL|DISTINCT) (.*)$/.exec(op))) qy = 'SELECT * FROM ' + wrap() + ' UNION' + (m[1] === 'ALL' ? ' ALL' : '') + ' SELECT * FROM ' + m[2] + ' AS u2';
+    else throw new Error('pipe operator not understood: ' + op);
+    join = null; alias = 'p'; ordered = false;
+  }
+  return withSQL + qy;
+}
+let pipeSame = 0;
+const pipeBroken = [];
+for (const sql of inputs) {
+  try { graphFromSQL(api, sql); } catch (error) { if (!error?.sqlErr) throw error; continue; }
+  const ordered = /\bORDER\s+BY\b/i.test(sql), unnamed = /COUNT\(DISTINCT amount\), COUNT/.test(sql);
+  const pipe = api.buildPipeSQL();
+  let actual, failure, translated = '';
+  try { translated = pipeToSQL(pipe); actual = query(translated, ordered, unnamed); } catch (error) { failure = error.message; }
+  const original = query(sql, ordered, unnamed);
+  if (!failure && stable(original) === stable(actual)) { pipeSame++; continue; }
+  pipeBroken.push({sql, pipe, translated, why: failure || diff(original, actual)});
+}
+console.log(`PIPE same=${pipeSame} broken=${pipeBroken.length}`);
+pipeBroken.sort((a, b) => a.sql.length - b.sql.length).slice(0, 4)
+  .forEach(x => console.log(`PIPE_BROKEN ${x.sql}\n  pipe: ${x.pipe.replace(/\s+/g, ' ')}\n  as SQL: ${x.translated}\n  why: ${x.why}`));
+if (pipeBroken.length) throw new Error(`pipe format broke ${pipeBroken.length} results`);
 // MySQL has no FULL JOIN; its LEFT JOIN UNION ALL rewrite must give the same rows too.
 api.state.dialect = 'mysql';
 let mysqlFull = 0;
