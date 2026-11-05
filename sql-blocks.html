@@ -464,6 +464,12 @@ input[type="number"]{max-width:88px}
 .nlint.warn{background:var(--drop)}
 .edge-opt{display:inline-flex;align-items:center;gap:6px;margin:0 0 12px;font-size:11.5px;color:var(--ink-2);cursor:pointer}
 .edge-opt input{width:14px;height:14px;accent-color:var(--accent);flex:none}
+.edge-opt + .edge-opt{margin-left:14px}
+.engine-msg{font-size:11px;color:var(--ink-3);margin-left:8px}
+.same-box p{margin:6px 0;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.6}
+.same-box .ok{background:var(--accent-soft);color:var(--accent-ink)}
+.same-box .bad{background:color-mix(in srgb,var(--drop) 12%,transparent);color:var(--drop)}
+.same-box .na{background:var(--bg);color:var(--ink-2);border:1px solid var(--line)}
 table.grid tr.edge td{font-style:italic;background:color-mix(in srgb,var(--f-wide) 7%,transparent)}
 .dnote b{color:var(--ink-2);font-weight:500}
 .dnote code{font-family:var(--mono)}
@@ -716,6 +722,7 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
       <p class="dnote" id="fmt-note" hidden></p>
       <details class="imp diffbox" id="diffbox" hidden>
         <summary>跟原本貼的 SQL 比一比</summary>
+        <div id="same" class="same-box"></div>
         <div id="diff"></div>
       </details>
       <div class="dopt"><label><input type="checkbox" id="quote-all"> 識別字一律加引號（貼進挑剔的工具時比較保險）</label></div>
@@ -733,6 +740,9 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
       <div class="stage-body">
         <label class="edge-opt" title="每張表多三列：NULL、重複的對照值（含同分）、配不到的值。一對多、NULL、同分的問題在乾淨的示意資料上看不出來。">
           <input type="checkbox" id="edge-data"> 邊界資料：每張表多加 NULL、重複、配不到的列</label>
+        <label class="edge-opt" title="按下去才下載（約 1 MB，之後瀏覽器會快取）。資料只在這個瀏覽器裡，不會上傳。">
+          <input type="checkbox" id="engine-on"> 用瀏覽器裡的 SQLite 真的跑</label>
+        <span class="engine-msg" id="engine-msg"></span>
         <div class="caption" id="caption"></div>
         <div class="flow" id="flow"></div>
         <p class="foot" id="foot"></p>
@@ -829,6 +839,8 @@ const PAL_LABEL = {
    拉新方塊進來、拖著方塊走都只會選到，要點一下才打開面板 */
 const state = { schema:{}, nodes:[], edges:[], sel:null, inspOpen:false, steps:[], step:0, timer:null, uid:0,
                 dialect:'mysql', quoteAll:false };
+/* 瀏覽器裡的 SQLite（9a 節）：evalNode 一開始就會看它，所以放在最前面 */
+const engine = {status:'off', error:'', factory:null, cache:null, failed:new Map(), dataSig:'', db:null, checkSig:'', checkDB:null};
 
 const SCHEMA_RAW = {
 "students":"學生|student_id:學號,name:姓名,gender:性別,birth_date:生日,class_name:班級",
@@ -1029,6 +1041,8 @@ function dupFlags(rows){
 
 function evalNode(node, ctx){
   if(!node) return EMPTY;
+  /* SQLite 真的跑過的步驟直接用它的結果 */
+  if(engine.cache && engine.cache.has(node.id)) return engine.cache.get(node.id);
   ctx = ctx || {path:new Set(), memo:new Map()};
   if(ctx.memo.has(node.id)) return ctx.memo.get(node.id);
   if(ctx.path.has(node.id)) return EMPTY;
@@ -5113,7 +5127,9 @@ function buildSteps(){
     if(R.cols.length) steps.push({
       node:out.id,
       title:'完成',
-      cap:(kinds.own
+      cap:(engine.cache && engine.cache.has(out.id ? srcOf(out.id, 0) && srcOf(out.id, 0).id : '')
+        ? '這是下面那段 SQL（照 PostgreSQL 寫法）在<strong>瀏覽器裡的 SQLite</strong> 實際跑在'+(kinds.own ? (kinds.made ? '你的資料和示意資料' : '你貼上的資料') : '示意資料')+'上的結果，不是 '+esc(D().name)+' 跑出來的。'
+        : kinds.own
         ? '這是下面那段 SQL 的算法套在<strong>'+(kinds.made ? '你的資料和示意資料' : '你貼上的資料')+'</strong>上、由這台工具模擬出來的樣子，不是資料庫跑出來的結果。'
         : '這是下面那段 SQL 跑在<strong>示意資料</strong>上的樣子。')+'<strong>改上面任何一個步驟，SQL 和這張表會同時跟著變。</strong>',
       render: box => box.appendChild(miniTable('最終結果', R, {tint:(r,i)=>TINTS[i % TINTS.length]}))
@@ -5369,7 +5385,12 @@ function renderStage(){
   /* 這裡不能說「這就是 SQL 會回給你的結果」—— 資料是編的，數字不是真的。
      真正成立的只有一件事：每一步的算法跟 SQL 一樣。 */
   const kinds = dataKinds();
-  document.getElementById('foot').textContent = kinds.own
+  const real = engine.cache && engine.cache.size;
+  document.getElementById('foot').textContent = real
+    ? '這些表是瀏覽器裡的 SQLite 真的跑出來的（SQL 照 PostgreSQL 的寫法產生），不是 '+D().name+' 的結果：函式、型別、排序規則不同時數字可能不一樣。'+
+      '資料是'+(kinds.own ? (kinds.made ? '你貼上的 CSV 和這台工具編的示意資料' : '你貼上的 CSV') : '這台工具編的示意資料')+'。'+
+      (engine.failed.size ? 'SQLite 跑不動的 '+engine.failed.size+' 步照舊用模擬。' : '')
+    : kinds.own
     ? '有表用的是你貼上的 CSV'+(kinds.made ? '，其他表的資料是這台工具編的' : '')+'。預覽是這台工具照每一步的算法模擬的，不是資料庫跑出來的結果；型別、排序規則跟資料庫不同時，數字可能不一樣。'
     : '資料是示意的，這台工具自己編的，不是你資料庫裡的數字。這裡示範的是每一步「怎麼算」，換成真資料算法一樣。';
   document.getElementById('btn-prev').disabled = i === 0;
@@ -5488,17 +5509,140 @@ document.getElementById('btn-adv').addEventListener('click', ()=>loadPreset(pres
 /* ============================================================
    9. REFRESH
    ============================================================ */
+/* ============================================================
+   9a. 瀏覽器裡的 SQL 引擎（SQLite，sql.js）
+   打開才下載。每一步的預覽改成把「接到這一步為止」的 SQL 真的跑一次；跑不動的步驟
+   （SQLite 沒有的函式）照舊用模擬，並說是哪幾步。SQL 一律照 PostgreSQL 的寫法產生 ——
+   跑的是 SQLite，不是使用者選的資料庫，畫面上照實講（規則 4）
+   ============================================================ */
+const ENGINE_URL = 'https://cdn.jsdelivr.net/npm/sql.js@1.13.0/dist/';
+/* sql.js 的資料庫包成 exec / run 兩個方法；測試換成 Node 內建的 SQLite，介面一樣 */
+function sqljsAdapter(db){
+  return {
+    exec(sql){ const r = db.exec(sql); const last = r[r.length - 1]; return last ? {cols:last.columns, rows:last.values} : {cols:[], rows:[]}; },
+    run(sql, params){ db.run(sql, params || []); },
+    close(){ db.close(); }
+  };
+}
+function useEngine(factory){ engine.factory = factory; engine.status = 'ready'; engine.dataSig = ''; engine.checkSig = ''; }
+function loadEngine(){
+  if(engine.status === 'ready' || engine.status === 'loading') return;
+  engine.status = 'loading'; engine.error = '';
+  renderEngineMsg();
+  const fail = msg => { engine.status = 'error'; engine.error = msg; renderEngineMsg(); refresh(); };
+  try {
+    const s = document.createElement('script');
+    s.src = ENGINE_URL + 'sql-wasm.js';
+    s.onerror = () => fail('下載不到 SQLite（'+ENGINE_URL+'），檢查網路後再勾一次。');
+    s.onload = () => {
+      if(typeof window.initSqlJs !== 'function') return fail('SQLite 載入不完整。');
+      window.initSqlJs({locateFile:f=>ENGINE_URL + f})
+        .then(SQL=>{ useEngine(()=>sqljsAdapter(new SQL.Database())); renderEngineMsg(); refresh(); })
+        .catch(err=>fail('SQLite 啟動失敗：'+(err && err.message || err)));
+    };
+    document.head.appendChild(s);
+  } catch(err){ fail('SQLite 載入失敗：'+(err && err.message || err)); }
+}
+/* 把 state.schema 的表建進一個新的 SQLite：示意資料、使用者的 CSV，edge 時加上邊界資料 */
+function engineDB(edge){
+  const db = engine.factory();
+  const nss = new Set(Object.keys(state.schema).filter(k=>k.indexOf('.') > 0).map(k=>k.slice(0, k.lastIndexOf('.'))));
+  nss.forEach(ns=>db.run('ATTACH DATABASE \':memory:\' AS "'+ns.replace(/"/g, '')+'"'));
+  Object.keys(state.schema).forEach(full=>{
+    const t = state.schema[full], dot = full.lastIndexOf('.');
+    const name = dot > 0 ? '"'+full.slice(0, dot)+'"."'+full.slice(dot + 1)+'"' : '"'+full+'"';
+    if(!t.cols.length) return;
+    db.run('CREATE TABLE '+name+' ('+t.cols.map(c=>'"'+c.name+'" '+(/^[A-Z_ ]+$/i.test(c.type || '') ? c.type : 'TEXT')).join(', ')+')');
+    const node = {table:dot > 0 ? full.slice(dot + 1) : full, ns:dot > 0 ? full.slice(0, dot) : null};
+    const rows = t.rows.concat(edge && t.source !== 'csv' ? edgeRows(node, t) : []);
+    const ins = 'INSERT INTO '+name+' VALUES ('+t.cols.map(()=>'?').join(', ')+')';
+    rows.forEach(r=>db.run(ins, t.cols.map((c, i)=>r[i] === undefined ? null : r[i])));
+  });
+  return db;
+}
+/* SQLite 沒有 DATE 'yyyy-mm-dd' 這種常值；換成同樣的文字（ISO 日期照字串比就是照日期比） */
+const forSQLite = sql => sql.replace(/\bDATE\s*'(\d{4}-\d{2}-\d{2})'/gi, "date('$1')")
+  .replace(/CAST\('(\d{4}-\d{2}-\d{2})' AS DATE\)/gi, "date('$1')");
+/* 「接到 n 為止」的 SQL：把結果改接到 n，照 PostgreSQL 的寫法產生 */
+function sqlAt(n){
+  const out = state.nodes.find(x=>x.type === 'output');
+  const keep = {edges:state.edges, dialect:state.dialect, segs:state.sqlSegs, lines:state.sqlLines};
+  state.edges = keep.edges.filter(e=>e.to !== out.id).concat([{from:n.id, to:out.id, port:0}]);
+  state.dialect = 'postgres';
+  try { return buildSQL(); }
+  finally { state.edges = keep.edges; state.dialect = keep.dialect; state.sqlSegs = keep.segs; state.sqlLines = keep.lines; }
+}
+/* 每次 refresh 先把每一步真的跑一遍，evalNode 就直接拿結果 */
+function runEngine(){
+  engine.cache = null; engine.failed = new Map();
+  if(!state.engineOn || engine.status !== 'ready') return;
+  const sig = JSON.stringify([state.schema, !!state.edge]);
+  if(sig !== engine.dataSig){ try { if(engine.db) engine.db.close(); } catch(err){} engine.db = engineDB(state.edge); engine.dataSig = sig; }
+  const cache = new Map();
+  chainOrder().forEach(n=>{
+    let sql = '';
+    try {
+      sql = sqlAt(n);
+      if(/^--/.test(sql)) throw new Error(sql.replace(/^--\s*/, ''));
+      cache.set(n.id, engine.db.exec(forSQLite(sql)));
+    } catch(err){ engine.failed.set(n.id, String(err && err.message || err)); }
+  });
+  engine.cache = cache;
+}
+function renderEngineMsg(){
+  const el = document.getElementById('engine-msg');
+  if(!el) return;
+  el.textContent = !state.engineOn ? '' : engine.status === 'loading' ? 'SQLite 下載中…'
+    : engine.status === 'error' ? engine.error
+    : engine.failed.size ? 'SQLite 跑不動 '+engine.failed.size+' 步，那幾步照舊用模擬' : '';
+}
+/* 原本貼的 SQL 和現在的步驟各跑一次，資料含邊界資料（NULL、重複、配不到的列最容易跑出差別） */
+function sameCheck(){
+  if(!state.origin || !state.engineOn || engine.status !== 'ready') return null;
+  const sig = JSON.stringify(state.schema);
+  if(sig !== engine.checkSig){ try { if(engine.checkDB) engine.checkDB.close(); } catch(err){} engine.checkDB = engineDB(true); engine.checkSig = sig; }
+  const out = state.nodes.find(n=>n.type === 'output'), last = out ? srcOf(out.id, 0) : null;
+  if(!last) return {kind:'na', msg:'步驟還沒接到「結果」。'};
+  let a, b;
+  try { a = engine.checkDB.exec(forSQLite(state.origin.sql)); }
+  catch(err){ return {kind:'na', msg:'原本貼的 SQL 在 SQLite 跑不動（'+String(err && err.message || err)+'），沒辦法比。常見原因是用了 SQLite 沒有的函式。'}; }
+  try { const sql = sqlAt(last); if(/^--/.test(sql)) throw new Error(sql.replace(/^--\s*/, '')); b = engine.checkDB.exec(forSQLite(sql)); }
+  catch(err){ return {kind:'na', msg:'現在的步驟在 SQLite 跑不動（'+String(err && err.message || err)+'），沒辦法比。'}; }
+  /* 原文有 ORDER BY 才比順序，不然當成一堆列比 */
+  const ordered = /\bORDER\s+BY\b/i.test(state.origin.sql.replace(/\([^()]*\)/g, ''));
+  const norm = rows => { const r = rows.map(x=>JSON.stringify(x)); return ordered ? r : r.sort(); };
+  const ra = norm(a.rows), rb = norm(b.rows);
+  if(a.cols.length !== b.cols.length)
+    return {kind:'bad', msg:'欄數不一樣：原本 '+a.cols.length+' 欄（'+a.cols.join(', ')+'），現在 '+b.cols.length+' 欄（'+b.cols.join(', ')+'）。'};
+  const at = ra.findIndex((r, i)=>r !== rb[i]);
+  if(ra.length === rb.length && at < 0)
+    return {kind:'ok', msg:'結果一樣：兩邊都是 '+ra.length+' 列'+(a.cols.join(',') !== b.cols.join(',') ? '（欄名不同：'+a.cols.join(', ')+' → '+b.cols.join(', ')+'）' : '')+'。'};
+  return {kind:'bad', msg:'結果不一樣：原本 '+ra.length+' 列、現在 '+rb.length+' 列'+
+    (at >= 0 ? '；'+(ordered ? '第 '+(at + 1)+' 列' : '排序後第一個不同的列')+'：原本 '+(ra[at] || '（沒有）')+'，現在 '+(rb[at] || '（沒有）') : '')+'。'};
+}
+function renderSame(){
+  const el = document.getElementById('same');
+  if(!el) return;
+  const r = sameCheck();
+  el.innerHTML = !state.origin ? '' : !r
+    ? '<p class="na">勾選下面的「用瀏覽器裡的 SQLite 真的跑」，就能把原本貼的 SQL 和現在的步驟在同一份資料（含邊界資料）上各跑一次，看結果一不一樣。</p>'
+    : '<p class="'+r.kind+'">'+esc(r.msg)+'<br><small>用瀏覽器裡的 SQLite 跑的，不是 '+esc(D().name)+'；資料是'+(dataKinds().own ? '你的 CSV 和' : '')+'示意資料加上邊界資料。</small></p>';
+}
+
 function refresh(keepInspector){
   /* OR 篩選有好幾個同名欄位，要連第幾組第幾個一起記，焦點才回得到原位 */
   const ds = keepInspector && document.activeElement && document.activeElement.dataset;
   const focusKey = ds && ds.f ? '[data-f="'+ds.f+'"]'+
     (ds.ob !== undefined ? '[data-ob="'+ds.ob+'"][data-oc="'+ds.oc+'"]' : '') : null;
+  try { runEngine(); } catch(err){ engine.cache = null; }          /* 引擎出錯就退回模擬 */
+  renderEngineMsg();
   try { state.lint = lintGraph(); } catch(err){ state.lint = []; }   /* 健檢出錯不能拖垮整頁 */
   renderNodes();
   drawWires();
   if(!keepInspector) renderInspector();
   document.getElementById('sql').innerHTML = sqlHTML(shownSQL());
   renderDiff();
+  renderSame();
   renderLint();
   document.getElementById('dnote').innerHTML = dialectNote();
   renderInfoSQL();
@@ -7389,6 +7533,12 @@ dsel.value = state.dialect;
 dsel.addEventListener('change', ()=>{
   state.dialect = dsel.value;
   try { localStorage.setItem('sqlblocks.dialect', state.dialect); } catch(err){}
+  refresh();
+});
+/* 打開才下載 SQLite；不記住開關，下次來不會自己下載 */
+document.getElementById('engine-on').addEventListener('change', e=>{
+  state.engineOn = !!e.target.checked;
+  if(state.engineOn) loadEngine();
   refresh();
 });
 const fsel = document.getElementById('sqlfmt');

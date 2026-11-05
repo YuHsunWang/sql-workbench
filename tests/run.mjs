@@ -335,6 +335,81 @@ test('regression: imports never swap a function, drop a layer or invent a column
   return `${refused.length + refusedAtBuild.length} shapes refused; SUM(a*b), GROUP BY expr, COUNT(1), NOW() exact in SQLite`;
 });
 
+/* sql.js in the browser; Node's own SQLite here, behind the same exec / run interface */
+const nodeEngine = () => {
+  const db = new DatabaseSync(':memory:');
+  return {
+    exec(sql) { const st = db.prepare(sql); const cols = st.columns().map(c => c.name); return {cols, rows: st.all().map(r => cols.map(c => r[c]))}; },
+    run(sql, params) { db.prepare(sql).run(...(params || [])); },
+    close() { db.close(); },
+  };
+};
+
+/* The preview imitated SQL in JavaScript: what it did not know became 「由資料庫計算」,
+   and every new shape needed another imitation (issue #2). With the engine on, each
+   step's preview is that step's SQL really run by SQLite; the page says SQLite ran it,
+   not the chosen database; a step SQLite cannot run falls back and is counted. */
+test('engine: each step is really run, labelled, and falls back step by step', () => {
+  const app = loadApp();
+  app.useEngine(nodeEngine);
+  app.state.engineOn = true;
+  app.state.dialect = 'mssql';
+  app.document.getElementById('sqlin').value = "SELECT name, INSTR(name, '小') AS pos FROM students WHERE gender = '女' ORDER BY name";
+  app.document.getElementById('do-parse').listeners.click();
+  const out = app.state.nodes.find(n => n.type === 'output');
+  const rows = json(app.evalNode(out).rows);
+  /* the simulation knows no INSTR; SQLite does, on the same sample rows */
+  const db = nodeEngine();
+  const t = app.state.schema.students;
+  db.run(`CREATE TABLE students (${t.cols.map(c => c.name).join(', ')})`);
+  t.rows.forEach(r => db.run(`INSERT INTO students VALUES (${r.map(() => '?').join(', ')})`, r));
+  assert.deepEqual(rows, json(db.exec("SELECT name, INSTR(name, '小') AS pos FROM students WHERE gender = '女' ORDER BY name").rows));
+  assert.ok(rows.length > 0 && rows.every(r => typeof r[1] === 'number'));
+  app.renderStage();
+  assert.match(app.document.getElementById('foot').textContent, /SQLite 真的跑出來的[\s\S]*不是 SQL Server 的結果/);
+  /* SQLite has no DATE_TRUNC: that step and the column pick after it (whose SQL includes
+     it) fall back to the imitation and are counted; the step before still really runs */
+  app.document.getElementById('sqlin').value = "SELECT name, DATE_TRUNC('month', birth_date) AS m FROM students WHERE gender = '女'";
+  app.document.getElementById('do-parse').listeners.click();
+  assert.deepEqual(json([...app.engine.failed.keys()].map(id => app.state.nodes.find(n => n.id === id).type)), ['derive', 'select']);
+  assert.ok(app.engine.cache.has(app.state.nodes.find(n => n.type === 'filter').id));
+  assert.equal(app.evalNode(app.state.nodes.find(n => n.type === 'output')).rows[0][1], '（由資料庫計算）');
+  assert.match(app.document.getElementById('engine-msg').textContent, /跑不動 2 步/);
+  /* off again: back to the imitation, and the page stops saying SQLite ran it */
+  app.state.engineOn = false;
+  app.document.getElementById('do-parse').listeners.click();
+  app.renderStage();
+  assert.doesNotMatch(app.document.getElementById('foot').textContent, /SQLite/);
+  return 'INSTR computed by SQLite and labelled; DATE_TRUNC and the step after fall back, counted; the filter before still runs';
+});
+
+/* Changing a step can change the result without anyone noticing. The pasted SQL and
+   the current steps run on the same rows, edge rows included (NULLs are where NOT IN
+   and NOT EXISTS part ways), and a difference is said plainly (issue #2). */
+test('engine: the pasted SQL and the current steps are run side by side', () => {
+  const app = loadApp();
+  app.useEngine(nodeEngine);
+  app.state.engineOn = true;
+  app.state.dialect = 'postgres';
+  app.document.getElementById('sqlin').value = 'SELECT name FROM students WHERE student_id NOT IN (SELECT student_id FROM scores)';
+  app.document.getElementById('do-parse').listeners.click();
+  let r = app.sameCheck();
+  assert.equal(r.kind, 'ok', r.msg);
+  assert.match(app.document.getElementById('same').innerHTML, /結果一樣[\s\S]*不是 PostgreSQL/);
+  /* NOT IN → NOT EXISTS: same on clean rows, different once the lookup has a NULL */
+  const semi = app.state.nodes.find(n => n.type === 'semijoin');
+  app.state.sel = semi.id;
+  app.document.getElementById('inspector').listeners.change({target: {dataset: {f: 'form'}, value: 'NOT EXISTS'}});
+  r = app.sameCheck();
+  assert.equal(r.kind, 'bad', r.msg);
+  assert.match(r.msg, /原本 0 列/);
+  /* SQL SQLite cannot run is not compared, and says why */
+  app.document.getElementById('sqlin').value = 'SELECT TOP 3 name FROM students';
+  app.document.getElementById('do-parse').listeners.click();
+  assert.equal(app.sameCheck().kind, 'na');
+  return 'unchanged: same; NOT IN → NOT EXISTS differs on the NULL edge row; TOP not comparable';
+});
+
 /* One CTE per step is easy to match against the canvas but too long to paste back
    into a project (issue #3). The compact format folds steps into one SELECT, but must
    never fold across what changes the meaning: a filter after a window function, after
