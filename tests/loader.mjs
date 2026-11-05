@@ -94,7 +94,7 @@ export function loadApp(stored = {}) {
     'renderInspector', 'inspector', 'buildSteps', 'orVenn', 'joinPairsVenn', 'andChain', 'andVenn', 'andAfter', 'andFromPlain', 'adoptCols', 'colChoices',
     'prune', 'renderStage', 'rowFlow', 'sqlHTML', 'stepIndexFor', 'select',
     'snapshot', 'validSnapshot', 'undo', 'redo', 'recordHistory', 'hist', 'encodeShare', 'decodeShare',
-    'lintGraph', 'edgeRows', 'renderLint', 'renderNodes',
+    'lintGraph', 'edgeRows', 'renderLint', 'renderNodes', 'renderInfoSQL',
   ];
   const marker = '})();';
   const at = match[1].lastIndexOf(marker);

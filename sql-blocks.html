@@ -248,6 +248,12 @@ details.imp summary{
 details.imp summary::-webkit-details-marker{display:none}
 details.imp summary::before{content:"▸";transition:transform .15s;display:inline-block}
 details.imp[open] summary::before{transform:rotate(90deg)}
+details.sub-imp{margin-top:8px}
+details.sub-imp summary{cursor:pointer;font-size:11.5px;color:var(--ink-2)}
+.info-sql{margin:6px 0;padding:8px;max-height:180px;overflow:auto;white-space:pre;
+  font-family:var(--mono);font-size:10.5px;line-height:1.5;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--ink)}
+.grid th small{display:block;font-weight:400;color:var(--ink-3);font-family:var(--body);font-size:10px}
+.mt-name .own{color:var(--accent-ink);font-weight:600}
 textarea{
   width:100%;margin-top:9px;min-height:118px;resize:vertical;
   font-family:var(--mono);font-size:11.5px;line-height:1.55;
@@ -651,9 +657,23 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
           <div class="pbody" id="schema-list" style="padding-top:0"></div>
           <details class="imp">
             <summary>貼上你自己的 schema</summary>
-            <textarea id="ddl" spellcheck="false" placeholder="CREATE TABLE orders (&#10;  order_id INT,&#10;  amount DECIMAL(10,2)&#10;);"></textarea>
+            <textarea id="ddl" spellcheck="false" placeholder="CREATE TABLE orders (&#10;  order_id INT COMMENT '訂單編號',&#10;  amount DECIMAL(10,2) COMMENT '金額'&#10;);"></textarea>
             <button class="btn" id="btn-parse" style="margin-top:8px;width:100%">解析並載入</button>
-            <p class="hint" id="parse-msg">讀得懂一般的 <code>CREATE TABLE</code>。因為沒有真資料，會自動編幾列示範資料給逐步檢視用。</p>
+            <p class="hint" id="parse-msg">讀得懂 <code>CREATE TABLE</code>，欄位說明（<code>COMMENT '…'</code>、<code>COMMENT ON COLUMN</code>、<code>sp_addextendedproperty</code>）會變成欄名旁邊的中文。也可以貼下面那段查詢的結果。因為沒有真資料，會自動編幾列示範資料給逐步檢視用。</p>
+            <details class="sub-imp">
+              <summary>一次匯入整個資料庫的結構</summary>
+              <p class="hint">在你的資料庫跑這段查詢（依上面選的方言），把結果整片複製貼到上面的框，再按「解析並載入」。</p>
+              <pre class="info-sql" id="info-sql"></pre>
+              <button class="btn ghost" id="btn-info-copy" style="width:100%">複製查詢</button>
+            </details>
+          </details>
+          <details class="imp">
+            <summary>貼上 CSV 當一張表（用你的資料）</summary>
+            <input type="text" class="search" id="csv-name" placeholder="表名，例如 orders" spellcheck="false" style="margin-top:9px">
+            <textarea id="csv-text" spellcheck="false" placeholder="id,amount,status&#10;1,120,paid&#10;2,80,new"></textarea>
+            <input type="file" id="csv-file" accept=".csv,.tsv,.txt,text/csv" style="margin-top:6px;width:100%;font-size:11.5px">
+            <button class="btn" id="btn-csv" style="margin-top:8px;width:100%">加入這張表</button>
+            <p class="hint" id="csv-msg">第一列是欄名，型別照前面的值猜。預覽就用你的資料算（最多 200 列），資料只留在這個瀏覽器，不會上傳。</p>
           </details>
         </section>
         </div>
@@ -1005,7 +1025,8 @@ function evalNode(node, ctx){
 
   case 'table': {
     const t = schemaOf(node);
-    return t ? {cols:t.cols.map(c=>c.name), rows:t.rows.map(r=>r.slice()).concat(state.edge ? edgeRows(node, t) : [])} : EMPTY;
+    /* 邊界資料是編的：使用者自己的 CSV 不摻編的列，「這是你的資料」才說得通 */
+    return t ? {cols:t.cols.map(c=>c.name), rows:t.rows.map(r=>r.slice()).concat(state.edge && t.source !== 'csv' ? edgeRows(node, t) : [])} : EMPTY;
   }
 
   case 'semijoin': {
@@ -2319,7 +2340,8 @@ function nodeSummary(n){
       const shown = dot > 0
         ? '<span style="color:var(--ink-3)">'+disp.slice(0, dot+1)+'</span>'+disp.slice(dot+1)
         : (disp || '—');
-      return t ? '<code>'+shown+'</code><br>'+t.cols.length+' 欄 · '+t.rows.length+' 列'
+      return t ? '<code>'+shown+'</code><br>'+t.cols.length+' 欄 · '+t.rows.length+' 列'+
+                 (t.source === 'csv' ? '（你的資料）' : '')
                : '<code>'+shown+'</code><br><span class="warn">找不到這張表</span>';
     }
     case 'join': {
@@ -3063,7 +3085,7 @@ function chOf(name){
   }));
   return (CH_CACHE[name] = hit);
 }
-const colOpt = (c, cur) => opt(c, cur, c + (chOf(c) ? '  —  ' + chOf(c) : ''));
+const colOpt = (c, cur) => opt(c, cur, c + (chOf(c) ? '  —  ' + esc(chOf(c)) : ''));
 /* 欄位下拉：存的值不在清單裡時要老實顯示出來 —— 不然瀏覽器會秀第一個選項，
    看起來選好了，其實存的是別的（SQL 就會冒出空欄位）。ok 是本來就合法的特殊值，像 * 或空字串 */
 function colChoices(avail, cur, ok){
@@ -3072,7 +3094,7 @@ function colChoices(avail, cur, ok){
   return head + avail.map(c=>colOpt(c, cur)).join('');
 }
 const colChip = (c, on, attr) => '<button class="chip" '+attr+'="'+c+'" aria-pressed="'+on+'"><b>'+c+'</b>'+
-  (chOf(c) ? '<i>'+chOf(c)+'</i>' : '')+'</button>';
+  (chOf(c) ? '<i>'+esc(chOf(c))+'</i>' : '')+'</button>';
 function esc(v){ return String(v == null ? '' : v).replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
 /* 已經是 HTML 的訊息（使用者的值用 esc 跳脫過）要放進 title / aria-label：
    拿掉標籤、把實體還原成原本的字，再整段跳脫一次（連 & 一起），
@@ -3109,7 +3131,7 @@ function renderInspector(){
 
   if(n.type === 'table'){
     h += '<div class="rowf"><label>選表</label><select data-f="table">'+
-      Object.keys(state.schema).map(t=>opt(t, n.table, t+(state.schema[t].label?'（'+state.schema[t].label+'）':''))).join('')+'</select></div>';
+      Object.keys(state.schema).map(t=>opt(t, n.table, t+(state.schema[t].label?'（'+esc(state.schema[t].label)+'）':''))).join('')+'</select></div>';
     const t = schemaOf(n);
     if(t) h += '<div class="sec">欄位</div><ul class="cols">'+t.cols.map(c=>'<li><span>'+c.name+'</span><em>'+c.type+'</em></li>').join('')+'</ul>';
   }
@@ -3718,10 +3740,10 @@ function renderSchema(){
     return '<div class="tbl-row">'+
       '<button class="tbl-exp" data-exp="'+t+'" aria-expanded="'+open+'" aria-label="看欄位">'+(open ? '▾' : '▸')+'</button>'+
       '<button class="tbl-item" draggable="true" title="'+esc(t + (s.label ? ' — ' + s.label : ''))+'" data-add-table="'+t+'">'+
-      '<b>'+nm+'</b><span>'+(s.label ? s.label+' · ' : '')+s.cols.length+' 欄</span></button></div>'+
+      '<b>'+nm+'</b><span>'+(s.label ? esc(s.label)+' · ' : '')+s.cols.length+' 欄'+(s.source === 'csv' ? ' · 你的資料 '+s.rows.length+' 列' : '')+'</span></button></div>'+
       (open ? '<ul class="cols">'+cols.map(c=>
         '<li><span'+(hit(c) ? ' style="color:var(--accent-ink);font-weight:500"' : '')+'>'+c.name+'</span>'+
-        '<em class="ch">'+(c.ch || c.type)+'</em></li>').join('')+'</ul>' : '');
+        '<em class="ch">'+esc(c.ch || c.type)+'</em></li>').join('')+'</ul>' : '');
   }).join('') || '<p class="empty">沒有符合的表。<br>換個關鍵字試試。</p>';
 }
 document.getElementById('tbl-search').addEventListener('input', renderSchema);
@@ -3965,46 +3987,125 @@ function addNode(type, extra){
 /* --- DDL parser --- */
 document.getElementById('btn-parse').addEventListener('click', ()=>{
   const msg = document.getElementById('parse-msg');
-  const found = parseDDL(document.getElementById('ddl').value);
+  const text = document.getElementById('ddl').value;
+  /* CREATE TABLE 照 DDL 讀；不然當成「列出所有欄位」查詢的結果 */
+  const ddl = /create\s+(?:or\s+replace\s+)?(?:\w+\s+)?table\b/i.test(text);
+  const list = ddl ? null : parseColumnList(text);
+  const found = ddl ? parseDDL(text) : list.tables;
   if(!Object.keys(found).length){
-    msg.innerHTML = '沒讀到任何 <code>CREATE TABLE</code>。檢查一下括號和結尾的分號。';
+    msg.innerHTML = ddl ? '沒讀到任何 <code>CREATE TABLE</code>。檢查一下括號和結尾的分號。'
+      : '沒讀到任何 <code>CREATE TABLE</code>，也不像欄位清單（每列：表名、欄名、型別、說明）。';
     msg.style.color = 'var(--drop)';
     return;
   }
   setSrcLabel('');
-  state.schema = found;
+  /* 之前貼的 CSV 表是使用者的資料，留著；同名的才換掉 */
+  const keep = {};
+  Object.keys(state.schema).forEach(t=>{ if(state.schema[t].source === 'csv' && !found[t]) keep[t] = state.schema[t]; });
+  state.schema = Object.assign(keep, found);
   resetGraph();
   const out = mk('output', 640, 120, {});
   Object.keys(found).slice(0,2).forEach((t,i)=>mk('table', 26, 40 + i*174, {table:t}));
   state.sel = null;
-  msg.innerHTML = '讀到 <b>'+Object.keys(found).length+'</b> 張表。示範資料是自動編的，只給逐步檢視用。';
+  const labelled = Object.keys(found).reduce((s, t)=>s + found[t].cols.filter(c=>c.ch).length, 0);
+  msg.innerHTML = '讀到 <b>'+Object.keys(found).length+'</b> 張表'+(labelled ? '、<b>'+labelled+'</b> 個欄位說明' : '')+'。示範資料是自動編的，只給逐步檢視用。'+
+    (list && list.skipped.length ? '<br>跳過 '+list.skipped.length+' 個不是一般識別字的名字：<code>'+list.skipped.slice(0, 5).map(esc).join('</code>、<code>')+'</code>' : '');
   msg.style.color = 'var(--accent-ink)';
   renderSchema();
   state.step = 0;
   refresh();
 });
-function parseDDL(txt){
-  SAMPLE_GEN.clear();            /* 換一整套 schema 就重新分類 */
-  const out = {};
-  const re = /create\s+table\s+(?:if\s+not\s+exists\s+)?((?:[`"\[]?[A-Za-z_][\w$]*[`"\]]?)(?:\s*\.\s*[`"\[]?[A-Za-z_][\w$]*[`"\]]?)*)\s*\(([\s\S]*?)\)\s*;/gi;
-  let m;
-  while((m = re.exec(txt))){
-    const cols = splitTop(m[2]).map(part=>{
-      const s = part.trim().replace(/^[`"\[]|[`"\]]$/g,'');
-      if(!s || /^(primary|foreign|unique|constraint|key|index|check)\b/i.test(s)) return null;
-      const tk = s.split(/\s+/);
-      const cname = tk[0].replace(/[`"\[\]]/g,'');
-      const ctype = (tk[1] || 'TEXT').replace(/\(.*/,'').toUpperCase();
-      /* 欄名會被畫進 HTML，只收一般識別字 */
-      return /^[A-Za-z_][\w$]*$/.test(cname) ? {name:cname, ch:'', type:ctype} : null;
-    }).filter(Boolean);
-    if(cols.length) out[m[1].replace(/[`"\[\]\s]/g,'')] = {label:'', cols:cols, rows:fakeRows(cols)};
+/* 「列出所有欄位」的查詢跟著方言換 */
+function renderInfoSQL(){
+  const pre = document.getElementById('info-sql');
+  if(pre) pre.textContent = infoSchemaSQL(state.dialect);
+}
+document.getElementById('btn-info-copy').addEventListener('click', ()=>{
+  try { navigator.clipboard.writeText(infoSchemaSQL(state.dialect)); } catch(err){}
+});
+/* CSV 當一張表：欄位和資料都是使用者給的，標成 source:'csv'，預覽和說明都照實講是使用者的資料 */
+document.getElementById('btn-csv').addEventListener('click', ()=>{
+  const msg = document.getElementById('csv-msg');
+  const name = document.getElementById('csv-name').value.trim();
+  const fail = html => { msg.innerHTML = html; msg.style.color = 'var(--drop)'; };
+  if(!name.split('.').every(p=>IDENT.test(p))) return fail('先填表名：英文字母、數字和底線，不能數字開頭（schema.表名 也可以）。');
+  const got = parseCSV(document.getElementById('csv-text').value);
+  if(got.error) return fail(esc(got.error));
+  if(!got.rows.length) return fail('只有欄名、沒有資料列。');
+  const had = !!state.schema[name];
+  state.schema[name] = {label:'', cols:got.cols, rows:got.rows, source:'csv'};
+  Object.keys(CH_CACHE).forEach(k=>delete CH_CACHE[k]);
+  msg.innerHTML = (had ? '換掉了' : '加入了')+' <b>'+esc(name)+'</b>：'+got.cols.length+' 欄、'+got.rows.length+' 列'+
+    (got.total > got.rows.length ? '（共 '+got.total+' 列，只取前 '+got.rows.length+' 列）' : '')+
+    '。型別：'+got.cols.map(c=>esc(c.name)+' '+c.type).join('、')+'。預覽用的是你的資料。';
+  msg.style.color = 'var(--accent-ink)';
+  renderSchema();
+  refresh();
+});
+document.getElementById('csv-file').addEventListener('change', e=>{
+  const f = e.target.files && e.target.files[0];
+  if(!f || typeof FileReader === 'undefined') return;
+  const r = new FileReader();
+  r.onload = () => {
+    document.getElementById('csv-text').value = String(r.result || '');
+    const nm = document.getElementById('csv-name');
+    if(!nm.value.trim()) nm.value = f.name.replace(/\.[^.]+$/, '').replace(/[^\w]/g, '_').replace(/^(\d)/, '_$1');
+  };
+  r.readAsText(f);
+});
+/* ---- 貼進來的結構 ----
+   字串和帶引號的名字裡可能有逗號、括號、分號（COMMENT '姓名, 全名'），切段前先跳過 */
+function quotedEnd(s, i){
+  const c = s[i];
+  /* 引號要在詞的開頭才算（N'…' 的 N 例外）：b"x 這種寫錯的名字不能吃掉後面整段 */
+  const prev = s[i-1] || ' ', word = /[\w$]/;
+  if((c === "'" || c === '"' || c === '`' || c === '[') && word.test(prev) &&
+     !(c === "'" && /[Nn]/.test(prev) && !word.test(s[i-2] || ' '))) return -1;
+  if(c === "'" || c === '"' || c === '`'){
+    let j = i + 1;
+    while(j < s.length){
+      if(c === "'" && s[j] === '\\'){ j += 2; continue; }        /* MySQL 的 \' */
+      if(s[j] === c){ if(s[j+1] === c){ j += 2; continue; } return j + 1; }
+      j++;
+    }
+    return s.length;
+  }
+  if(c === '['){ const j = s.indexOf(']', i); return j < 0 ? s.length : j + 1; }
+  if(c === '-' && s[i+1] === '-'){ const j = s.indexOf('\n', i); return j < 0 ? s.length : j; }
+  if(c === '/' && s[i+1] === '*'){ const j = s.indexOf('*/', i + 2); return j < 0 ? s.length : j + 2; }
+  return -1;
+}
+/* 字串內容換成空白（位置不變），在上面找關鍵字才不會找到字串裡去 */
+function blankQuoted(s){
+  let out = '', i = 0;
+  while(i < s.length){
+    const e = quotedEnd(s, i);
+    if(e < 0){ out += s[i++]; continue; }
+    out += s[i] + ' '.repeat(Math.max(0, e - i - 2)) + (e - i > 1 ? s[e-1] : '');
+    i = e;
   }
   return out;
 }
+/* '…'、N'…'、MySQL 的 "…" 字串常值 → 文字 */
+function sqlStringAt(s, i){
+  while(i < s.length && /\s/.test(s[i])) i++;
+  if((s[i] === 'N' || s[i] === 'n') && s[i+1] === "'") i++;
+  const q = s[i];
+  if(q !== "'" && q !== '"') return null;
+  let v = '', j = i + 1;
+  while(j < s.length){
+    if(q === "'" && s[j] === '\\' && (s[j+1] === "'" || s[j+1] === '\\')){ v += s[j+1]; j += 2; continue; }
+    if(s[j] === q){ if(s[j+1] === q){ v += q; j += 2; continue; } return {v:v, end:j + 1}; }
+    v += s[j++];
+  }
+  return null;
+}
 function splitTop(s){
-  const parts = []; let depth = 0, cur = '';
-  for(const ch of s){
+  const parts = []; let depth = 0, cur = '', i = 0;
+  while(i < s.length){
+    const e = quotedEnd(s, i);
+    if(e >= 0){ cur += s.slice(i, e); i = e; continue; }
+    const ch = s[i++];
     if(ch === '(') depth++;
     if(ch === ')') depth--;
     if(ch === ',' && depth === 0){ parts.push(cur); cur = ''; } else cur += ch;
@@ -4012,6 +4113,193 @@ function splitTop(s){
   if(cur.trim()) parts.push(cur);
   return parts;
 }
+const unquoteName = s => s.replace(/[`"\[\]\s]/g, '');
+const IDENT = /^[A-Za-z_][\w$]*$/;
+const MAX_LABEL = 60;
+const cleanLabel = v => String(v || '').replace(/\s+/g, ' ').trim().slice(0, MAX_LABEL);
+/* 說明要掛到哪張表：schema.t 和 t 都可能 */
+function ddlTable(out, path){
+  const full = unquoteName(path), last = full.split('.').pop();
+  return out[full] || out[last] || Object.keys(out).filter(k=>k.split('.').pop() === last).map(k=>out[k])[0] || null;
+}
+function parseDDL(txt){
+  SAMPLE_GEN.clear();            /* 換一整套 schema 就重新分類 */
+  const out = {};
+  const blank = blankQuoted(txt);
+  const head = /create\s+(?:or\s+replace\s+)?(?:(?:global\s+|local\s+)?(?:temporary|temp)\s+)?table\s+(?:if\s+not\s+exists\s+)?/gi;
+  const nameRe = /^((?:[`"\[]?[A-Za-z_][\w$]*[`"\]]?)(?:\s*\.\s*[`"\[]?[A-Za-z_][\w$]*[`"\]]?)*)\s*\(/;
+  let m;
+  while((m = head.exec(blank))){
+    const nm = nameRe.exec(txt.slice(head.lastIndex));
+    if(!nm) continue;
+    const open = head.lastIndex + nm[0].length - 1;
+    /* 找對應的右括號，再往後到分號是表格選項（ENGINE=…、COMMENT='…'） */
+    let depth = 0, i = open, close = -1;
+    while(i < txt.length){
+      const e = quotedEnd(txt, i);
+      if(e >= 0){ i = e; continue; }
+      if(txt[i] === '(') depth++;
+      if(txt[i] === ')' && --depth === 0){ close = i; break; }
+      i++;
+    }
+    if(close < 0) continue;
+    let end = close + 1;
+    while(end < txt.length && blank[end] !== ';' && !/^create\s/i.test(blank.slice(end, end + 7))) end++;
+    const cols = splitTop(txt.slice(open + 1, close)).map(part=>{
+      const s = part.trim();
+      if(!s || /^(primary|foreign|unique|constraint|key|index|check|fulltext|spatial|period|exclude)\b/i.test(s)) return null;
+      const first = /^(`[^`]*`|"[^"]*"|\[[^\]]*\]|[^\s(]+)\s*([A-Za-z_][\w]*)?/.exec(s);
+      const cname = unquoteName(first[1]);
+      const ctype = (first[2] || 'TEXT').toUpperCase();
+      /* 欄名會被畫進 HTML，只收一般識別字 */
+      if(!IDENT.test(cname)) return null;
+      /* MySQL 的欄位說明：name VARCHAR(20) COMMENT '學生姓名' */
+      const cm = /\bCOMMENT\s+/i.exec(blankQuoted(s));
+      const str = cm ? sqlStringAt(s, cm.index + cm[0].length) : null;
+      return {name:cname, ch:str ? cleanLabel(str.v) : '', type:ctype};
+    }).filter(Boolean);
+    if(!cols.length) continue;
+    const tm = /\bCOMMENT\s*=?\s*/i.exec(blank.slice(close + 1, end));
+    const tstr = tm ? sqlStringAt(txt, close + 1 + tm.index + tm[0].length) : null;
+    out[unquoteName(nm[1])] = {label:tstr ? cleanLabel(tstr.v) : '', cols:cols, rows:[]};
+  }
+  /* PostgreSQL / Oracle：COMMENT ON COLUMN t.c IS '…'、COMMENT ON TABLE t IS '…' */
+  const on = /COMMENT\s+ON\s+(COLUMN|TABLE)\s+/gi;
+  const pathRe = /^((?:[`"\[]?[A-Za-z_][\w$]*[`"\]]?)(?:\s*\.\s*[`"\[]?[A-Za-z_][\w$]*[`"\]]?)*)\s+IS\s+/i;
+  while((m = on.exec(blank))){
+    const pm = pathRe.exec(txt.slice(on.lastIndex));      /* 名字可能帶引號，從原文讀 */
+    const str = pm ? sqlStringAt(txt, on.lastIndex + pm[0].length) : null;
+    if(!str) continue;
+    const path = unquoteName(pm[1]).split('.');
+    if(m[1].toUpperCase() === 'TABLE'){ const t = ddlTable(out, path.join('.')); if(t) t.label = cleanLabel(str.v); continue; }
+    const col = path.pop(), t = ddlTable(out, path.join('.'));
+    const c = t && t.cols.find(c=>c.name === col);
+    if(c) c.ch = cleanLabel(str.v);
+  }
+  /* SQL Server：EXEC sp_addextendedproperty 'MS_Description', '…', 'SCHEMA', 'dbo', 'TABLE', 't', 'COLUMN', 'c'
+     （也可以寫成 @name = N'MS_Description', @value = N'…', @level1name = N't' …） */
+  const ext = /sp_addextendedproperty\b/gi;
+  while((m = ext.exec(blank))){
+    let i = ext.lastIndex;
+    const named = {}, pos = [];
+    for(;;){
+      while(i < txt.length && /[\s,]/.test(txt[i])) i++;
+      if(i >= txt.length || txt[i] === ';' || /^(exec|go)\b/i.test(blank.slice(i, i + 5))) break;
+      let key = null;
+      const pm = /^@(\w+)\s*=\s*/.exec(txt.slice(i));
+      if(pm){ key = pm[1].toLowerCase(); i += pm[0].length; }
+      const str = sqlStringAt(txt, i);
+      let v;
+      if(str){ v = str.v; i = str.end; }
+      else { const w = /^[^\s,;]+/.exec(txt.slice(i)); if(!w) break; v = w[0]; i += w[0].length; }
+      if(key) named[key] = v; else pos.push(v);
+    }
+    const get = (k, n) => named[k] !== undefined ? named[k] : pos[n];
+    if(String(get('name', 0)).toLowerCase() !== 'ms_description') continue;
+    const t = ddlTable(out, String(get('level1name', 5) || ''));
+    if(!t) continue;
+    if(String(get('level2type', 6) || '').toUpperCase() === 'COLUMN'){
+      const c = t.cols.find(c=>c.name === get('level2name', 7));
+      if(c) c.ch = cleanLabel(get('value', 1));
+    } else t.label = cleanLabel(get('value', 1));
+  }
+  /* 說明會影響編出來的示範資料（「分數」「日期」），讀完說明才編 */
+  Object.keys(out).forEach(k=>{ out[k].rows = fakeRows(out[k].cols); });
+  return out;
+}
+/* 一格一格切開貼上的表格：資料庫工具複製出來是 tab 分隔，psql 是 | 分隔，CSV 是逗號
+  （雙引號包起來的格子裡可以有逗號、換行，"" 是一個雙引號） */
+function splitTable(txt){
+  const text = String(txt || '').replace(/^﻿/, '').replace(/\r\n?/g, '\n');
+  const firstLine = text.split('\n').find(l=>l.trim()) || '';
+  const delim = firstLine.indexOf('\t') >= 0 ? '\t' : (firstLine.indexOf('|') >= 0 && firstLine.indexOf(',') < 0) ? '|' : ',';
+  const rows = [];
+  let row = [], cell = '', quoted = false, started = false, i = 0;
+  const endCell = () => { row.push(started && !quoted ? cell : cell.trim()); cell = ''; quoted = false; started = false; };
+  while(i < text.length){
+    const ch = text[i];
+    if(quoted){
+      if(ch === '"' && text[i+1] === '"'){ cell += '"'; i += 2; continue; }
+      if(ch === '"'){ quoted = false; started = true; i++; continue; }
+      cell += ch; i++; continue;
+    }
+    if(ch === '"' && !cell.trim()){ cell = ''; quoted = true; i++; continue; }
+    if(ch === delim){ endCell(); i++; continue; }
+    if(ch === '\n'){ endCell(); rows.push(row); row = []; i++; continue; }
+    cell += ch; i++;
+  }
+  if(cell || row.length){ endCell(); rows.push(row); }
+  return rows.map(r=>r.map(c=>c.trim()))
+    /* psql 的分隔線、(12 rows) 和空行不是資料 */
+    .filter(r=>r.some(c=>c !== '') && !(r.length === 1 && /^[-+=\s]+$|^\(\d+ rows?\)$/i.test(r[0])) && !r.every(c=>/^[-+=]*$/.test(c)));
+}
+/* 資料庫查出來的欄位清單（table_name, column_name, data_type[, 說明]）→ 一次建好所有表 */
+function parseColumnList(txt){
+  const rows = splitTable(txt);
+  const out = {}, skipped = [];
+  if(!rows.length) return {tables:out, skipped:skipped};
+  let ti = 0, ci = 1, yi = 2, mi = 3, body = rows;
+  const h = rows[0].map(c=>c.toLowerCase());
+  if(h.some(c=>/table_name/.test(c))){
+    ti = h.findIndex(c=>/table_name/.test(c));
+    ci = h.findIndex(c=>/column_name/.test(c));
+    yi = h.findIndex(c=>/data_type|type/.test(c));
+    mi = h.findIndex(c=>/comment|description|remarks/.test(c));
+    body = rows.slice(1);
+  }
+  body.forEach(r=>{
+    const t = (r[ti] || '').replace(/[`"\[\]]/g, ''), c = (r[ci] || '').replace(/[`"\[\]]/g, '');
+    if(!t && !c) return;
+    /* 名字會畫進畫面、寫進 SQL：只收一般識別字（schema.t 也可以） */
+    if(!t.split('.').every(p=>IDENT.test(p)) || !IDENT.test(c)){ skipped.push(t + '.' + c); return; }
+    const tbl = out[t] || (out[t] = {label:'', cols:[], rows:[]});
+    if(tbl.cols.some(x=>x.name === c)) return;
+    const type = yi >= 0 ? String(r[yi] || 'TEXT').replace(/\(.*/, '').trim().toUpperCase() || 'TEXT' : 'TEXT';
+    const ch = mi >= 0 && r[mi] && !/^null$/i.test(r[mi]) ? cleanLabel(r[mi]) : '';
+    tbl.cols.push({name:c, ch:ch, type:type});
+  });
+  Object.keys(out).forEach(k=>{ out[k].rows = fakeRows(out[k].cols); });
+  return {tables:out, skipped:skipped};
+}
+/* 各家資料庫都跑得動的「列出所有欄位」查詢；說明欄各家放的地方不一樣 */
+function infoSchemaSQL(dialect){
+  return {
+    mysql: "SELECT table_name, column_name, data_type, column_comment\nFROM information_schema.columns\nWHERE table_schema = DATABASE()\nORDER BY table_name, ordinal_position;",
+    postgres: "SELECT c.table_name, c.column_name, c.data_type,\n       col_description(format('%I.%I', c.table_schema, c.table_name)::regclass, c.ordinal_position) AS column_comment\nFROM information_schema.columns c\nWHERE c.table_schema = 'public'\nORDER BY c.table_name, c.ordinal_position;",
+    mssql: "SELECT c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE,\n       CAST(ep.value AS NVARCHAR(4000)) AS column_comment\nFROM INFORMATION_SCHEMA.COLUMNS c\nLEFT JOIN sys.extended_properties ep\n  ON ep.major_id = OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME)\n AND ep.minor_id = COLUMNPROPERTY(ep.major_id, c.COLUMN_NAME, 'ColumnId')\n AND ep.name = 'MS_Description'\nORDER BY c.TABLE_NAME, c.ORDINAL_POSITION;",
+    oracle: "SELECT c.table_name, c.column_name, c.data_type, m.comments AS column_comment\nFROM user_tab_columns c\nLEFT JOIN user_col_comments m\n  ON m.table_name = c.table_name AND m.column_name = c.column_name\nORDER BY c.table_name, c.column_id;"
+  }[dialect] || '';
+}
+/* CSV → 一張表，資料就用使用者給的（不是編的）。第一列是欄名 */
+const CSV_MAX_ROWS = 200;
+function parseCSV(txt){
+  const rows = splitTable(txt);
+  if(rows.length < 1) return {error:'沒讀到任何一列。第一列要是欄名，例如 id,amount,status'};
+  const head = rows[0].map(c=>c.replace(/[`"\[\]]/g, ''));
+  const bad = head.filter(c=>!IDENT.test(c));
+  if(bad.length) return {error:'欄名只能用英文字母、數字和底線，而且不能數字開頭：'+bad.map(c=>'「'+c+'」').join('、')};
+  const dup = head.filter((c, i)=>head.findIndex(x=>x.toLowerCase() === c.toLowerCase()) !== i);
+  if(dup.length) return {error:'欄名重複：'+dup.join('、')};
+  const body = rows.slice(1);
+  const off = body.findIndex(r=>r.length !== head.length);
+  if(off >= 0) return {error:'第 '+(off + 2)+' 列有 '+body[off].length+' 格，欄名有 '+head.length+' 個 —— 每一列的格數要一樣'};
+  const kept = body.slice(0, CSV_MAX_ROWS);
+  /* 型別看前面的值：全是整數就是整數（補零的代碼 007 不算，會被吃掉 0）、全是數字是小數、全是日期是日期 */
+  const cols = head.map((name, i)=>{
+    const vals = kept.map(r=>r[i]).filter(v=>v !== '' && !/^null$/i.test(v));
+    const type = !vals.length ? 'TEXT'
+      : vals.every(v=>/^-?\d+$/.test(v) && numish(v) !== null) ? 'INT'
+      : vals.every(v=>numish(v) !== null) ? 'DECIMAL'
+      : vals.every(v=>/^\d{4}-\d{2}-\d{2}$/.test(v) && validDate(v)) ? 'DATE' : 'TEXT';
+    return {name:name, ch:'', type:type};
+  });
+  const data = kept.map(r=>r.map((v, i)=>{
+    if(v === '' || /^null$/i.test(v)) return null;
+    return cols[i].type === 'INT' || cols[i].type === 'DECIMAL' ? Number(v) : v;
+  }));
+  return {cols:cols, rows:data, total:body.length};
+}
+
 /* 依欄位名和中文名猜出像樣的範例資料。
    同一個欄名在不同表一定產生同一串值，JOIN 才對得起來。 */
 const POOL = {
@@ -4113,19 +4401,27 @@ const TINTS = ['var(--tint0)','var(--tint1)','var(--tint2)','var(--tint3)','var(
 const MAXROWS = 9;
 const FNWORD = {COUNT:'數幾筆', COUNT_DISTINCT:'不重複計數（略過 NULL）', SUM:'加總', AVG:'算平均', MAX:'找最大', MIN:'找最小'};
 
+/* 畫布上的表用哪種資料：使用者貼的 CSV（own），還是這台工具編的（made）。說明照實講（規則 4） */
+function dataKinds(){
+  const ts = state.nodes.filter(n=>n.type === 'table').map(schemaOf).filter(Boolean);
+  return {own:ts.some(t=>t.source === 'csv'), made:ts.some(t=>t.source !== 'csv')};
+}
 function buildSteps(){
   const steps = [];
   const tables = state.nodes.filter(n=>n.type === 'table' && schemaOf(n));
+  const kinds = dataKinds();
   if(tables.length) steps.push({
     node:'@tables',
     title:'來源',
-    cap:'先看原料。<strong>欄位是你 schema 裡真的有的，列是編出來的示意資料</strong>。後面每一步都只是把這些列搬來搬去。'+
-        (state.edge ? '<br>已打開<strong>邊界資料</strong>：每張表最後三列（斜體）是故意加的 —— NULL 列、對照值和數字跟第一列重複的列、對照值配不到的列。' : ''),
+    cap:'先看原料。'+(kinds.own && !kinds.made ? '<strong>欄位和列都是你貼上的 CSV</strong>。'
+        : kinds.own ? '<strong>標「你的資料」的表用你貼上的 CSV，其他表的列是編出來的示意資料</strong>。'
+        : '<strong>欄位是你 schema 裡真的有的，列是編出來的示意資料</strong>。')+'後面每一步都只是把這些列搬來搬去。'+
+        (state.edge && kinds.made ? '<br>已打開<strong>邊界資料</strong>：'+(kinds.own ? '示意資料的表' : '每張表')+'最後三列（斜體）是故意加的 —— NULL 列、對照值和數字跟第一列重複的列、對照值配不到的列。' : ''),
     render: box => tables.forEach((t,i)=>{
       if(i) box.appendChild(mark('＋'));
       const s = schemaOf(t);
-      box.appendChild(miniTable(tableLabel(t) + (s.label ? '（'+s.label+'）' : ''), evalNode(t),
-        state.edge ? {edgeFrom:s.rows.length} : {}));
+      box.appendChild(miniTable(esc(tableLabel(t)) + (s.label ? '（'+esc(s.label)+'）' : '') + (s.source === 'csv' ? ' <span class="own">你的資料</span>' : ''), evalNode(t),
+        state.edge && s.source !== 'csv' ? {edgeFrom:s.rows.length} : {}));
     })
   });
 
@@ -4386,7 +4682,9 @@ function buildSteps(){
     if(R.cols.length) steps.push({
       node:out.id,
       title:'完成',
-      cap:'這是下面那段 SQL 跑在<strong>示意資料</strong>上的樣子。<strong>改上面任何一個步驟，SQL 和這張表會同時跟著變。</strong>',
+      cap:(kinds.own
+        ? '這是下面那段 SQL 的算法套在<strong>'+(kinds.made ? '你的資料和示意資料' : '你貼上的資料')+'</strong>上、由這台工具模擬出來的樣子，不是資料庫跑出來的結果。'
+        : '這是下面那段 SQL 跑在<strong>示意資料</strong>上的樣子。')+'<strong>改上面任何一個步驟，SQL 和這張表會同時跟著變。</strong>',
       render: box => box.appendChild(miniTable('最終結果', R, {tint:(r,i)=>TINTS[i % TINTS.length]}))
     });
   }
@@ -4571,7 +4869,8 @@ function miniTable(name, data, o){
   const shown = rows.slice(0, MAXROWS);
   let html = '<div class="mt-name">'+name+'<i>'+data.rows.length+' 列 · '+data.cols.length+' 欄</i></div>'+
     '<div class="mt-scroll"><table class="grid"><thead><tr>'+
-    data.cols.map((c,ci)=>'<th'+(o.hi === ci ? ' class="hi"' : (o.gone && o.gone.has(ci) ? ' class="gone"' : ''))+'>'+c+'</th>').join('')+'</tr></thead><tbody>';
+    data.cols.map((c,ci)=>'<th'+(o.hi === ci ? ' class="hi"' : (o.gone && o.gone.has(ci) ? ' class="gone"' : ''))+'>'+c+
+      (chOf(c) ? '<small>'+esc(chOf(c))+'</small>' : '')+'</th>').join('')+'</tr></thead><tbody>';
   shown.forEach((x, idx)=>{
     const tint = o.tint ? o.tint(x.r, idx, x.i) : null;
     const dropped = o.drop ? o.drop(x.r, idx, x.i) : false;
@@ -4638,8 +4937,10 @@ function renderStage(){
   catch(err){ flow.innerHTML = '<p class="empty">這一步畫不出來，先檢查步驟有沒有接好。</p>'; }
   /* 這裡不能說「這就是 SQL 會回給你的結果」—— 資料是編的，數字不是真的。
      真正成立的只有一件事：每一步的算法跟 SQL 一樣。 */
-  document.getElementById('foot').textContent =
-    '資料是示意的，這台工具自己編的，不是你資料庫裡的數字。這裡示範的是每一步「怎麼算」，換成真資料算法一樣。';
+  const kinds = dataKinds();
+  document.getElementById('foot').textContent = kinds.own
+    ? '有表用的是你貼上的 CSV'+(kinds.made ? '，其他表的資料是這台工具編的' : '')+'。預覽是這台工具照每一步的算法模擬的，不是資料庫跑出來的結果；型別、排序規則跟資料庫不同時，數字可能不一樣。'
+    : '資料是示意的，這台工具自己編的，不是你資料庫裡的數字。這裡示範的是每一步「怎麼算」，換成真資料算法一樣。';
   document.getElementById('btn-prev').disabled = i === 0;
   document.getElementById('btn-next').disabled = i === steps.length - 1;
   syncLinks();
@@ -4768,6 +5069,7 @@ function refresh(keepInspector){
   document.getElementById('sql').innerHTML = sqlHTML(buildSQL());
   renderLint();
   document.getElementById('dnote').innerHTML = dialectNote();
+  renderInfoSQL();
   state.steps = buildSteps();
   if(state.step >= state.steps.length) state.step = state.steps.length - 1;
   renderStage();
@@ -4858,7 +5160,8 @@ function validSnapshot(s){
   if(s.quoted && !Array.isArray(s.quoted)) return false;
   /* 值（篩選值、CASE 的結果、固定值、註記、示意資料）一律跳脫後才畫，可以帶任何字；
      名字（表名、欄名、別名）匯入時就擋掉 < 和 "，這裡也一樣擋 */
-  const valueOK = (key, parent) => key === 'note' || key === 'literal' || (key === 'v' && parent.kind === 'lit') ||
+  /* 欄位說明（ch）和表的中文名（label）是從 COMMENT、CSV 貼進來的文字，畫的時候都跳脫 */
+  const valueOK = (key, parent) => key === 'note' || key === 'literal' || key === 'ch' || key === 'label' || (key === 'v' && parent.kind === 'lit') ||
     (key === 'val' && !parent.valCol) || (key === 'then' && !parent.thenCol) || (key === 'other' && !parent.otherCol);
   let ok = true;
   (function scan(o, key, parent, inRows){
@@ -6469,6 +6772,8 @@ function astToGraph(parsed){
         const have = new Set(cols.map(c=>c.name));
         cols = cols.concat(perTable[t].filter(c=>!have.has(c)).map(c=>({name:c, ch:'', type:guessType(c, '')})));
       }
+      /* CSV 貼進來的表是使用者的資料：照用，不換成編的 */
+      if(schema[key].source === 'csv') return;
       schema[key] = Object.assign({}, schema[key], {cols:cols, rows:fakeRows(cols, hints)});
       return;
     }

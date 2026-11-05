@@ -335,6 +335,152 @@ test('regression: imports never swap a function, drop a layer or invent a column
   return `${refused.length + refusedAtBuild.length} shapes refused; SUM(a*b), GROUP BY expr, COUNT(1), NOW() exact in SQLite`;
 });
 
+/* Column descriptions were thrown away: users saw stu_nm, not 學生姓名 (issue #4).
+   MySQL COMMENT, PostgreSQL COMMENT ON and SQL Server sp_addextendedproperty all
+   become the column's label — shown beside the name, never written into the SQL.
+   A comma, bracket or semicolon inside a comment must not split the column list. */
+test('schema: DDL comments become column and table labels in three dialects', () => {
+  const load = ddl => {
+    const app = loadApp();
+    app.document.getElementById('ddl').value = ddl;
+    app.document.getElementById('btn-parse').listeners.click();
+    return app;
+  };
+  const labels = (app, t) => json(app.state.schema[t].cols.map(c => [c.name, c.ch]));
+  let app = load(`CREATE TABLE students (
+      stu_id INT PRIMARY KEY COMMENT '學號',
+      stu_nm VARCHAR(20) NOT NULL COMMENT '姓名, 全名 (含括號); 有分號',
+      note TEXT COMMENT 'it''s',
+      grade INT
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='學生';`);
+  assert.deepEqual(labels(app, 'students'), [['stu_id', '學號'], ['stu_nm', '姓名, 全名 (含括號); 有分號'], ['note', "it's"], ['grade', '']]);
+  assert.equal(app.state.schema.students.label, '學生');
+  app = load(`CREATE TABLE public."scores" (sid INT, "score" NUMERIC(5,1));
+    COMMENT ON TABLE public.scores IS '成績';
+    COMMENT ON COLUMN public."scores"."score" IS '分數（0–100）';
+    COMMENT ON COLUMN scores.sid IS '學號';`);
+  assert.deepEqual(labels(app, 'public.scores'), [['sid', '學號'], ['score', '分數（0–100）']]);
+  assert.equal(app.state.schema['public.scores'].label, '成績');
+  app = load(`CREATE TABLE dbo.teachers ([tid] INT, [name] NVARCHAR(50));
+    EXEC sp_addextendedproperty 'MS_Description', N'老師姓名', 'SCHEMA', 'dbo', 'TABLE', 'teachers', 'COLUMN', 'name';
+    EXEC sys.sp_addextendedproperty @name = N'MS_Description', @value = N'老師編號', @level0type = N'SCHEMA', @level0name = N'dbo',
+      @level1type = N'TABLE', @level1name = N'teachers', @level2type = N'COLUMN', @level2name = N'tid';
+    EXEC sp_addextendedproperty @name = N'MS_Description', @value = N'老師', @level0type = N'SCHEMA', @level0name = N'dbo', @level1type = N'TABLE', @level1name = N'teachers';
+    EXEC sp_addextendedproperty 'Other', N'不是說明', 'SCHEMA', 'dbo', 'TABLE', 'teachers', 'COLUMN', 'tid';`);
+  assert.deepEqual(labels(app, 'dbo.teachers'), [['tid', '老師編號'], ['name', '老師姓名']]);
+  assert.equal(app.state.schema['dbo.teachers'].label, '老師');
+  /* the label is shown next to the name; the SQL keeps the real name */
+  app = load("CREATE TABLE s (stu_nm VARCHAR(20) COMMENT '學生姓名', grade INT);");
+  graphFromSQL(app, 'SELECT stu_nm FROM s WHERE grade > 1');
+  app.state.sel = app.state.nodes.find(n => n.type === 'filter').id;
+  app.state.inspOpen = true;
+  app.renderInspector();
+  assert.match(app.inspector.innerHTML, /stu_nm\s+—\s+學生姓名/);
+  assert.doesNotMatch(app.buildSQL(), /學生姓名/);
+  const box = app.document.createElement('div');
+  app.buildSteps()[0].render(box);
+  assert.match(box.children.map(c => c.innerHTML).join(''), /stu_nm<small>學生姓名<\/small>/);
+  return 'MySQL inline + table COMMENT, COMMENT ON, sp_addextendedproperty (positional and named); shown, not in SQL';
+});
+
+/* Pasting the result of one catalog query builds every table at once (issue #4).
+   Database tools copy grids as tab-separated text, psql prints | columns with a rule
+   line and a row count; names that are not plain identifiers are skipped and said so. */
+test('schema: a pasted column list builds known tables with labels', () => {
+  const app = loadApp();
+  const paste = text => {
+    app.document.getElementById('ddl').value = text;
+    app.document.getElementById('btn-parse').listeners.click();
+  };
+  paste('table_name\tcolumn_name\tdata_type\tcolumn_comment\norders\tid\tint\t訂單編號\norders\tamount\tdecimal(10,2)\tNULL\norders\tstatus\tvarchar\t\ncustomers\tid\tint\t\ncustomers\tcity\ttext\t城市\nbad-name\tx\tint\t\n');
+  assert.deepEqual(json(Object.keys(app.state.schema).sort()), ['customers', 'orders']);
+  assert.deepEqual(json(app.state.schema.orders.cols), [{name: 'id', ch: '訂單編號', type: 'INT'}, {name: 'amount', ch: '', type: 'DECIMAL'}, {name: 'status', ch: '', type: 'VARCHAR'}]);
+  assert.match(app.document.getElementById('parse-msg').innerHTML, /跳過 1 個/);
+  /* these are real column lists, so SELECT * may be expanded with them */
+  graphFromSQL(app, "SELECT * FROM orders WHERE UPPER(status) = 'X'");
+  assert.match(app.buildSQL(), /SELECT id,\s+amount,\s+status\s/);
+  paste(' table_name | column_name | data_type\n------------+-------------+-----------\n t1         | a           | integer\n t1         | b           | text\n(2 rows)\n');
+  assert.deepEqual(json(app.state.schema.t1.cols.map(c => c.name)), ['a', 'b']);
+  paste('t2,x,int,"說明, 有逗號"\nt2,y,text,\n');
+  assert.deepEqual(json(app.state.schema.t2.cols.map(c => [c.name, c.ch])), [['x', '說明, 有逗號'], ['y', '']]);
+  /* the query to run is there for each dialect */
+  for (const d of ['mysql', 'postgres', 'mssql', 'oracle']) {
+    app.state.dialect = d;
+    app.renderInfoSQL();
+    assert.match(app.document.getElementById('info-sql').textContent, /column_name|COLUMN_NAME/i, d);
+  }
+  return 'tab, psql and CSV results; header detected; bad names skipped; known schema';
+});
+
+/* A CSV is the user's own data (issue #4): its rows are the preview, never replaced
+   by invented ones — not when SQL is pasted later, not by edge rows — and every
+   place that says the rows are invented says so only for the other tables. */
+test('schema: a pasted CSV becomes a table of the user\'s own rows', () => {
+  const app = loadApp();
+  const add = (name, text) => {
+    app.document.getElementById('csv-name').value = name;
+    app.document.getElementById('csv-text').value = text;
+    app.document.getElementById('btn-csv').listeners.click();
+    return app.document.getElementById('csv-msg').innerHTML;
+  };
+  assert.match(add('orders', 'id,code,amount,paid_on,note\n1,007,12.5,2024-01-02,"a, b"\n2,010,3,2024-02-30,\n3,,7,,NULL\n'), /加入了/);
+  const t = app.state.schema.orders;
+  assert.equal(t.source, 'csv');
+  assert.deepEqual(json(t.cols.map(c => c.type)), ['INT', 'TEXT', 'DECIMAL', 'TEXT', 'TEXT']);
+  assert.deepEqual(json(t.rows), [[1, '007', 12.5, '2024-01-02', 'a, b'], [2, '010', 3, '2024-02-30', null], [3, null, 7, null, null]]);
+  /* pasting SQL afterwards keeps the rows; edge rows are not mixed in */
+  app.state.edge = true;
+  app.document.getElementById('sqlin').value = 'SELECT id, amount FROM orders WHERE amount > 5';
+  app.document.getElementById('do-parse').listeners.click();
+  assert.deepEqual(json(app.evalNode(app.state.nodes.find(n => n.type === 'output')).rows), [[1, 12.5], [3, 7]]);
+  const steps = app.buildSteps();
+  assert.match(steps[0].cap, /你貼上的 CSV/);
+  assert.doesNotMatch(steps[0].cap, /編出來/);
+  assert.match(steps[steps.length - 1].cap, /不是資料庫跑出來的結果/);
+  app.renderStage();
+  assert.match(app.document.getElementById('foot').textContent, /你貼上的 CSV/);
+  /* it is saved and shared with the canvas, and an old save without source still opens */
+  const saved = JSON.parse(JSON.stringify(app.snapshot()));
+  assert.equal(app.validSnapshot(saved), true);
+  assert.equal(saved.schema.orders.source, 'csv');
+  delete saved.schema.orders.source;
+  assert.equal(app.validSnapshot(saved), true);
+  /* what cannot be a table is refused with the reason */
+  assert.match(add('t', '姓名,amount\n1,2'), /欄名只能用英文/);
+  assert.match(add('t', 'a,b\n1,2,3'), /第 2 列有 3 格/);
+  assert.match(add('9t', 'a\n1'), /表名/);
+  assert.match(add('t', 'a,A\n1,2'), /重複/);
+  return '5 columns typed; zero-padded code kept as text; rows survive a SQL paste; captions and save honest';
+});
+
+/* Labels now come from pasted text (COMMENT, a column list, a CSV) and are drawn in
+   the table list, the panel's dropdowns and chips, the step-through headers and the
+   step titles. Every one of those must escape them, and a save carrying one opens. */
+test('security: a pasted column or table label carrying HTML is text everywhere', () => {
+  const bad = '"><img src=x onerror=alert(1)>';
+  const app = loadApp();
+  app.document.getElementById('ddl').value = `CREATE TABLE t (city TEXT COMMENT '${bad}', qq INT) COMMENT='${bad}';`;
+  app.document.getElementById('btn-parse').listeners.click();
+  assert.equal(app.state.schema.t.cols[0].ch, bad.slice(0, 60));
+  graphFromSQL(app, "SELECT city, qq FROM t WHERE city = 'x'");
+  const outputs = [app.document.getElementById('schema-list').innerHTML];
+  for (const n of app.state.nodes) {
+    app.state.sel = n.id; app.state.inspOpen = true;
+    app.renderInspector();
+    outputs.push(app.inspector.innerHTML, app.nodeSummary(n));
+  }
+  for (const s of app.buildSteps()) {
+    const box = app.document.createElement('div');
+    try { s.render(box); } catch (e) { /* steps that need a real DOM */ }
+    outputs.push(s.cap, box.children.map(c => c.innerHTML).join(''));
+  }
+  app.renderNodes();
+  outputs.push(app.document.getElementById('surface').children.map(c => c.innerHTML).join(''));
+  for (const html of outputs) assert.doesNotMatch(String(html), /<img/);
+  assert.equal(app.validSnapshot(JSON.parse(JSON.stringify(app.snapshot()))), true);
+  return `${outputs.length} outputs escaped; save with the label still valid`;
+});
+
 test('security: pasted DDL column names are plain identifiers only', () => {
   const app = loadApp();
   app.document.getElementById('ddl').value = 'CREATE TABLE t (ok INT, a<img TEXT, b"x TEXT, c_2 INT);';
