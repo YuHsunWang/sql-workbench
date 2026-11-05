@@ -92,8 +92,18 @@ group_expression: i => { const e = i%2 ? 'LOWER(status)' : `amount * ${pick([1,2
 count_literal: i => `SELECT ${i%2?'customer_id, ':''}COUNT(${pick(['1',"'x'"])}) AS n FROM orders${i%2?' GROUP BY customer_id':''}`,
 // LAG / NTILE were imported as ROW_NUMBER, frames and extra window keys were dropped with only a warning.
 unsupported_window: i => `SELECT id, ${pick(['LAG(amount) OVER (ORDER BY id)','NTILE(3) OVER (ORDER BY id)','SUM(amount) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)','ROW_NUMBER() OVER (ORDER BY qty, id)','SUM(amount * qty) OVER (PARTITION BY customer_id)'])} AS w FROM orders`,
-// A function or aggregate wrapped in another lost the inner layer (UPPER(TRIM(s)) became UPPER(s)).
-unsupported_nested: i => pick([`SELECT customer_id, SUM(COALESCE(amount, ${i%3})) AS n FROM orders GROUP BY customer_id`, `SELECT ROUND(AVG(amount), 1) AS n FROM orders`, `SELECT UPPER(TRIM(status)) AS s FROM orders`, `SELECT COALESCE(amount, 0) * qty AS v FROM orders`, `SELECT customer_id, MAX(UPPER(status)) AS s FROM orders GROUP BY customer_id`]),
+// A function wrapped in another lost the inner layer (UPPER(TRIM(s)) became UPPER(s)); multi-level
+// arithmetic was refused; COALESCE(o.a, o.b) copied "o.b" into a CTE with no alias o. All exact now.
+expr_nested: i => `SELECT id, ${pick([
+  'UPPER(TRIM(status))', `COALESCE(amount, ${i%3}) * qty`, 'amount * qty * (1 - qty)', 'amount + qty * 2', '(amount + qty) * 2',
+  "status || '-' || COALESCE(note, 'x')", 'COALESCE(o.amount, o.qty)', 'ROUND(amount * 1.0 / qty, 2)', 'LENGTH(status) + 1',
+  '-1 * amount', 'ABS(-3)', 'amount - qty - 1', 'amount / 2 / 2', `NULLIF(qty, ${i%2}) * 10`, 'REPLACE(LOWER(status), \'a\', \'@\')'])} AS v FROM orders o${i%2?' WHERE o.id > 2':''}`,
+// qty / 2.0 was written back as qty / 2 — integer division in SQLite, PostgreSQL and SQL Server.
+decimal_division: i => `SELECT id, ${pick(['qty / 2.0','amount / 4.0','qty * 1.0 / 3','(qty + 1) / 2.0'])} AS v FROM orders`,
+// SUM(COALESCE(x,0)) once dropped COALESCE; aggregates over any expression go through a helper column.
+agg_expr: i => `SELECT customer_id, ${pick(['SUM(COALESCE(amount, 0))','MAX(UPPER(status))','SUM(amount * qty * 2 - 1)','AVG(COALESCE(qty, 0) + 1)','MIN(LENGTH(note))','COUNT(COALESCE(note, status))'])} AS n FROM orders GROUP BY customer_id${i%2?' ORDER BY customer_id':''}`,
+// An aggregate inside a function (ROUND(AVG(x), 1)) cannot be built yet and must be refused.
+unsupported_nested: i => pick([`SELECT ROUND(AVG(amount), ${i%3}) AS n FROM orders`, `SELECT customer_id, SUM(amount) * 1.0 / COUNT(*) AS n FROM orders GROUP BY customer_id`]),
 unsupported_aggregate_collision: i => `SELECT SUM(CASE WHEN qty > ${i%3} THEN amount END)${i%2?' AS n':''}, SUM(CASE WHEN qty = 0 THEN amount END)${i%2?' AS n':''} FROM orders`,
 };
 const stable = JSON.stringify;
@@ -114,13 +124,13 @@ function diff(a,b) {
 const norm = sql => sql.replace(/\s+/g,' ').trim().replace(/;$/,'');
 const counts = {total:0,identical_result:0,different_result:0,regenerated_sql_fails:0,parse_unsupported:0,textual_identical:0};
 const unsupported = {}, classes = new Map(), inputs = new Set();
-const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_') || ['agg_arith','group_expression','count_literal'].includes(k)));
+const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_') || ['agg_arith','group_expression','count_literal','expr_nested','agg_expr','decimal_division'].includes(k)));
 const mustRefuse = {
   unsupported_aggregate_order:/ORDER BY.*SELECT/,
   unsupported_case_group:/GROUP BY.*CASE/,
   unsupported_aggregate_collision:/彙總.*同名/,
   unsupported_window:/視窗/,
-  unsupported_nested:/只能/,
+  unsupported_nested:/彙總/,
 };
 for (const [category, make] of Object.entries(families)) for (let i=0;i<16;i++) {
   const base=make(i);

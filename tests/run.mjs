@@ -160,11 +160,12 @@ test('reverse parse: plain AND conditions share a block, an OR group gets its ow
 test('regression: SQL the steps would silently change is refused', () => {
   const refused = {
     'SELECT COUNT(DISTINCT x, y) AS n FROM t': 'multiple distinct columns cannot fit one aggregate',
-    'SELECT a + b * c AS v FROM t': 'became a_calc * c',
-    'SELECT (a + b) * c AS v FROM t': 'nested arithmetic',
     'SELECT TOP 10 PERCENT * FROM t': 'became LIMIT 10',
   };
   for (const sql of Object.keys(refused)) sqlError(sql);
+  /* a + b * c once became a_calc * c; it now keeps SQL's precedence */
+  assert.match(roundTrip('SELECT a + b * c AS v FROM t'), /a \+ \(b \* c\) AS v/);
+  assert.match(roundTrip('SELECT (a + b) * c AS v FROM t'), /\(a \+ b\) \* c AS v/);
   /* the shapes that do fit still import */
   graphFromSQL(api, 'SELECT a * 2 AS v FROM t WHERE x = 5 AND y = \'k\'');
   graphFromSQL(api, 'SELECT TOP 10 * FROM t');
@@ -241,13 +242,9 @@ test('regression: imports never swap a function, drop a layer or invent a column
     'SELECT SUM(a * 2) OVER () AS s FROM t',
   ];
   for (const sql of refused) sqlError(sql);
+  /* the inner layer is kept now (SUM(COALESCE(a,0)), UPPER(TRIM(a)) … are exact in
+     'expressions' below); what still cannot be built must keep being refused */
   const refusedAtBuild = [
-    'SELECT c, SUM(COALESCE(a, 0)) AS s FROM t GROUP BY c',
-    'SELECT c, SUM(CAST(a AS INT)) AS s FROM t GROUP BY c',
-    'SELECT ROUND(AVG(a), 2) AS s FROM t',
-    'SELECT UPPER(TRIM(a)) AS s FROM t',
-    'SELECT COALESCE(a, 0) * b AS s FROM t',
-    'SELECT a + NULL AS s FROM t',
     'SELECT a, COUNT(*) AS n FROM t GROUP BY a, YEAR(d)',
     'SELECT a FROM t ORDER BY UPPER(a)',
   ];
@@ -299,6 +296,7 @@ test('security: a pasted value carrying HTML is text in every block, step and pa
     `SELECT '${bad}' AS k FROM t`,
     `SELECT COALESCE(city, '${bad}') AS c FROM t`,
     `SELECT city, COUNT(*) AS n FROM t GROUP BY city HAVING city <> '${bad}'`,
+    `SELECT UPPER(COALESCE(city, '${bad}')) || 'x' AS k FROM t`,
   ];
   for (const sql of positions) {
     const graph = graphFromSQL(api, sql);
@@ -2610,14 +2608,22 @@ test('DEV-239: same table name in two schemas keeps the schema in each source he
   return 'headings show s1.t and s2.t';
 });
 
-test('DEV-242: a literal where a column is expected is refused, not turned into an identifier', () => {
-  // 算式左邊和函式參數會被當成欄位名；常值放那裡會產生 "-1" 這種錯欄位
-  for (const sql of ['SELECT -1 * amount AS n FROM t', 'SELECT 1 * amount AS n FROM t',
-    'SELECT ABS(-1) AS n FROM t', 'SELECT ABS(1) AS n FROM t']) {
-    assert.throws(() => graphFromSQL(loadApp(), sql), e => e.sqlErr === true && /只能是欄位/.test(e.msg), sql);
+test('DEV-242: a literal where a column is expected stays a literal, never an identifier', () => {
+  // 算式左邊和函式參數以前會被當成欄位名，產生 "-1" 這種錯欄位；現在存成算式樹裡的常值
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE t(amount REAL); INSERT INTO t VALUES (10),(-3),(NULL);');
+  for (const [sql, want] of [['SELECT -1 * amount AS n FROM t', /-1 \* amount/], ['SELECT 1 * amount AS n FROM t', /1 \* amount/],
+    ['SELECT ABS(-1) AS n FROM t', /ABS\(-1\)/], ['SELECT ABS(1) AS n FROM t', /ABS\(1\)/]]) {
+    const app = loadApp(); app.state.dialect = 'postgres';
+    graphFromSQL(app, sql);
+    const generated = app.buildSQL();
+    assert.match(generated, want, sql);
+    assert.doesNotMatch(generated, /"-?1"/, sql);
+    assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()), sql);
   }
   graphFromSQL(loadApp(), 'SELECT amount * -1 AS n FROM t');
-  return 'literal on the left / as argument refused; amount * -1 still imports';
+  db.close();
+  return 'literal on the left / as argument stays a literal and runs; amount * -1 still imports';
 });
 
 test('DEV-240: failed SQL imports leave the graph and quoting unchanged', () => {
@@ -2847,6 +2853,7 @@ test('autosave: every imported graph survives a reload, byte for byte', () => {
     'SELECT cid, SUM(price * qty) AS rev, COUNT(DISTINCT sku) AS n FROM o GROUP BY cid HAVING SUM(price * qty) > 10',
     'SELECT id, RANK() OVER (PARTITION BY cid ORDER BY amt DESC) AS r FROM o',
     'SELECT "Mixed" FROM t UNION ALL SELECT x FROM u',
+    `SELECT price * qty * (1 - disc) AS net, UPPER(TRIM(name)) || ' ${bad}' AS label, DATEADD(day, 1, d) AS nxt FROM t`,
   ];
   for (const sql of shapes) {
     const app = loadApp();
@@ -3081,6 +3088,57 @@ test('review #5: a decimal divisor typed in the panel is written as a number', (
   return 'warning clears and student_id / 2.0 = 1.5 in SQLite';
 });
 
+/* Multi-level expressions used to be refused (or, for COALESCE(o.a, o.b), copied
+   "o.b" verbatim into a CTE where no alias o exists). They are stored as a clean
+   tree now, so: the SQL is rewritten from the tree per dialect (|| is OR in MySQL
+   and does not exist in SQL Server), the preview computes what it can exactly as
+   the database would and says "由資料庫計算" for the rest, and a column the tree
+   needs going missing upstream is reported, not silently emitted. */
+test('expressions: tree rewritten per dialect, preview agrees with SQLite, missing columns caught', () => {
+  const concat = "SELECT first || ' ' || last AS full_name FROM p";
+  const out = d => { const app = loadApp(); app.state.dialect = d; graphFromSQL(app, concat); return app.buildSQL(); };
+  assert.match(out('postgres'), /first \|\| ' ' \|\| last AS full_name/);
+  assert.match(out('oracle'), /first \|\| ' ' \|\| last AS full_name/);
+  assert.match(out('mysql'), /CONCAT\(first, ' ', last\) AS full_name/);
+  assert.match(out('mssql'), /first \+ ' ' \+ last AS full_name/);
+  roundTrip(concat);
+
+  const app = loadApp(); app.state.dialect = 'postgres';
+  graphFromSQL(app, 'SELECT COALESCE(o.amount, o.qty) AS v FROM orders o');
+  assert.match(app.buildSQL(), /COALESCE\(amount, qty\) AS v/);
+  assert.doesNotMatch(app.buildSQL(), /o\.qty/);
+  assert.match(roundTrip("SELECT DATEADD(day, 7, d) AS due, DATE_TRUNC('month', d) AS m FROM t"), /DATEADD\(day, 7, d\)[\s\S]*DATE_TRUNC\('month', d\)/);
+
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE r(s TEXT, n REAL, m REAL);
+           INSERT INTO r VALUES ('  Ab ', 2, 4), (NULL, 3, NULL), ('x', NULL, 0), ('aaa', 1.25, 2);`);
+  const rows = db.prepare('SELECT s, n, m FROM r').all().map(o => [o.s, o.n, o.m]);
+  for (const e of ['UPPER(TRIM(s))', "COALESCE(s, 'none') || '!'", 'n * m + 1', '(n + 1) * (m - 1)', 'NULLIF(m, 0) * 2',
+                   'ROUND(n / 3.0, 2)', 'LENGTH(s) - 1', "REPLACE(s, 'a', 'b')", 'ABS(n - m)', 'COALESCE(m, n, 0) / 2.0']) {
+    const one = loadApp(); one.state.dialect = 'postgres';
+    const g = graphFromSQL(one, `SELECT ${e} AS v FROM r`);
+    installGraph(one, g, {r:{label:'', cols:[{name:'s'}, {name:'n'}, {name:'m'}], rows}});
+    const preview = one.evalNode(g.nodes.find(n => n.type === 'derive')).rows.map(x => x[x.length - 1]);
+    const real = db.prepare(`SELECT ${e} AS v FROM r`).all().map(o => o.v);
+    assert.deepEqual(json(preview), json(real), e);
+    assert.deepEqual(json(db.prepare(one.buildSQL()).all().map(o => o.v)), json(real), e);
+  }
+  db.close();
+  /* a function the preview cannot run is labelled, not invented */
+  const one = loadApp();
+  const g = graphFromSQL(one, "SELECT DATE_TRUNC('month', d) AS m FROM t");
+  installGraph(one, g, {t:{label:'', cols:[{name:'d'}], rows:[['2024-03-05']]}});
+  assert.equal(one.evalNode(g.nodes.find(n => n.type === 'derive')).rows[0][1], '（由資料庫計算）');
+  /* the tree needs qty; once an upstream 選欄位 drops it, the SQL says so */
+  const gone = loadApp();
+  const g2 = graphFromSQL(gone, 'SELECT price * qty * (1 - disc) AS net FROM (SELECT price, qty, disc FROM t) AS x');
+  assert.doesNotMatch(gone.buildSQL(), /無法產生/);
+  const pick = g2.nodes.find(n => n.type === 'select' && n.cols.includes('qty'));
+  pick.cols = pick.cols.filter(c => c !== 'qty');
+  assert.match(gone.buildSQL(), /無法產生 SQL：.*qty/);
+  return '|| per dialect; alias stripped; 10 expressions match SQLite in preview and SQL; unknown fn labelled; missing column reported';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {
@@ -3088,7 +3146,7 @@ for (const item of cases) {
     passed++;
     console.log(`PASS ${item.name} — ${detail}`);
   } catch (error) {
-    console.log(`FAIL ${item.name} — ${error?.stack || error}`);
+    console.log(`FAIL ${item.name} — ${error?.stack || (error?.sqlErr ? 'sqlErr: ' + error.msg : error)}`);
   }
 }
 console.log(`TOTAL ${passed}/${cases.length} passed`);
