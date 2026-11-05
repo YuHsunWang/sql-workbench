@@ -722,8 +722,8 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
       </div>
       <div id="stmt-pick"></div>
       <div id="parse-out"></div>
-      <p class="supported">看得懂：<code>WITH</code> · <code>SELECT</code> · <code>DISTINCT</code> · <code>FROM</code> · 子查詢 · <code>JOIN … ON</code> · <code>WHERE</code>（AND / OR / 括號）· <code>BETWEEN</code> · <code>IN</code> · <code>IN (SELECT …)</code> · <code>EXISTS</code>（含 NOT；相關條件只支援內外欄位相等且以 AND 串接）· <code>LIKE</code> · <code>IS NULL</code> · <code>CASE</code>（含 AND / OR、<code>CASE x WHEN</code>）· 多層算式與函式（<code>price * qty * (1 - d)</code>、<code>UPPER(TRIM(x))</code>、<code>||</code>）· 條件裡的函式（<code>YEAR(d) = 2024</code>）· <code>CURRENT_DATE</code> / <code>INTERVAL</code> · 聚合函數（含 <code>ROUND(AVG(x), 2)</code>、<code>SUM(CASE …) / COUNT(*)</code>）· <code>GROUP BY</code> · <code>HAVING</code> · 視窗函數 <code>OVER</code> · <code>UNION</code> · <code>ORDER BY</code> · <code>LIMIT</code> / <code>TOP</code> / <code>FETCH FIRST</code>。<br>
-      看不懂：相關子查詢（上述等值形式除外）、純量子查詢、<code>ANY / ALL / SOME</code>、<code>PIVOT</code>、<code>FULL OUTER JOIN</code>、非等值 JOIN、<code>LAG / LEAD / NTILE</code>、視窗框架 <code>ROWS BETWEEN</code>。碰到會直接告訴你卡在第幾行第幾個字。</p>
+      <p class="supported">看得懂：<code>WITH</code> · <code>SELECT</code> · <code>DISTINCT</code> · <code>FROM</code> · 子查詢 · <code>JOIN … ON</code> · <code>WHERE</code>（AND / OR / 括號）· <code>BETWEEN</code> · <code>IN</code> · <code>IN (SELECT …)</code> · <code>EXISTS</code>（含 NOT；相關條件只支援內外欄位相等且以 AND 串接）· <code>LIKE</code> · <code>IS NULL</code> · <code>CASE</code>（含 AND / OR、<code>CASE x WHEN</code>）· 多層算式與函式（<code>price * qty * (1 - d)</code>、<code>UPPER(TRIM(x))</code>、<code>||</code>）· 條件裡的函式（<code>YEAR(d) = 2024</code>）· <code>CURRENT_DATE</code> / <code>INTERVAL</code> · 聚合函數（含 <code>ROUND(AVG(x), 2)</code>、<code>SUM(CASE …) / COUNT(*)</code>）· <code>GROUP BY</code> · <code>HAVING</code> · 視窗函數 <code>OVER</code>（排名、<code>NTILE</code>、<code>LAG / LEAD</code>、多個排序欄、框架 <code>ROWS BETWEEN</code>）· <code>UNION</code> · <code>ORDER BY</code> · <code>LIMIT</code> / <code>TOP</code> / <code>FETCH FIRST</code>。<br>
+      看不懂：相關子查詢（上述等值形式除外）、純量子查詢、<code>ANY / ALL / SOME</code>、<code>PIVOT</code>、<code>FULL OUTER JOIN</code>、非等值 JOIN、<code>FIRST_VALUE</code> 之類其他視窗函數、<code>RANGE BETWEEN 7 PRECEDING</code>（照值差距的框架）。碰到會直接告訴你卡在第幾行第幾個字。</p>
     </div>
   </div>
 </div>
@@ -1111,7 +1111,11 @@ function evalNode(node, ctx){
     const s = S();
     if(!s.cols.length) return s;
     const pi = node.partitionBy.map(k=>s.cols.indexOf(k)).filter(i=>i>=0);
-    const oi = s.cols.indexOf(node.orderBy);
+    const keys = winKeys(node).map(k=>({i:s.cols.indexOf(k.col), desc:k.dir === 'DESC'})).filter(k=>k.i >= 0);
+    const byKeys = (a, b) => {
+      for(const k of keys){ const c = cmpVal(s.rows[a][k.i], s.rows[b][k.i]); if(c) return k.desc ? -c : c; }
+      return 0;
+    };
     const parts = new Map();
     s.rows.forEach((r,i)=>{
       const k = pi.map(p=>String(r[p])).join('\u0000');
@@ -1119,25 +1123,51 @@ function evalNode(node, ctx){
       parts.get(k).push(i);
     });
     const vals = new Array(s.rows.length).fill(null);
+    const ci = s.cols.indexOf(node.col);
     parts.forEach(list=>{
       const ordered = list.slice();
-      if(oi >= 0) ordered.sort((a,b)=>cmpVal(s.rows[a][oi], s.rows[b][oi]) * (node.dir === 'DESC' ? -1 : 1));
+      if(keys.length) ordered.sort(byKeys);
+      const N = ordered.length;
+      /* 同分（所有排序鍵都一樣）的一段：RANK 給同一個名次，RANGE 框架把它們算在一起 */
+      const peerStart = [], peerEnd = [];
+      ordered.forEach((i,k)=>{ peerStart[k] = k && keys.length && byKeys(ordered[k-1], i) === 0 ? peerStart[k-1] : k; });
+      for(let k = N-1; k >= 0; k--) peerEnd[k] = k < N-1 && keys.length && byKeys(ordered[k+1], ordered[k]) === 0 ? peerEnd[k+1] : k;
+      if(!keys.length) ordered.forEach((i,k)=>{ peerStart[k] = 0; peerEnd[k] = N-1; });
       if(node.fn === 'ROW_NUMBER'){
         ordered.forEach((i,k)=>{ vals[i] = k+1; });
       } else if(node.fn === 'RANK' || node.fn === 'DENSE_RANK'){
-        let rank = 0, dense = 0, prev = null, first = true;
+        let dense = 0;
         ordered.forEach((i,k)=>{
-          const v = oi >= 0 ? String(s.rows[i][oi]) : '';
-          if(first || v !== prev){ rank = k+1; dense++; prev = v; first = false; }
-          vals[i] = node.fn === 'RANK' ? rank : dense;
+          if(peerStart[k] === k) dense++;
+          vals[i] = node.fn === 'RANK' ? peerStart[k] + 1 : dense;
+        });
+      } else if(node.fn === 'NTILE'){
+        /* N 列分成 t 桶：每桶 floor(N/t) 列，多出來的從第 1 桶開始一桶多放一列 */
+        const t = winTiles(node), size = Math.floor(N / t), extra = N % t;
+        ordered.forEach((i,k)=>{
+          const big = extra * (size + 1);
+          vals[i] = k < big ? Math.floor(k / (size + 1)) + 1 : extra + Math.floor((k - big) / size) + 1;
+        });
+      } else if(SHIFT_FNS.indexOf(node.fn) >= 0){
+        const off = winOffset(node) * (node.fn === 'LAG' ? -1 : 1);
+        const dflt = node.def && node.def.kind === 'lit' ? node.def.v : null;
+        ordered.forEach((i,k)=>{
+          const j = k + off;
+          vals[i] = j >= 0 && j < N ? (ci >= 0 ? s.rows[ordered[j]][ci] : null) : dflt;
         });
       } else {
-        /* 有組內排序時，資料庫算的是「從第一列累加到這一列」，跟這列同分的也算進來；
-           沒排序才是整組一個數 */
+        /* 沒寫框架：有組內排序就是「從第一列算到這一列」，跟這列同分的也算進來；沒排序是整組一個數。
+           寫了框架就照框架：ROWS 數列數，RANGE 的 CURRENT ROW 連同分的一起 */
+        const f = keys.length ? node.frame : null;      /* 跟 SQL 一樣：沒有排序就不寫框架 */
+        const at = (b, k, start) => {
+          if(b.side === 'CURRENT') return f.rows ? k : (start ? peerStart[k] : peerEnd[k]);
+          if(b.n === null || b.n === undefined) return b.side === 'PRECEDING' ? 0 : N-1;
+          return b.side === 'PRECEDING' ? k - b.n : k + b.n;
+        };
         ordered.forEach((i,k)=>{
-          let end = ordered.length - 1;
-          if(oi >= 0){ end = k; while(end+1 < ordered.length && cmpVal(s.rows[ordered[end+1]][oi], s.rows[i][oi]) === 0) end++; }
-          vals[i] = aggregate({fn:node.fn, col:node.col}, ordered.slice(0, end+1).map(x=>s.rows[x]), s.cols);
+          const lo = f ? Math.max(0, at(f.from, k, true)) : 0;
+          const hi = f ? Math.min(N-1, at(f.to, k, false)) : peerEnd[k];
+          vals[i] = aggregate({fn:node.fn, col:node.col}, lo <= hi ? ordered.slice(lo, hi+1).map(x=>s.rows[x]) : [], s.cols);
         });
       }
     });
@@ -1297,6 +1327,82 @@ function condText(n){
     return b.length > 1 && n.any.length > 1 ? '('+s+')' : s;
   }).join(' OR ');
 }
+/* ---- 視窗步驟 ----
+   排名三兄弟和 NTILE、LAG、LEAD 看的是「排在第幾」，一定要有順序；
+   彙總（SUM…）可以加框架（ROWS / RANGE BETWEEN …）決定算到哪幾列 */
+const RANK_FNS = ['ROW_NUMBER','RANK','DENSE_RANK'];
+const SHIFT_FNS = ['LAG','LEAD'];
+const ORDERED_FNS = RANK_FNS.concat(['NTILE'], SHIFT_FNS);
+/* 所有排序鍵：第一個放在 orderBy / dir（舊存檔就是這樣），之後的放 thenBy */
+function winKeys(n){
+  if(!n.orderBy) return [];
+  return [{col:n.orderBy, dir:n.dir === 'DESC' ? 'DESC' : 'ASC'}].concat((n.thenBy || []).filter(k=>k && k.col));
+}
+const winOffset = n => Number.isInteger(n.offset) && n.offset >= 0 ? n.offset : 1;
+const winTiles = n => Number.isInteger(n.tiles) && n.tiles >= 1 ? n.tiles : 4;
+function frameBoundSQL(b){
+  if(b.side === 'CURRENT') return 'CURRENT ROW';
+  return (b.n === null || b.n === undefined ? 'UNBOUNDED' : String(b.n))+' '+b.side;
+}
+/* 框架邊界的先後：起點不能排在終點後面，UNBOUNDED FOLLOWING 不能當起點，UNBOUNDED PRECEDING 不能當終點 */
+const frameRank = b => b.side === 'CURRENT' ? 2 : b.side === 'PRECEDING' ? (b.n === null || b.n === undefined ? 0 : 1) : (b.n === null || b.n === undefined ? 4 : 3);
+const frameOK = f => frameRank(f.from) < 4 && frameRank(f.to) > 0 && frameRank(f.from) <= frameRank(f.to);
+/* 面板改窗格設定：數字欄位只收整數，打到一半的不收 */
+function winEdit(n, t, f, v){
+  const int = (s, min) => { const x = Number(s); return String(s).trim() !== '' && Number.isInteger(x) && x >= min ? x : null; };
+  if(t.dataset.tb !== undefined){ const k = (n.thenBy || [])[Number(t.dataset.tb)]; if(k) k[f] = v; return true; }
+  if(f === 'tiles'){ const x = int(v, 1); if(x !== null) n.tiles = x; return true; }
+  if(f === 'offset'){ const x = int(v, 0); if(x !== null) n.offset = x; return true; }
+  if(f === 'defType'){
+    const old = n.def ? n.def.v : null;
+    if(v === 'none') delete n.def;
+    else if(v === 'null') n.def = {kind:'lit', v:null};
+    else if(v === 'number') n.def = {kind:'lit', v:numish(old) ?? 0};
+    else n.def = {kind:'lit', v:old === null ? '' : String(old)};
+    return true;
+  }
+  if(f === 'defVal'){
+    if(n.def && typeof n.def.v === 'number'){
+      const x = Number(v);
+      if(String(v).trim() !== '' && !isNaN(x)) n.def = Number.isInteger(x) && /\./.test(v) ? {kind:'lit', v:x, dec:true} : {kind:'lit', v:x};
+    } else n.def = {kind:'lit', v:v};
+    return true;
+  }
+  if(f === 'frameMode'){
+    if(v) n.frame = {rows:true, from:{n:null, side:'PRECEDING'}, to:{n:0, side:'CURRENT'}};
+    else delete n.frame;
+    return true;
+  }
+  if(!n.frame) return false;
+  if(f === 'frameRows'){ n.frame.rows = v === 'rows' || [n.frame.from, n.frame.to].some(b=>frameRank(b) % 2); return true; }
+  if(f === 'fromKind' || f === 'toKind'){
+    const which = f === 'fromKind' ? 'from' : 'to', old = n.frame[which];
+    const keep = Number.isInteger(old.n) && old.n > 0 ? old.n : 1;
+    n.frame[which] = {UP:{n:null, side:'PRECEDING'}, NP:{n:keep, side:'PRECEDING'}, CR:{n:0, side:'CURRENT'},
+                      NF:{n:keep, side:'FOLLOWING'}, UF:{n:null, side:'FOLLOWING'}}[v] || old;
+    /* RANGE 只接受沒有數字的邊界；選了「往前 n 列」就改成一列一列數 */
+    if(frameRank(n.frame[which]) % 2) n.frame.rows = true;
+    if(!frameOK(n.frame)){
+      if(which === 'from') n.frame.to = {n:null, side:'FOLLOWING'};
+      else n.frame.from = {n:null, side:'PRECEDING'};
+    }
+    return true;
+  }
+  if(f === 'fromN' || f === 'toN'){
+    const x = int(v, 0), which = f === 'fromN' ? 'from' : 'to';
+    if(x !== null && n.frame[which].side !== 'CURRENT') n.frame[which].n = x;
+    return true;
+  }
+  return false;
+}
+function frameSQL(f){ return (f.rows ? 'ROWS' : 'RANGE')+' BETWEEN '+frameBoundSQL(f.from)+' AND '+frameBoundSQL(f.to); }
+function frameText(f){
+  const b = x => x.side === 'CURRENT' ? '這一列' : (x.n === null || x.n === undefined)
+    ? (x.side === 'PRECEDING' ? '組內第一列' : '組內最後一列')
+    : (x.side === 'PRECEDING' ? '往前 '+x.n+' 列' : '往後 '+x.n+' 列');
+  return '從'+b(f.from)+'到'+b(f.to)+(f.rows ? '' : '（同分的列算在一起）');
+}
+
 function aggregate(a, group, cols){
   if(a.fn === 'COUNT' && (a.col === '*' || !a.col)) return group.length;
   const i = cols.indexOf(a.col);
@@ -1668,15 +1774,7 @@ function buildSQL(){
           '\n  FROM '+fromOf(s0);
 
     } else if(n.type === 'window'){
-      const rankish = (n.fn === 'ROW_NUMBER' || n.fn === 'RANK' || n.fn === 'DENSE_RANK');
-      const call = rankish ? n.fn+'()' : n.fn+'('+(n.col === '*' || !n.col ? '*' : q(n.col))+')';
-      const over = [];
-      if(n.partitionBy.length) over.push('PARTITION BY '+n.partitionBy.map(q).join(', '));
-      if(n.orderBy) over.push('ORDER BY '+q(n.orderBy)+' '+n.dir);
-      /* SQL Server 和 Oracle 的排名函數一定要有 ORDER BY；「不排」就給一個不影響順序的 */
-      else if(rankish && state.dialect === 'mssql') over.push('ORDER BY (SELECT NULL)');
-      else if(rankish && state.dialect === 'oracle') over.push('ORDER BY NULL');
-      sql = '  SELECT '+starOf()+',\n    '+call+' OVER ('+over.join(' ')+') AS '+q(n.as)+
+      sql = '  SELECT '+starOf()+',\n    '+windowSQL(n)+' AS '+q(n.as)+
             '\n  FROM '+fromOf(s0);
 
     } else if(n.type === 'filter'){
@@ -1752,6 +1850,27 @@ function buildSQL(){
 function list(items, pad){ return items.join(',\n' + ' '.repeat(pad)); }
 function selectItems(n){ return n.cols.map((c,i)=>q(c)+(n.outCols && n.outCols[i] !== c ? ' AS '+q(n.outCols[i]) : '')); }
 /* 來源欄位放回它原本的位置，其他參數照原文 */
+function windowSQL(n){
+  let call;
+  if(RANK_FNS.indexOf(n.fn) >= 0) call = n.fn+'()';
+  else if(n.fn === 'NTILE') call = 'NTILE('+winTiles(n)+')';
+  else if(SHIFT_FNS.indexOf(n.fn) >= 0){
+    /* LAG(x) 就是 LAG(x, 1)；有預設值時位移一定要寫出來 */
+    const args = [q(n.col)], off = winOffset(n);
+    if(off !== 1 || n.def) args.push(String(off));
+    if(n.def) args.push(exprSQL(n.def));
+    call = n.fn+'('+args.join(', ')+')';
+  }
+  else call = n.fn+'('+(n.col === '*' || !n.col ? '*' : q(n.col))+')';
+  const over = [], keys = winKeys(n);
+  if(n.partitionBy.length) over.push('PARTITION BY '+n.partitionBy.map(q).join(', '));
+  if(keys.length) over.push('ORDER BY '+keys.map(k=>q(k.col)+' '+k.dir).join(', '));
+  /* SQL Server 和 Oracle 的排名、NTILE、LAG / LEAD 一定要有 ORDER BY；「不排」就給一個不影響順序的 */
+  else if(ORDERED_FNS.indexOf(n.fn) >= 0 && state.dialect === 'mssql') over.push('ORDER BY (SELECT NULL)');
+  else if(ORDERED_FNS.indexOf(n.fn) >= 0 && state.dialect === 'oracle') over.push('ORDER BY NULL');
+  if(n.frame && keys.length && AGG_FNS.indexOf(n.fn) >= 0) over.push(frameSQL(n.frame));
+  return call+' OVER ('+over.join(' ')+')';
+}
 function fnCallSQL(n){
   if(n.noArgs) return n.fn+'()';
   const col = n.left === '*' ? '*' : q(n.left);
@@ -2233,7 +2352,13 @@ function nodeSummary(n){
       ? '<code>'+esc(sqlLit(n.literal))+'</code><br>→ <code>'+esc(n.as)+'</code>' : n.fn
       ? '<code>'+esc(n.fn+'('+n.left+')')+'</code><br>→ <code>'+esc(n.as)+'</code>'
       : '<code>'+esc(n.left+' '+n.op+' '+n.right)+'</code><br>→ <code>'+esc(n.as)+'</code>';
-    case 'window': return '<code>'+n.fn+'</code><br>每個 <code>'+(n.partitionBy.join(',')||'全部')+'</code> 內排名';
+    case 'window': {
+      const verb = RANK_FNS.indexOf(n.fn) >= 0 ? '內排名' : n.fn === 'NTILE' ? '內分 '+winTiles(n)+' 桶'
+        : n.fn === 'LAG' ? '內取前 '+winOffset(n)+' 列' : n.fn === 'LEAD' ? '內取後 '+winOffset(n)+' 列'
+        : n.frame && n.orderBy ? '內移動計算' : n.orderBy ? '內累計' : '內整組計算';
+      const call = RANK_FNS.indexOf(n.fn) >= 0 || n.fn === 'NTILE' ? n.fn : n.fn+'('+n.col+')';
+      return '<code>'+esc(call)+'</code><br>每個 <code>'+esc(n.partitionBy.join(',')||'全部')+'</code> '+verb;
+    }
     case 'select': {
       const avail = colsInto(n.id).length;
       const keep = (n.cols || []).filter(c=>colsInto(n.id).indexOf(c) >= 0).length;
@@ -2430,24 +2555,33 @@ function lintGraph(){
     if(n.type === 'sort' && !n.by && (Number(n.limit) > 0 || Number(n.offset) > 0))
       add(n, 'warn', '<strong>沒有排序就取前幾筆</strong>：資料庫每次給的可能是不同的那幾筆。選一個排序欄位，結果才固定。');
 
-    /* 10. ROW_NUMBER 遇到同分（要有示意資料佐證） */
-    if(n.type === 'window' && n.fn === 'ROW_NUMBER' && n.orderBy){
+    /* 10. 看「排第幾列」的函數遇到同分（要有示意資料佐證）：所有排序鍵都一樣時，
+       資料庫愛排誰先就排誰先，ROW_NUMBER、NTILE、LAG / LEAD、ROWS 框架每次跑都可能不同 */
+    const byPosition = n.type === 'window' && n.orderBy &&
+      (['ROW_NUMBER','NTILE','LAG','LEAD'].indexOf(n.fn) >= 0 || (n.frame && n.frame.rows && AGG_FNS.indexOf(n.fn) >= 0));
+    if(byPosition){
       const S = evalNode(srcOf(n.id, 0));
-      const pi = n.partitionBy.map(c=>S.cols.indexOf(c)), oi = S.cols.indexOf(n.orderBy);
+      const pi = n.partitionBy.map(c=>S.cols.indexOf(c)), oi = winKeys(n).map(k=>S.cols.indexOf(k.col));
       const seen = new Set();
-      const tie = oi >= 0 && S.rows.some(r=>{
-        if(r[oi] == null) return false;
-        const k = JSON.stringify(pi.map(i=>r[i]).concat([r[oi]]));
+      const tie = oi.every(i=>i >= 0) && S.rows.some(r=>{
+        if(r[oi[0]] == null) return false;
+        const k = JSON.stringify(pi.map(i=>r[i]).concat(oi.map(i=>r[i])));
         if(seen.has(k)) return true; seen.add(k); return false;
       });
-      if(tie) add(n, 'info', '示意資料裡同一組有<strong>同分</strong>的列：'+code('ROW_NUMBER')+' 會隨便挑一個當第 1，每次跑可能不一樣。'+
-        '要同分同名次用 RANK / DENSE_RANK。');
+      const why = {
+        ROW_NUMBER: code('ROW_NUMBER')+' 會隨便挑一個當第 1，每次跑可能不一樣。要同分同名次用 RANK / DENSE_RANK。',
+        NTILE: code('NTILE')+' 可能把同分的列分進不同桶，每次跑可能不一樣。',
+        LAG: code('LAG')+' 的「前一列」是哪一列，每次跑可能不一樣。',
+        LEAD: code('LEAD')+' 的「後一列」是哪一列，每次跑可能不一樣。'
+      }[n.fn] || code('ROWS')+' 框架數到的是哪幾列，每次跑可能不一樣。';
+      if(tie) add(n, 'info', '示意資料裡同一組有<strong>同分</strong>的列：'+why+
+        (n.fn === 'ROW_NUMBER' ? '' : '在組內排序後面再加一欄（像 id）讓順序固定。'));
     }
   });
   return found;
 }
 const lintFor = id => (state.lint || []).filter(f=>f.node === id);
-const LINT_RULES = 'LEFT JOIN 被 WHERE 變成 INNER、JOIN 一對多重複計算、LEFT JOIN 後 COUNT(*)、NOT IN 遇到 NULL、整數相除、沒排序取前 N 筆、ROW_NUMBER 同分';
+const LINT_RULES = 'LEFT JOIN 被 WHERE 變成 INNER、JOIN 一對多重複計算、LEFT JOIN 後 COUNT(*)、NOT IN 遇到 NULL、整數相除、沒排序取前 N 筆、ROW_NUMBER / NTILE / LAG / LEAD 遇到同分';
 function renderLint(){
   const box = document.getElementById('lint');
   const list = state.lint || [];
@@ -3128,24 +3262,62 @@ function renderInspector(){
   }
 
   if(n.type === 'window'){
-    const rankish = ['ROW_NUMBER','RANK','DENSE_RANK'].indexOf(n.fn) >= 0;
+    const isAgg = AGG_FNS.indexOf(n.fn) >= 0, shift = SHIFT_FNS.indexOf(n.fn) >= 0;
     h += '<div class="rowf"><label>函數</label><select data-f="fn">'+
       opt('ROW_NUMBER', n.fn, 'ROW_NUMBER 編號 1,2,3')+
       opt('RANK', n.fn, 'RANK 同分同名次，跳號')+
       opt('DENSE_RANK', n.fn, 'DENSE_RANK 同分同名次，不跳')+
-      opt('SUM', n.fn, 'SUM 整組加總')+
-      opt('AVG', n.fn, 'AVG 整組平均')+
-      opt('MAX', n.fn, 'MAX 整組最大')+
-      opt('COUNT', n.fn, 'COUNT 整組幾筆')+'</select></div>';
-    if(!rankish)
+      opt('NTILE', n.fn, 'NTILE 照順序平分成幾桶')+
+      opt('LAG', n.fn, 'LAG 前面第幾列的值')+
+      opt('LEAD', n.fn, 'LEAD 後面第幾列的值')+
+      opt('SUM', n.fn, 'SUM 加總')+
+      opt('AVG', n.fn, 'AVG 平均')+
+      opt('MAX', n.fn, 'MAX 最大')+
+      opt('MIN', n.fn, 'MIN 最小')+
+      opt('COUNT', n.fn, 'COUNT 幾筆')+'</select></div>';
+    if(isAgg || shift)
       h += '<div class="rowf"><label>算哪欄</label><select data-f="col">'+(n.fn === 'COUNT' ? opt('*', n.col) : '')+colChoices(avail, n.col, n.fn === 'COUNT' ? ['*'] : [])+'</select></div>';
+    if(n.fn === 'NTILE')
+      h += '<div class="rowf"><label>分幾桶</label><input type="number" min="1" step="1" data-f="tiles" value="'+winTiles(n)+'"></div>';
+    if(shift){
+      const d = n.def, dt = !d ? 'none' : d.v === null ? 'null' : typeof d.v === 'number' ? 'number' : 'text';
+      h += '<div class="rowf"><label>'+(n.fn === 'LAG' ? '往前' : '往後')+'幾列</label><input type="number" min="0" step="1" data-f="offset" value="'+winOffset(n)+'"></div>';
+      h += '<div class="rowf"><label>沒有那列時</label><select data-f="defType" style="max-width:96px">'+
+        opt('none', dt, '留 NULL')+opt('number', dt, '補數字')+opt('text', dt, '補文字')+opt('null', dt, '寫明 NULL')+'</select>'+
+        (dt === 'number' || dt === 'text' ? '<input type="text" data-f="defVal" value="'+esc(d.v)+'">' : '')+'</div>';
+    }
     h += '<div class="sec">Partition by — 怎麼分組</div><div class="chips">'+
       avail.map(c=>colChip(c, n.partitionBy.indexOf(c) >= 0, 'data-part')).join('')+'</div>';
-    h += '<div class="rowf"><label>組內排序</label><select data-f="orderBy">'+opt('', n.orderBy, '（不排）')+colChoices(avail, n.orderBy, [''])+'</select></div>';
-    h += '<div class="rowf"><label>方向</label><select data-f="dir">'+opt('DESC', n.dir)+opt('ASC', n.dir)+'</select></div>';
+    h += '<div class="rowf"><label>組內排序</label><select data-f="orderBy">'+opt('', n.orderBy, '（不排）')+colChoices(avail, n.orderBy, [''])+'</select>'+
+         '<select data-f="dir" style="max-width:76px">'+opt('DESC', n.dir)+opt('ASC', n.dir)+'</select></div>';
+    if(n.orderBy){
+      (n.thenBy || []).forEach((k, i)=>{
+        h += '<div class="rowf"><label>同分再依</label><select data-tb="'+i+'" data-f="col">'+colChoices(avail, k.col)+'</select>'+
+             '<select data-tb="'+i+'" data-f="dir" style="max-width:76px">'+opt('DESC', k.dir)+opt('ASC', k.dir)+'</select>'+
+             '<button class="x" data-del-tb="'+i+'" aria-label="刪掉">×</button></div>';
+      });
+      h += '<button class="btn ghost" data-add-tb style="width:100%;margin-top:4px">＋ 同分時再依一欄排</button>';
+    }
+    if(isAgg && n.orderBy){
+      const f = n.frame;
+      const kind = b => b.side === 'CURRENT' ? 'CR' : (b.n === null || b.n === undefined) ? (b.side === 'PRECEDING' ? 'UP' : 'UF') : (b.side === 'PRECEDING' ? 'NP' : 'NF');
+      h += '<div class="rowf"><label>算到哪幾列</label><select data-f="frameMode">'+
+        opt('', f ? 'custom' : '', '從第一列到這一列（預設）')+opt('custom', f ? 'custom' : '', '自己指定範圍')+'</select></div>';
+      if(f){
+        const bound = (which, b, kinds) => '<select data-f="'+which+'Kind" style="max-width:118px">'+
+          kinds.map(k=>opt(k, kind(b), {UP:'組內第一列', NP:'往前 n 列', CR:'這一列', NF:'往後 n 列', UF:'組內最後一列'}[k])).join('')+'</select>'+
+          (b.side !== 'CURRENT' && b.n !== null && b.n !== undefined ? '<input type="number" min="0" step="1" data-f="'+which+'N" value="'+b.n+'" style="max-width:64px">' : '');
+        h += '<div class="rowf"><label>從</label>'+bound('from', f.from, ['UP','NP','CR','NF'])+'</div>';
+        h += '<div class="rowf"><label>到</label>'+bound('to', f.to, ['NP','CR','NF','UF'])+'</div>';
+        h += '<div class="rowf"><label>數法</label><select data-f="frameRows">'+
+          opt('rows', f.rows ? 'rows' : 'range', 'ROWS 一列一列數')+opt('range', f.rows ? 'rows' : 'range', 'RANGE 同分算一起')+'</select></div>';
+      }
+    }
     h += '<div class="rowf"><label>新欄名</label><input type="text" data-f="as" value="'+esc(n.as)+'"></div>';
-    h += '<p class="note">跟 GROUP BY 最大的差別：<b>列數完全不變</b>。<br>它只是在每一列旁邊多寫一個「你在你那組裡排第幾」。'+
-         (!rankish && n.orderBy ? '<br>有選「組內排序」時，'+n.fn+' 算的是<b>從第一列累加到這一列</b>，不是整組。要整組的話選（不排）。' : '')+'</p>';
+    h += '<p class="note">跟 GROUP BY 最大的差別：<b>列數完全不變</b>。<br>它只是在每一列旁邊多寫一個值。'+
+         (isAgg && n.orderBy ? '<br>有選「組內排序」時，'+n.fn+' 算的是<b>'+(n.frame ? frameText(n.frame) : '從第一列累加到這一列（同分的算在一起）')+'</b>，不是整組。要整組的話選（不排）。' : '')+
+         (shift ? '<br>'+n.fn+' 照「組內排序」找'+(n.fn === 'LAG' ? '前' : '後')+'面第 '+winOffset(n)+' 列；組內沒有那一列時'+(n.def && n.def.v !== null ? '補 <code>'+esc(exprSQL(n.def))+'</code>' : '是 NULL')+'。' : '')+
+         (ORDERED_FNS.indexOf(n.fn) >= 0 && !n.orderBy ? '<br><b>沒有排序</b>：誰排第幾每次可能不一樣。' : '')+'</p>';
   }
 
   if(n.type === 'select'){
@@ -3227,6 +3399,15 @@ function colType(node, col){
     const intRight = evalNode(up).cols.indexOf(node.right) >= 0 ? INT_TYPE.test(colType(up, node.right)) : /^-?\d+$/.test(String(node.right));
     return INT_TYPE.test(colType(up, node.left)) && intRight && (node.op !== '/' || intDivides()) ? 'INT' : '';
   }
+  if(node.type === 'window' && col === node.as){
+    if(RANK_FNS.indexOf(node.fn) >= 0 || node.fn === 'NTILE' || node.fn === 'COUNT') return 'INT';
+    if(node.fn === 'SUM' || node.fn === 'MIN' || node.fn === 'MAX') return colType(up, node.col);
+    if(SHIFT_FNS.indexOf(node.fn) >= 0){
+      const t = colType(up, node.col), d = node.def;
+      return !d || d.v === null || (INT_TYPE.test(t) && typeof d.v === 'number' && Number.isInteger(d.v) && !d.dec) ? t : '';
+    }
+    return '';
+  }
   if(node.type === 'case' && col === node.as){
     const intVal = (v, isCol) => isCol ? INT_TYPE.test(colType(up, v)) : v === null || (typeof v === 'number' && Number.isInteger(v));
     const all = node.branches.map(b=>[b.then, b.thenCol]).concat([[node.other === undefined ? null : node.other, node.otherCol]]);
@@ -3268,6 +3449,7 @@ inspector.addEventListener('change', e=>{
     if(n.type === 'case' && !obj[field+'Col'] && typeof obj[field] === 'string' && isNum(obj[field])) obj[field+'Str'] = true;
     else delete obj[field+'Str'];
   }
+  else if(n.type === 'window' && winEdit(n, t, f, v)){ /* 視窗的數字和框架欄位 */ }
   else if(t.dataset.k !== undefined){
     n.keys = joinKeys(n).map(x=>({left:x.left, right:x.right, lfn:x.lfn || '', rfn:x.rfn || ''}));
     n.keys[Number(t.dataset.k)][f] = v;
@@ -3329,6 +3511,16 @@ inspector.addEventListener('click', e=>{
   if(t.dataset.delKey !== undefined){
     n.keys = joinKeys(n); n.keys.splice(Number(t.dataset.delKey), 1);
     delete n.leftCol; delete n.rightCol;
+    refresh(); return;
+  }
+  if(t.hasAttribute('data-add-tb')){
+    const used = winKeys(n).map(k=>k.col), avail = colsInto(n.id);
+    n.thenBy = (n.thenBy || []).concat([{col:avail.find(c=>used.indexOf(c) < 0) || avail[0] || '', dir:'ASC'}]);
+    refresh(); return;
+  }
+  if(t.dataset.delTb !== undefined){
+    n.thenBy.splice(Number(t.dataset.delTb), 1);
+    if(!n.thenBy.length) delete n.thenBy;
     refresh(); return;
   }
   if(t.hasAttribute('data-add-agg')){ n.aggs.push({fn:'COUNT', col:'*', as:'c'+(n.aggs.length+1)}); refresh(); return; }
@@ -3435,6 +3627,16 @@ function prune(n){
   }
   else if(n.keys) n.keys = n.keys.filter(k=>avail.indexOf(k) >= 0);
   if(n.partitionBy) n.partitionBy = n.partitionBy.filter(k=>avail.indexOf(k) >= 0);
+  if(n.type === 'window'){
+    /* 第一個排序欄沒了，第二個遞補上來，不能留一個寫不出 ORDER BY 的框架 */
+    const keys = winKeys(n).filter(k=>!avail.length || avail.indexOf(k.col) >= 0);
+    n.orderBy = keys.length ? keys[0].col : ''; if(keys.length) n.dir = keys[0].dir;
+    if(n.thenBy || keys.length > 1) n.thenBy = keys.slice(1);
+    if(n.thenBy && !n.thenBy.length) delete n.thenBy;
+    if(n.frame && (!keys.length || AGG_FNS.indexOf(n.fn) < 0)) delete n.frame;
+    if(SHIFT_FNS.indexOf(n.fn) < 0){ delete n.offset; delete n.def; }
+    if(n.fn !== 'NTILE') delete n.tiles;
+  }
   if(n.type === 'select' && n.cols){
     const kept = n.cols.map((c,i)=>({col:c, out:(n.outCols || n.cols)[i]})).filter(x=>avail.indexOf(x.col) >= 0);
     n.cols = kept.map(x=>x.col);
@@ -3443,7 +3645,7 @@ function prune(n){
   /* 只有 COUNT 能用 *：COUNT 換成 SUM 之類時改抓第一個欄位，不然 SQL 會寫出 SUM(*) */
   const noStar = a => { if(a.fn !== 'COUNT' && a.col === '*' && avail.length) a.col = avail[0]; };
   if(n.type === 'groupby') n.aggs.forEach(noStar);
-  if(n.type === 'window' && ['ROW_NUMBER','RANK','DENSE_RANK'].indexOf(n.fn) < 0) noStar(n);
+  if(n.type === 'window' && RANK_FNS.indexOf(n.fn) < 0 && n.fn !== 'NTILE') noStar(n);
 }
 
 /* ============================================================
@@ -4038,8 +4240,11 @@ function buildSteps(){
       });
       steps.push({
         title:'視窗結果',
-        cap:'每一區內部照 <code>'+(n.orderBy || '—')+' '+n.dir+'</code> 排好，算出 <code>'+n.fn+'</code> 寫回<strong>每一列</strong>。跟 GROUP BY 的關鍵差別：<strong>'+S.rows.length+' 列進去，還是 '+W.rows.length+' 列出來</strong>。',
-        render: box => box.appendChild(miniTable('算完名次', W, {tint:r=>gc.get(keyOf(r)), sortBy:keyOf, pill:W.cols.length-1, pillColor:()=>'var(--f-wide)'}))
+        cap:'每一區內部照 <code>'+esc(winKeys(n).map(k=>k.col+' '+k.dir).join(', ') || '—')+'</code> 排好，算出 <code>'+esc(windowSQL(n).replace(/ OVER .*/, ''))+'</code> 寫回<strong>每一列</strong>'+
+            (AGG_FNS.indexOf(n.fn) >= 0 && n.orderBy ? '（每列算的是<strong>'+(n.frame ? frameText(n.frame) : '從第一列到這一列，同分的算在一起')+'</strong>）' : '')+
+            (SHIFT_FNS.indexOf(n.fn) >= 0 ? '（組內沒有那一列就是 '+(n.def && n.def.v !== null ? '<code>'+esc(exprSQL(n.def))+'</code>' : 'NULL')+'）' : '')+
+            '。跟 GROUP BY 的關鍵差別：<strong>'+S.rows.length+' 列進去，還是 '+W.rows.length+' 列出來</strong>。',
+        render: box => box.appendChild(miniTable('算完', W, {tint:r=>gc.get(keyOf(r)), sortBy:keyOf, pill:W.cols.length-1, pillColor:()=>'var(--f-wide)'}))
       });
     }
 
@@ -5041,18 +5246,34 @@ function parseSQLText(text){
           fail('COUNT(DISTINCT …) 目前只支援單一欄位', t);
         if(args.some(a=>a.kind === 'case') && AGG_FNS.indexOf(fn) >= 0 && args.length !== 1)
           fail(fn+'(…) 只能有一個參數', t);
+        /* Oracle 的 LAG(x) IGNORE NULLS：跳過 NULL 往前找，跟 LAG(x) 是不同的數字 */
+        if((isKw('IGNORE') || isKw('RESPECT')) && isKw('NULLS',1)) fail('IGNORE NULLS / RESPECT NULLS 目前做不出對應的步驟');
         if(eatKw('OVER')){
           if(distinct) fail('視窗函數不支援 COUNT(DISTINCT …)：PostgreSQL / SQL Server 不接受這種寫法', t);
           if(args.some(a=>a.kind === 'case')) fail('視窗函數裡的 CASE 目前做不出對應的步驟', t);
-          /* 視窗步驟只做得出排名三兄弟和五個彙總。LAG、NTILE 之類的以前會被
-             當成 ROW_NUMBER 匯入，算出來的完全是另一個數字 —— 一律擋下 */
-          if(WIN_FNS.indexOf(fn) < 0 && AGG_FNS.indexOf(fn) < 0)
-            fail('視窗函數 '+fn+'() 目前做不出對應的步驟（只支援 ROW_NUMBER / RANK / DENSE_RANK 與 SUM / COUNT / AVG / MIN / MAX）', t);
+          /* 視窗步驟做得出排名三兄弟、NTILE、LAG / LEAD 和五個彙總。其他的（FIRST_VALUE、
+             PERCENT_RANK…）以前會被當成 ROW_NUMBER 匯入，算出來的完全是另一個數字 —— 一律擋下 */
+          if(WIN_FNS.indexOf(fn) < 0 && AGG_FNS.indexOf(fn) < 0 && fn !== 'NTILE' && SHIFT_FNS.indexOf(fn) < 0)
+            fail('視窗函數 '+fn+'() 目前做不出對應的步驟（只支援 ROW_NUMBER / RANK / DENSE_RANK / NTILE / LAG / LEAD 與 SUM / COUNT / AVG / MIN / MAX）', t);
           if(WIN_FNS.indexOf(fn) >= 0 && args.length) fail(fn+'() 不需要參數', t);
           if(AGG_FNS.indexOf(fn) >= 0 && (args.length !== 1 || (args[0].kind !== 'col' && args[0].kind !== 'star')))
             fail('視窗彙總 '+fn+'(…) 裡目前只能放單一欄位，不能放算式、函式或固定值', t);
+          const w = {partitionBy:[], orderBy:null, dir:'ASC', thenBy:[]};
+          const wholeNum = a => a && a.kind === 'lit' && typeof a.v === 'number' && Number.isInteger(a.v) && !a.dec;
+          if(fn === 'NTILE'){
+            if(args.length !== 1 || !wholeNum(args[0]) || args[0].v < 1) fail('視窗函數 NTILE(n) 的 n 目前只能是正整數', t);
+            w.tiles = args[0].v;
+          }
+          if(SHIFT_FNS.indexOf(fn) >= 0){
+            if(!args.length || args.length > 3 || args[0].kind !== 'col')
+              fail('視窗函數 '+fn+'(欄位, 位移, 預設值) 的第一個參數目前只能是單一欄位，不能是算式或函式', t);
+            if(args.length > 1 && (!wholeNum(args[1]) || args[1].v < 0)) fail('視窗函數 '+fn+' 的位移目前只能是 0 以上的整數', t);
+            /* 預設值是欄位時，每一列補的值都不一樣 —— 步驟只記得住一個固定值 */
+            if(args.length > 2 && args[2].kind !== 'lit') fail('視窗函數 '+fn+' 的預設值目前只能是固定值（數字、文字或 NULL），不能是欄位或算式', t);
+            w.offset = args.length > 1 ? args[1].v : 1;
+            if(args.length > 2) w.def = args[2];
+          }
           needOp('(');
-          const w = {partitionBy:[], orderBy:null, dir:'ASC'};
           const winCol = what => { const t0 = at(), e = parseExpr();
             if(e.kind !== 'col') fail('視窗的 '+what+' 目前只能是欄位，不能是算式或函式', t0);
             return e.col; };
@@ -5063,14 +5284,48 @@ function parseSQLText(text){
             if(isKw('NULL')) p++;
             else if(isOp('(') && isKw('SELECT',1) && isKw('NULL',2) && isOp(')',3)) p += 4;
             else {
-              w.orderBy = winCol('ORDER BY');
-              if(eatKw('DESC')) w.dir = 'DESC'; else eatKw('ASC');
-              /* 第二個排序欄決定同分時誰先誰後；丟掉它，名次和累加值都會變 */
-              if(isOp(',')) fail('視窗的 ORDER BY 目前只支援一個欄位');
+              /* 第二個以後的排序欄決定同分時誰先誰後；全部照順序留著 */
+              const keys = [];
+              do {
+                const col = winCol('ORDER BY'); let dir = 'ASC';
+                if(eatKw('DESC')) dir = 'DESC'; else eatKw('ASC');
+                /* NULL 排前排後各家預設不同，寫出來的 SQL 換方言就會變 */
+                if(isKw('NULLS')) fail('視窗排序的 NULLS FIRST / NULLS LAST 目前做不出對應的步驟');
+                keys.push({col:col, dir:dir});
+              } while(eatOp(','));
+              w.orderBy = keys[0].col; w.dir = keys[0].dir; w.thenBy = keys.slice(1);
             }
           }
-          /* 框架改變的是「算到哪幾列」：7 日移動平均拿掉框架就變成累計加總 */
-          if(!isOp(')')) fail('視窗的框架設定（ROWS / RANGE BETWEEN …）目前做不出對應的步驟');
+          /* 框架改變的是「算到哪幾列」：7 日移動平均拿掉框架就變成累計加總，所以照寫的留著 */
+          if(isKw('ROWS') || isKw('RANGE')){
+            const ft = at(), rows = up(ft) === 'ROWS';
+            p++;
+            if(AGG_FNS.indexOf(fn) < 0) fail('框架（ROWS / RANGE）只用在 SUM / COUNT / AVG / MIN / MAX；'+fn+'() 寫了框架目前做不出對應的步驟', ft);
+            if(!w.orderBy) fail('視窗框架要搭配 ORDER BY：沒有排序，「往前幾列」每次可能是不同的列', ft);
+            const bound = () => {
+              const b0 = at();
+              if(eatKw('UNBOUNDED')){
+                if(eatKw('PRECEDING')) return {n:null, side:'PRECEDING'};
+                if(eatKw('FOLLOWING')) return {n:null, side:'FOLLOWING'};
+              } else if(isKw('CURRENT') && isKw('ROW',1)){ p += 2; return {n:0, side:'CURRENT'}; }
+              else if(b0.t === 'num' && /^\d+$/.test(b0.v)){
+                p++;
+                if(!rows) fail('視窗框架的 RANGE 加數字是照「值的差距」算，目前做不出對應的步驟（改成 ROWS 意思不一樣）', b0);
+                if(eatKw('PRECEDING')) return {n:Number(b0.v), side:'PRECEDING'};
+                if(eatKw('FOLLOWING')) return {n:Number(b0.v), side:'FOLLOWING'};
+              }
+              fail('看不懂這個框架邊界（支援 UNBOUNDED PRECEDING、n PRECEDING、CURRENT ROW、n FOLLOWING、UNBOUNDED FOLLOWING）', b0);
+            };
+            let from, to;
+            if(eatKw('BETWEEN')){ from = bound(); if(!eatKw('AND')) fail('框架要寫成 BETWEEN … AND …'); to = bound(); }
+            else { from = bound(); to = {n:0, side:'CURRENT'}; }
+            /* 起點要在終點前面：資料庫會直接報錯的寫法不要匯進來 */
+            const rank = b => b.side === 'CURRENT' ? 2 : b.side === 'PRECEDING' ? (b.n === null ? 0 : 1) : (b.n === null ? 4 : 3);
+            if(rank(from) === 4 || rank(to) === 0 || rank(from) > rank(to)) fail('這個框架的起點在終點後面，資料庫不會接受', ft);
+            w.frame = {rows:rows, from:from, to:to};
+            if(isKw('EXCLUDE')) fail('框架的 EXCLUDE 目前做不出對應的步驟');
+          }
+          if(!isOp(')')) fail('視窗的這段設定目前做不出對應的步驟（支援 PARTITION BY、ORDER BY 和 ROWS / RANGE BETWEEN …）');
           needOp(')');
           return {kind:'window', fn:fn, args:args, w:w};
         }
@@ -5844,12 +6099,18 @@ function astToGraph(parsed){
       const a0 = e.args[0];
       const n = add('window', {
         fn: e.fn,                       /* 其他函式在解析時就擋掉了 */
-        col: (!a0 || a0.kind === 'star') ? '*' : exprName(a0),
+        col: (!a0 || a0.kind === 'star' || e.fn === 'NTILE') ? '*' : exprName(a0),
         partitionBy: e.w.partitionBy.slice(),
         orderBy: e.w.orderBy || '',
         dir: e.w.dir,
         as: it.alias || exprName(e)
       });
+      /* 只在用到時才記，舊的步驟和存檔長得跟以前一樣 */
+      if(e.w.thenBy && e.w.thenBy.length) n.thenBy = e.w.thenBy.map(k=>({col:k.col, dir:k.dir}));
+      if(e.w.frame) n.frame = e.w.frame;
+      if(e.w.tiles !== undefined) n.tiles = e.w.tiles;
+      if(e.w.offset !== undefined) n.offset = e.w.offset;
+      if(e.w.def) n.def = e.w.def.dec ? {kind:'lit', v:e.w.def.v, dec:true} : {kind:'lit', v:e.w.def.v};
       conn(cur, n); cur = n;
       cols = cols ? cols.concat([n.as]) : null;
     });

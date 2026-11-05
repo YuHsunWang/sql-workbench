@@ -90,8 +90,20 @@ agg_arith: i => `SELECT customer_id, ${pick(['SUM','AVG','MAX','MIN','COUNT'])}(
 group_expression: i => { const e = i%2 ? 'LOWER(status)' : `amount * ${pick([1,2,3])}`; return `SELECT ${e} AS g, ${pick(['COUNT(*)','SUM(qty)'])} AS n FROM orders GROUP BY ${e}`; },
 // COUNT(1) was written back as COUNT("1"), a column reference.
 count_literal: i => `SELECT ${i%2?'customer_id, ':''}COUNT(${pick(['1',"'x'"])}) AS n FROM orders${i%2?' GROUP BY customer_id':''}`,
-// LAG / NTILE were imported as ROW_NUMBER, frames and extra window keys were dropped with only a warning.
-unsupported_window: i => `SELECT id, ${pick(['LAG(amount) OVER (ORDER BY id)','NTILE(3) OVER (ORDER BY id)','SUM(amount) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)','ROW_NUMBER() OVER (ORDER BY qty, id)','SUM(amount * qty) OVER (PARTITION BY customer_id)'])} AS w FROM orders`,
+// LAG / NTILE were once imported as ROW_NUMBER, frames and extra window keys dropped with only a warning.
+// What still has no exact step must be refused.
+unsupported_window: i => `SELECT id, ${pick(['FIRST_VALUE(amount) OVER (ORDER BY id)','PERCENT_RANK() OVER (ORDER BY id)','SUM(amount) OVER (ORDER BY id RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)','ROW_NUMBER() OVER (ORDER BY qty NULLS LAST, id)','SUM(amount * qty) OVER (PARTITION BY customer_id)','LAG(amount, qty) OVER (ORDER BY id)'])} AS w FROM orders`,
+// LAG / LEAD, NTILE, ROWS / RANGE frames and extra window keys were refused (issue #5); each must now execute exactly.
+// Unique tie-breakers keep the order, and so the result, deterministic.
+window_more: i => `SELECT id, ${pick([
+  'LAG(amount) OVER (ORDER BY id)', `LEAD(amount, ${1+i%3}, 0) OVER (PARTITION BY customer_id ORDER BY id)`,
+  "LAG(status, 1, 'none') OVER (PARTITION BY customer_id ORDER BY qty DESC, id)", 'LEAD(note) OVER (ORDER BY status, id DESC)',
+  `NTILE(${2+i%4}) OVER (ORDER BY amount, id)`, 'NTILE(3) OVER (PARTITION BY status ORDER BY id DESC)',
+  `SUM(amount) OVER (ORDER BY id ROWS BETWEEN ${i%3} PRECEDING AND CURRENT ROW)`,
+  'AVG(qty) OVER (PARTITION BY customer_id ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)',
+  'COUNT(*) OVER (ORDER BY amount RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)',
+  'MAX(amount) OVER (ORDER BY qty, id ROWS 2 PRECEDING)', 'MIN(qty) OVER (ORDER BY id ROWS BETWEEN 2 FOLLOWING AND UNBOUNDED FOLLOWING)',
+  'ROW_NUMBER() OVER (ORDER BY qty, id)', 'RANK() OVER (ORDER BY status, qty DESC)'])} AS w FROM orders ORDER BY id`,
 // A function wrapped in another lost the inner layer (UPPER(TRIM(s)) became UPPER(s)); multi-level
 // arithmetic was refused; COALESCE(o.a, o.b) copied "o.b" into a CTE with no alias o. All exact now.
 expr_nested: i => `SELECT id, ${pick([
@@ -153,7 +165,7 @@ function diff(a,b) {
 const norm = sql => sql.replace(/\s+/g,' ').trim().replace(/;$/,'');
 const counts = {total:0,identical_result:0,different_result:0,regenerated_sql_fails:0,parse_unsupported:0,textual_identical:0};
 const unsupported = {}, classes = new Map(), inputs = new Set();
-const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_') || ['agg_arith','group_expression','count_literal','expr_nested','agg_expr','decimal_division','agg_post','having_only','where_expr','where_star_expr','having_expr','case_general','agg_case_expr','case_general_group'].includes(k)));
+const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_') || ['agg_arith','group_expression','count_literal','expr_nested','agg_expr','decimal_division','agg_post','having_only','where_expr','where_star_expr','having_expr','case_general','agg_case_expr','case_general_group','window_more'].includes(k)));
 const mustRefuse = {
   unsupported_aggregate_order:/ORDER BY.*SELECT/,
   unsupported_case_group:/GROUP BY.*CASE/,

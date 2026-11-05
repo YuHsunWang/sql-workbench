@@ -225,8 +225,8 @@ test('regression: every ORDER BY key is kept, in order', () => {
   app.state.schema = {t:{label:'', cols:[{name:'x', type:'INT'}, {name:'y', type:'INT'}], rows:[[1, 1], [2, 0], [1, 2]]}};
   const out = app.evalNode(graph.nodes.find(n => n.type === 'output'));
   assert.deepEqual(json(out.rows), [[1, 2], [1, 1], [2, 0]]);
-  assert.match(sqlError('SELECT ROW_NUMBER() OVER (ORDER BY x, y) AS r FROM t').msg, /視窗的 ORDER BY/);
-  return 'SQL keeps both keys; ties on x broken by y DESC; window extra keys refused';
+  assert.match(roundTrip('SELECT ROW_NUMBER() OVER (ORDER BY x, y DESC) AS r FROM t'), /OVER \(ORDER BY x ASC, y DESC\)/);
+  return 'SQL keeps both keys; ties on x broken by y DESC; window keys kept too';
 });
 
 /* Common AI-written shapes imported "successfully" as a different query: LAG and
@@ -235,9 +235,9 @@ test('regression: every ORDER BY key is kept, in order', () => {
    non-existent year_d, NOW() came back as NOW(*). Each is now refused or exact. */
 test('regression: imports never swap a function, drop a layer or invent a column', () => {
   const refused = [
-    'SELECT id, LAG(amount) OVER (ORDER BY id) AS prev FROM orders',
-    'SELECT id, NTILE(4) OVER (ORDER BY amount) AS q FROM orders',
-    'SELECT id, SUM(amount) OVER (ORDER BY id ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS ma FROM orders',
+    'SELECT id, FIRST_VALUE(amount) OVER (ORDER BY id) AS first FROM orders',
+    'SELECT id, LAG(amount) IGNORE NULLS OVER (ORDER BY id) AS prev FROM orders',
+    'SELECT id, SUM(amount) OVER (ORDER BY id RANGE BETWEEN 6 PRECEDING AND CURRENT ROW) AS ma FROM orders',
     'SELECT ROW_NUMBER() OVER (PARTITION BY YEAR(d) ORDER BY a) AS r FROM t',
     'SELECT SUM(a * 2) OVER () AS s FROM t',
   ];
@@ -297,6 +297,7 @@ test('security: a pasted value carrying HTML is text in every block, step and pa
     `SELECT COALESCE(city, '${bad}') AS c FROM t`,
     `SELECT city, COUNT(*) AS n FROM t GROUP BY city HAVING city <> '${bad}'`,
     `SELECT UPPER(COALESCE(city, '${bad}')) || 'x' AS k FROM t`,
+    `SELECT city, LAG(city, 1, '${bad}') OVER (ORDER BY qq) AS prev FROM t`,
     `SELECT * FROM t WHERE UPPER(city) = '${bad}'`,
     `SELECT CASE WHEN qq = 5 AND city = '${bad}' THEN 1 ELSE 0 END AS flag FROM t`,
     `SELECT city, ROUND(AVG(qq), 1) AS a FROM t GROUP BY city HAVING MAX(qq) > 1 OR city = '${bad}'`,
@@ -2113,6 +2114,116 @@ test('review: SQL Server and Oracle ranking always gets an ORDER BY', () => {
   return 'mssql (SELECT NULL), oracle NULL, postgres none — all re-import unordered';
 });
 
+/* LAG / LEAD, NTILE, frames and a second window ORDER BY key were refused — and
+   before that imported as ROW_NUMBER or a running total, a different number (issue #5).
+   Each now round-trips, the regenerated SQL gives SQLite's result, and the preview
+   computes the same numbers on the same rows. */
+test('window: LAG / LEAD / NTILE, frames and extra keys are exact in SQL and preview', () => {
+  const data = [['A', 1, 10, 1], ['A', 2, null, 2], ['A', 3, 30, 3], ['A', 4, 40, 4],
+                ['B', 1, 5, 5], ['B', 2, 15, 6], ['B', 3, null, 7], ['A', 5, 7, 8]];
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE w(p TEXT, o INTEGER, v INTEGER, k INTEGER);');
+  const ins = db.prepare('INSERT INTO w VALUES (?, ?, ?, ?)');
+  data.forEach(r => ins.run(...r));
+  const schema = {w: {cols: ['p', 'o', 'v', 'k'].map(name => ({name, type: name === 'p' ? 'TEXT' : 'INT'})), rows: data}};
+  /* AVG is a float in SQLite and rounded in the preview */
+  const norm = rows => rows.map(r => r.map(v => typeof v === 'number' ? Math.round(v * 100) / 100 : v))
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const shapes = [
+    'SELECT p, o, LAG(v) OVER (PARTITION BY p ORDER BY o) AS x FROM w',
+    'SELECT p, o, LEAD(v, 2, 0) OVER (PARTITION BY p ORDER BY o) AS x FROM w',
+    'SELECT p, o, LAG(v, 1, -1) OVER (ORDER BY p, o DESC) AS x FROM w',
+    "SELECT p, o, LEAD(p, 1, 'none') OVER (PARTITION BY p ORDER BY o DESC) AS x FROM w",
+    'SELECT p, o, LAG(v, 0) OVER (ORDER BY k) AS x FROM w',
+    'SELECT p, o, NTILE(3) OVER (ORDER BY o, k) AS x FROM w',
+    'SELECT p, o, NTILE(2) OVER (PARTITION BY p ORDER BY o) AS x FROM w',
+    'SELECT p, o, NTILE(10) OVER (ORDER BY k DESC) AS x FROM w',
+    'SELECT p, o, SUM(v) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS x FROM w',
+    'SELECT p, o, AVG(v) OVER (ORDER BY o, k ROWS 2 PRECEDING) AS x FROM w',
+    'SELECT p, o, COUNT(*) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS x FROM w',
+    'SELECT p, o, MAX(v) OVER (ORDER BY o RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS x FROM w',
+    'SELECT p, o, MIN(v) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) AS x FROM w',
+    'SELECT p, o, SUM(v) OVER (ORDER BY o RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS x FROM w',
+    'SELECT p, o, COUNT(v) OVER (ORDER BY o, k ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING) AS x FROM w',
+    'SELECT p, o, RANK() OVER (ORDER BY p, o DESC) AS x FROM w',
+    'SELECT p, o, DENSE_RANK() OVER (ORDER BY o, p) AS x FROM w',
+  ];
+  for (const sql of shapes) {
+    const want = norm(db.prepare(sql).all().map(r => [r.p, r.o, r.x]));
+    const generated = roundTrip(sql);
+    assert.deepEqual(norm(db.prepare(generated).all().map(r => [r.p, r.o, r.x])), want, generated);
+    installGraph(api, {nodes: api.state.nodes, edges: api.state.edges}, schema);
+    assert.deepEqual(norm(outRows()), want, `preview of ${sql}`);
+  }
+  /* what still has no exact step is refused, never approximated */
+  const refused = [
+    ['SELECT LAG(v, o) OVER (ORDER BY o) AS x FROM w', /位移/],
+    ['SELECT LAG(v, 1, o) OVER (ORDER BY o) AS x FROM w', /預設值/],
+    ['SELECT LAG(v * 2) OVER (ORDER BY o) AS x FROM w', /單一欄位/],
+    ['SELECT NTILE(o) OVER (ORDER BY o) AS x FROM w', /NTILE/],
+    ['SELECT SUM(v) OVER (ROWS 2 PRECEDING) AS x FROM w', /ORDER BY/],
+    ['SELECT ROW_NUMBER() OVER (ORDER BY o ROWS 2 PRECEDING) AS x FROM w', /框架/],
+    ['SELECT SUM(v) OVER (ORDER BY o RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) AS x FROM w', /RANGE/],
+    ['SELECT SUM(v) OVER (ORDER BY o ROWS BETWEEN CURRENT ROW AND 1 PRECEDING) AS x FROM w', /起點/],
+    ['SELECT SUM(v) OVER (ORDER BY o ROWS BETWEEN UNBOUNDED FOLLOWING AND CURRENT ROW) AS x FROM w', /起點/],
+    ['SELECT SUM(v) OVER (ORDER BY o GROUPS 1 PRECEDING) AS x FROM w', /視窗/],
+    ['SELECT SUM(v) OVER (ORDER BY o NULLS LAST) AS x FROM w', /NULLS/],
+    ['SELECT LAG(v) IGNORE NULLS OVER (ORDER BY o) AS x FROM w', /IGNORE/],
+  ];
+  for (const [sql, re] of refused) assert.match(sqlError(sql).msg, re, sql);
+  /* SQL Server and Oracle require an order for LAG / LEAD / NTILE too */
+  assert.match(roundTrip('SELECT LAG(v) OVER (PARTITION BY p) AS x FROM w', 'mssql'), /LAG\(v\) OVER \(PARTITION BY p ORDER BY \(SELECT NULL\)\)/);
+  assert.match(roundTrip('SELECT NTILE(4) OVER () AS x FROM w', 'oracle'), /NTILE\(4\) OVER \(ORDER BY NULL\)/);
+  return `${shapes.length} shapes exact in SQLite and preview; ${refused.length} refused`;
+});
+
+/* The panel is the other way in: a LAG step built or edited there has to write the
+   same SQL the import would, and a frame must never outlive the ORDER BY it needs. */
+test('window: the panel edits offset, default, buckets, extra keys and frames', () => {
+  const app = loadApp();
+  app.state.dialect = 'postgres';
+  const graph = graphFromSQL(app, 'SELECT p, o, k, SUM(v) OVER (PARTITION BY p ORDER BY o) AS x FROM w');
+  const win = graph.nodes.find(n => n.type === 'window');
+  app.state.sel = win.id;
+  const change = (dataset, value) => app.document.getElementById('inspector').listeners.change({target: {dataset, value}});
+  const click = attr => app.document.getElementById('inspector').listeners.click({target: {closest: () => ({hasAttribute: a => a === attr, dataset: {}})}});
+  const winSQL = () => /\n\s+(\S.* OVER \(.*\)) AS x/.exec(app.buildSQL())[1];
+  change({f: 'frameMode'}, 'custom');
+  change({f: 'fromKind'}, 'NP');
+  change({f: 'fromN'}, '6');
+  assert.equal(winSQL(), 'SUM(v) OVER (PARTITION BY p ORDER BY o ASC ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)');
+  change({f: 'frameRows'}, 'range');
+  assert.match(winSQL(), /ROWS BETWEEN 6 PRECEDING/, 'RANGE never takes a numeric bound');
+  change({f: 'toKind'}, 'NP');
+  assert.match(winSQL(), /ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING/);
+  change({f: 'fromKind'}, 'NF');
+  assert.match(winSQL(), /ROWS BETWEEN 6 FOLLOWING AND UNBOUNDED FOLLOWING/, 'a start after the end moves the end');
+  click('data-add-tb');
+  change({tb: '0', f: 'col'}, 'k');
+  change({tb: '0', f: 'dir'}, 'DESC');
+  assert.match(winSQL(), /ORDER BY o ASC, k DESC ROWS/);
+  change({f: 'orderBy'}, '');
+  assert.equal(winSQL(), 'SUM(v) OVER (PARTITION BY p)', 'no order, no frame');
+  change({f: 'fn'}, 'LAG');
+  change({f: 'orderBy'}, 'o');
+  change({f: 'offset'}, '2');
+  change({f: 'offset'}, '-1');
+  change({f: 'defType'}, 'number');
+  change({f: 'defVal'}, '0');
+  assert.equal(winSQL(), 'LAG(v, 2, 0) OVER (PARTITION BY p ORDER BY o ASC)');
+  change({f: 'defType'}, 'text');
+  change({f: 'defVal'}, "it's");
+  assert.equal(winSQL(), "LAG(v, 2, 'it''s') OVER (PARTITION BY p ORDER BY o ASC)");
+  change({f: 'fn'}, 'NTILE');
+  change({f: 'tiles'}, '5');
+  assert.equal(winSQL(), 'NTILE(5) OVER (PARTITION BY p ORDER BY o ASC)');
+  assert.equal(win.def, undefined, 'a default does not linger on NTILE');
+  /* what the panel built re-imports to the same step */
+  const again = graphFromSQL(loadApp(), app.buildSQL()).nodes.find(n => n.type === 'window');
+  assert.deepEqual(json({fn: again.fn, tiles: again.tiles, orderBy: again.orderBy}), {fn: 'NTILE', tiles: 5, orderBy: 'o'});
+  return 'frame, extra key, LAG offset/default and NTILE buckets written as edited';
+});
+
 test('review: switching COUNT to SUM never leaves SUM(*)', () => {
   const app = loadApp();
   const change = (node, dataset, value) => {
@@ -2680,7 +2791,7 @@ test('DEV-240: failed SQL imports leave the graph and quoting unchanged', () => 
   };
   paste('SELECT "CamelCol" FROM "MyTable"');
   const before = app.buildSQL(), canvas = JSON.stringify(app.state.nodes);
-  for (const sql of ['SELECT FROM', "SELECT 'unfinished", 'SELECT x, LAG(x) OVER (ORDER BY x) AS p FROM t']) {
+  for (const sql of ['SELECT FROM', "SELECT 'unfinished", 'SELECT x, FIRST_VALUE(x) OVER (ORDER BY x) AS p FROM t']) {
     paste(sql);
     assert.match(app.document.getElementById('parse-out').innerHTML, /class="perr"/);
     assert.equal(app.buildSQL(), before, sql);
