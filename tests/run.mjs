@@ -298,7 +298,8 @@ test('security: a pasted value carrying HTML is text in every block, step and pa
     `SELECT city, COUNT(*) AS n FROM t GROUP BY city HAVING city <> '${bad}'`,
     `SELECT UPPER(COALESCE(city, '${bad}')) || 'x' AS k FROM t`,
     `SELECT city, LAG(city, 1, '${bad}') OVER (ORDER BY qq) AS prev FROM t`,
-    `SELECT * FROM t WHERE UPPER(city) = '${bad}'`,
+    `SELECT city, qq FROM t WHERE UPPER(city) = '${bad}'`,
+    `SELECT city FROM t WHERE qq > (SELECT MAX(qq) FROM t WHERE city = '${bad}')`,
     `SELECT CASE WHEN qq = 5 AND city = '${bad}' THEN 1 ELSE 0 END AS flag FROM t`,
     `SELECT city, ROUND(AVG(qq), 1) AS a FROM t GROUP BY city HAVING MAX(qq) > 1 OR city = '${bad}'`,
   ];
@@ -2224,6 +2225,128 @@ test('window: the panel edits offset, default, buckets, extra keys and frames', 
   return 'frame, extra key, LAG offset/default and NTILE buckets written as edited';
 });
 
+/* (SELECT AVG(x) FROM t) was refused everywhere (issue #5). An uncorrelated one that
+   returns at most one row becomes its own steps, LEFT JOINed ON 1 = 1 to every row —
+   an empty subquery gives NULL, like the database. One that can return several rows,
+   or reads the outer row, is still refused: a JOIN would multiply or mis-match rows. */
+test('scalar subquery: uncorrelated, at most one row, exact in SQLite', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE orders(id INTEGER, customer_id INTEGER, amount INTEGER, status TEXT);
+           CREATE TABLE prices(id INTEGER, d TEXT, price INTEGER);
+           INSERT INTO orders VALUES (1,1,10,'new'),(2,1,20,'paid'),(3,2,20,'paid'),(4,3,40,'new'),(5,4,NULL,'void'),(6,9,60,'paid');
+           INSERT INTO prices VALUES (1,'2024-01-01',5),(2,'2024-02-01',7),(3,'2023-12-01',9);`);
+  const rows = sql => json(db.prepare(sql).all().map(r => Object.values(r))).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  /* the subquery's own table comes first in the regenerated WITH chain, so the steps are
+     built in another order; what must hold is that re-importing writes the same SQL again */
+  const trip = sql => {
+    const app = loadApp();
+    app.state.dialect = 'postgres';
+    graphFromSQL(app, sql);
+    const generated = app.buildSQL();
+    graphFromSQL(app, generated);
+    assert.equal(app.buildSQL(), generated, sql);
+    return generated;
+  };
+  const shapes = [
+    'SELECT id, amount FROM orders WHERE amount > (SELECT AVG(amount) FROM orders)',
+    'SELECT id, amount - (SELECT AVG(amount) FROM orders) AS diff FROM orders',
+    'SELECT id, (SELECT MAX(amount) FROM orders) AS top FROM orders',
+    'SELECT customer_id, SUM(amount) * 100.0 / (SELECT SUM(amount) FROM orders) AS share FROM orders GROUP BY customer_id',
+    'SELECT customer_id, SUM(amount) AS s FROM orders GROUP BY customer_id HAVING SUM(amount) > (SELECT AVG(amount) FROM orders)',
+    'SELECT customer_id, SUM(amount - (SELECT MIN(amount) FROM orders)) AS s FROM orders GROUP BY customer_id',
+    'SELECT id, (SELECT price FROM prices ORDER BY d DESC LIMIT 1) AS latest FROM orders',
+    "SELECT id FROM orders WHERE amount > (SELECT AVG(amount) FROM orders WHERE status = 'nothing') OR id = 1",
+    "SELECT id, COALESCE((SELECT MAX(price) FROM prices WHERE d > '2030-01-01'), 0) AS p FROM orders",
+    'SELECT id, (SELECT COUNT(*) FROM prices WHERE price > 100) AS n FROM orders',
+    'SELECT id FROM orders WHERE amount >= (SELECT price FROM prices WHERE price > 100 LIMIT 1)',
+    'SELECT id FROM orders WHERE amount = (SELECT MAX(amount) FROM orders) OR amount < (SELECT MIN(amount) + 15 FROM orders)',
+    'SELECT o.id, p.price FROM orders o CROSS JOIN prices p',
+  ];
+  for (const sql of shapes) assert.deepEqual(rows(trip(sql)), rows(sql), sql);
+  /* the preview computes the subquery on the same rows */
+  const app = loadApp();
+  const graph = graphFromSQL(app, 'SELECT id, amount FROM orders WHERE amount > (SELECT AVG(amount) FROM orders)');
+  installGraph(app, graph, {orders: {cols: ['id', 'customer_id', 'amount', 'status'].map(name => ({name})),
+    rows: db.prepare('SELECT * FROM orders').all().map(r => Object.values(r))}});
+  assert.deepEqual(json(app.evalNode(graph.nodes.find(n => n.type === 'output')).rows), [[4, 40], [6, 60]]);
+  const refused = [
+    ['SELECT id, (SELECT amount FROM orders) AS a FROM orders', /最多一列/],
+    ['SELECT id, (SELECT MAX(amount) FROM orders GROUP BY customer_id) AS a FROM orders', /最多一列/],
+    ['SELECT o.id, (SELECT MAX(p.price) FROM prices p WHERE p.id = o.id) AS a FROM orders o', /相關/],
+    ['SELECT id, (SELECT MAX(price) FROM prices UNION SELECT MIN(price) FROM prices) AS a FROM orders', /UNION/],
+    ['SELECT id, (SELECT id, price FROM prices LIMIT 1) AS a FROM orders', /一個值/],
+  ];
+  for (const [sql, re] of refused)
+    assert.throws(() => graphFromSQL(loadApp(), sql), e => e.sqlErr === true && Number.isInteger(e.pos) && re.test(e.msg), sql);
+  /* with the table's real columns known, an unqualified outer column is caught too */
+  const known = loadApp();
+  known.document.getElementById('ddl').value = 'CREATE TABLE prices (id INT, d DATE, price INT);';
+  known.document.getElementById('btn-parse').listeners.click();
+  assert.throws(() => graphFromSQL(known, 'SELECT id, (SELECT MAX(price) FROM prices WHERE id = customer_id) AS m FROM orders'),
+    e => e.sqlErr === true && /外層/.test(e.msg));
+  return `${shapes.length} shapes exact in SQLite and re-import; ${refused.length + 1} refused`;
+});
+
+/* JOIN renames a colliding right-table column (amount → amount_2) and folds the
+   right key into the left one. Once the table name was dropped, c.amount and c.id
+   silently pointed at the LEFT table's amount and id — in WHERE, SELECT, ORDER BY
+   and a later JOIN's ON. They now resolve to the column the JOIN really produced. */
+test('regression: a table-qualified column keeps pointing at its own table after a JOIN', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE o(id INTEGER, cid INTEGER, amount INTEGER); CREATE TABLE c(id INTEGER, amount INTEGER, city TEXT);
+           INSERT INTO o VALUES (1,2,10),(2,3,20),(3,9,30),(4,2,40);
+           INSERT INTO c VALUES (1,99,'A'),(2,15,'B'),(3,20,NULL);`);
+  const rows = sql => json(db.prepare(sql).all().map(r => Object.values(r))).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const app = loadApp();
+  app.document.getElementById('ddl').value = 'CREATE TABLE o (id INT, cid INT, amount INT); CREATE TABLE c (id INT, amount INT, city TEXT);';
+  app.document.getElementById('btn-parse').listeners.click();
+  const trip = sql => {
+    graphFromSQL(app, sql);
+    const generated = app.buildSQL();
+    graphFromSQL(app, generated);
+    assert.equal(app.buildSQL(), generated, sql);
+    return generated;
+  };
+  for (const sql of [
+    'SELECT o.id, c.amount FROM o JOIN c ON o.cid = c.id WHERE c.amount = 20',
+    'SELECT o.id FROM o JOIN c ON o.cid = c.id WHERE c.id = 2',
+    'SELECT o.id, c.amount FROM o JOIN c ON o.cid = c.id ORDER BY c.amount DESC, o.id LIMIT 2',
+    'SELECT o.id, c.amount AS ca FROM o JOIN c ON o.cid = c.id WHERE c.amount > o.amount',
+    'SELECT a.id, c.city FROM o a JOIN o b ON a.id = b.id JOIN c ON b.cid = c.id',
+  ]) {
+    const generated = trip(sql);
+    assert.deepEqual(rows(generated), rows(sql), generated);
+  }
+  /* SELECT c.amount without an alias is still called amount */
+  assert.match(trip('SELECT o.id, c.amount FROM o JOIN c ON o.cid = c.id'), /amount_2 AS amount/);
+  /* a LEFT JOIN key differs on unmatched rows: NULL on the right, a value on the left */
+  assert.throws(() => graphFromSQL(app, 'SELECT o.id FROM o LEFT JOIN c ON o.cid = c.id WHERE c.id IS NULL'),
+    e => e.sqlErr === true && /LEFT JOIN 右表的對照欄/.test(e.msg));
+  return '5 shapes exact in SQLite; unaliased name kept; LEFT JOIN key refused';
+});
+
+/* A table guessed from an earlier paste only has the columns that query used.
+   Expanding SELECT * with it dropped every other column of the real table. */
+test('regression: a guessed table never stands in for the real columns of SELECT *', () => {
+  const app = loadApp();
+  graphFromSQL(app, 'SELECT id, status FROM orders');
+  assert.equal(app.state.schema.orders.label, '推測');
+  assert.throws(() => graphFromSQL(app, "SELECT * FROM orders WHERE UPPER(status) = 'X'"), e => e.sqlErr === true && /CREATE TABLE/.test(e.msg));
+  app.document.getElementById('ddl').value = 'CREATE TABLE orders (id INT, status TEXT, amount INT);';
+  app.document.getElementById('btn-parse').listeners.click();
+  graphFromSQL(app, "SELECT * FROM orders WHERE UPPER(status) = 'X'");
+  assert.match(app.buildSQL(), /SELECT id,\s+status,\s+amount\s/);
+  /* the same holds for a.* in a re-imported JOIN: picking id and price off a guessed
+     table is a real column pick, not "the same columns", so it must stay */
+  const again = loadApp();
+  graphFromSQL(again, 'SELECT o.id, p.price FROM orders o JOIN prices p ON o.pid = p.id');
+  const first = again.buildSQL();
+  graphFromSQL(again, first);
+  assert.equal(again.buildSQL(), first);
+  assert.match(first, /SELECT id,\s+price\s+FROM joined/);
+  return 'guessed orders(id, status) refused for SELECT *; pasted orders(id, status, amount) expands fully; a.* pick kept';
+});
+
 test('review: switching COUNT to SUM never leaves SUM(*)', () => {
   const app = loadApp();
   const change = (node, dataset, value) => {
@@ -2429,9 +2552,14 @@ test('aggregate: unsupported CASE expressions and windowed DISTINCT fail clearly
     const generated = roundTrip(sql);
     assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()), sql);
   }
+  /* b.amt, renamed amt_2 by the JOIN, used to be refused; it now resolves to amt_2 */
+  db.exec('CREATE TABLE a(id INTEGER, amt INTEGER); CREATE TABLE b(id INTEGER, amt INTEGER);'+
+    'INSERT INTO a VALUES (1,5),(2,0),(3,7); INSERT INTO b VALUES (1,10),(1,10),(3,20),(4,30);');
+  const joined = 'SELECT COUNT(DISTINCT b.amt) AS n FROM a JOIN b ON a.id = b.id WHERE a.amt > 0';
+  assert.match(roundTrip(joined), /COUNT\(DISTINCT amt_2\)/);
+  assert.deepEqual(json(db.prepare(roundTrip(joined)).all()), json(db.prepare(joined).all()));
   db.close();
   assert.match(graphError('SELECT CASE WHEN qty > 0 THEN amt END AS amt FROM t').msg, /同名/);
-  assert.match(graphError('SELECT COUNT(DISTINCT b.amt) AS n FROM a JOIN b ON a.id = b.id WHERE a.amt > 0').msg, /JOIN/);
   assert.match(graphError('SELECT 1 AS v, COUNT(DISTINCT amt) AS n FROM t').msg, /彙總後/);
   return 'window DISTINCT refused; 7 CASE-in-expression / aggregate shapes exact in SQLite';
 });

@@ -722,8 +722,8 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
       </div>
       <div id="stmt-pick"></div>
       <div id="parse-out"></div>
-      <p class="supported">看得懂：<code>WITH</code> · <code>SELECT</code> · <code>DISTINCT</code> · <code>FROM</code> · 子查詢 · <code>JOIN … ON</code> · <code>WHERE</code>（AND / OR / 括號）· <code>BETWEEN</code> · <code>IN</code> · <code>IN (SELECT …)</code> · <code>EXISTS</code>（含 NOT；相關條件只支援內外欄位相等且以 AND 串接）· <code>LIKE</code> · <code>IS NULL</code> · <code>CASE</code>（含 AND / OR、<code>CASE x WHEN</code>）· 多層算式與函式（<code>price * qty * (1 - d)</code>、<code>UPPER(TRIM(x))</code>、<code>||</code>）· 條件裡的函式（<code>YEAR(d) = 2024</code>）· <code>CURRENT_DATE</code> / <code>INTERVAL</code> · 聚合函數（含 <code>ROUND(AVG(x), 2)</code>、<code>SUM(CASE …) / COUNT(*)</code>）· <code>GROUP BY</code> · <code>HAVING</code> · 視窗函數 <code>OVER</code>（排名、<code>NTILE</code>、<code>LAG / LEAD</code>、多個排序欄、框架 <code>ROWS BETWEEN</code>）· <code>UNION</code> · <code>ORDER BY</code> · <code>LIMIT</code> / <code>TOP</code> / <code>FETCH FIRST</code>。<br>
-      看不懂：相關子查詢（上述等值形式除外）、純量子查詢、<code>ANY / ALL / SOME</code>、<code>PIVOT</code>、<code>FULL OUTER JOIN</code>、非等值 JOIN、<code>FIRST_VALUE</code> 之類其他視窗函數、<code>RANGE BETWEEN 7 PRECEDING</code>（照值差距的框架）。碰到會直接告訴你卡在第幾行第幾個字。</p>
+      <p class="supported">看得懂：<code>WITH</code> · <code>SELECT</code> · <code>DISTINCT</code> · <code>FROM</code> · 子查詢 · <code>JOIN … ON</code> · <code>WHERE</code>（AND / OR / 括號）· <code>BETWEEN</code> · <code>IN</code> · <code>IN (SELECT …)</code> · <code>EXISTS</code>（含 NOT；相關條件只支援內外欄位相等且以 AND 串接）· 純量子查詢（<code>x &gt; (SELECT AVG(x) FROM t)</code>、<code>SUM(x) / (SELECT SUM(x) FROM t)</code>）· <code>CROSS JOIN</code> · <code>LIKE</code> · <code>IS NULL</code> · <code>CASE</code>（含 AND / OR、<code>CASE x WHEN</code>）· 多層算式與函式（<code>price * qty * (1 - d)</code>、<code>UPPER(TRIM(x))</code>、<code>||</code>）· 條件裡的函式（<code>YEAR(d) = 2024</code>）· <code>CURRENT_DATE</code> / <code>INTERVAL</code> · 聚合函數（含 <code>ROUND(AVG(x), 2)</code>、<code>SUM(CASE …) / COUNT(*)</code>）· <code>GROUP BY</code> · <code>HAVING</code> · 視窗函數 <code>OVER</code>（排名、<code>NTILE</code>、<code>LAG / LEAD</code>、多個排序欄、框架 <code>ROWS BETWEEN</code>）· <code>UNION</code> · <code>ORDER BY</code> · <code>LIMIT</code> / <code>TOP</code> / <code>FETCH FIRST</code>。<br>
+      看不懂：相關子查詢（上述等值形式除外；純量子查詢要不相關、保證最多一列）、<code>ANY / ALL / SOME</code>、<code>PIVOT</code>、<code>FULL OUTER JOIN</code>、非等值 JOIN、<code>FIRST_VALUE</code> 之類其他視窗函數、<code>RANGE BETWEEN 7 PRECEDING</code>（照值差距的框架）。碰到會直接告訴你卡在第幾行第幾個字。</p>
     </div>
   </div>
 </div>
@@ -1004,14 +1004,16 @@ function evalNode(node, ctx){
     const pairs = joinKeys(node)
       .map(k=>({l:L.cols.indexOf(k.left), r:R.cols.indexOf(k.right), right:k.right, lfn:k.lfn || '', rfn:k.rfn || ''}))
       .filter(p=>p.l >= 0 && p.r >= 0);
-    if(!pairs.length) return EMPTY;
+    /* ON 1 = 1（純量子查詢接回來、CROSS JOIN）：每一列配右邊每一列 */
+    const cross = node.cross && !joinKeys(node).length;
+    if(!pairs.length && !cross) return EMPTY;
     const lay = joinLayout(L.cols, R.cols, new Set(pairs.map(p=>p.right)));
     const cols = lay.cols, keep = lay.keep;
     const key = (row, side) => joinKey(row, pairs, side);
     const rows = [];
     L.rows.forEach(l=>{
-      const k = key(l, 'l');
-      const hits = k === null ? [] : R.rows.filter(r=>key(r, 'r') === k);
+      const k = cross ? '' : key(l, 'l');
+      const hits = k === null ? [] : cross ? R.rows : R.rows.filter(r=>key(r, 'r') === k);
       if(hits.length) hits.forEach(r=>rows.push(l.concat(keep.map(k=>r[k.i]))));
       else if(node.joinType === 'LEFT') rows.push(l.concat(keep.map(()=>null)));
     });
@@ -1749,7 +1751,7 @@ function buildSQL(){
         B+'.'+q(k.src) + (k.name !== k.src ? ' AS '+q(k.name) : '')));
       const on = ks.length
         ? ks.map(k=>castSQL(k.lfn, A+'.'+q(k.left))+' = '+castSQL(k.rfn, B+'.'+q(k.right))).join('\n   AND ')
-        : '1 = 1 /* 還沒選 JOIN 條件 */';
+        : n.cross ? '1 = 1' : '1 = 1 /* 還沒選 JOIN 條件 */';
       sql = '  SELECT '+list(sel, 9)+
             '\n  FROM '+ref(L)+tblAs+A+'\n  '+n.joinType+' JOIN '+ref(R)+tblAs+B+'\n    ON '+on;
 
@@ -2290,6 +2292,7 @@ function nodeSummary(n){
     }
     case 'join': {
       const ks = joinKeys(n);
+      if(!ks.length && n.cross) return n.joinType+'<br>每一列都配上右邊每一列';
       if(!ks.length) return n.joinType+'<br><span class="warn">還沒選條件</span>';
       const one = k => (k.lfn ? CASTS[k.lfn].label+'(' : '')+k.left+(k.lfn ? ')' : '')+' = '+
                        (k.rfn ? CASTS[k.rfn].label+'(' : '')+k.right+(k.rfn ? ')' : '');
@@ -5034,8 +5037,10 @@ function parseSQLText(text){
   }
 
   function parseTail(items){
+    let lastTbl = null;           /* ORDER BY c.amount 的 c：JOIN 把右表的 amount 改名時要靠它找回來 */
     const orderName = () => {
       const t0 = at(), e = byPos(items, true);
+      lastTbl = e.kind === 'col' && e.tbl ? e.tbl : null;
       if(e.kind === 'call' && AGG_FNS.indexOf(e.fn) >= 0){
         const it = items.find(it=>it.kind === 'expr' && aggKey(it.expr) === aggKey(e));
         if(!it) fail('ORDER BY 用到的 '+e.fn+'(…) 也要寫在 SELECT 裡，步驟才算得到它', t0);
@@ -5052,9 +5057,14 @@ function parseSQLText(text){
     if(isKw('ORDER') && isKw('BY',1)){
       p += 2;
       t.orderBy = orderName();
+      if(lastTbl) t.byTbl = lastTbl;
       if(eatKw('DESC')) t.dir = 'DESC'; else { eatKw('ASC'); }
       t.more = [];
-      while(eatOp(',')){ const by = orderName(); t.more.push({by:by, dir:eatKw('DESC') ? 'DESC' : (eatKw('ASC'), 'ASC')}); }
+      while(eatOp(',')){
+        const by = orderName(), m = {by:by, dir:eatKw('DESC') ? 'DESC' : (eatKw('ASC'), 'ASC')};
+        if(lastTbl) m.tbl = lastTbl;
+        t.more.push(m);
+      }
     }
     if(eatKw('LIMIT')){
       const first = Number(take().v) || 0;
@@ -5112,11 +5122,16 @@ function parseSQLText(text){
     else if(eatKw('LEFT')){ type = 'LEFT'; eatKw('OUTER'); }
     else if(eatKw('RIGHT')){ type = 'RIGHT'; eatKw('OUTER'); }
     else if(eatKw('FULL')) fail('FULL OUTER JOIN 目前做不出對應的步驟', T[save]);
-    else if(eatKw('CROSS')){ warn.push('CROSS JOIN 沒有 ON 條件，被畫成 INNER JOIN'); }
+    let cross = false;
+    if(type === 'INNER' && eatKw('CROSS')) cross = true;       /* CROSS JOIN：沒有條件，寫回成 ON 1 = 1 */
     if(!eatKw('JOIN')){ p = save; return null; }
     const src = parseSource();
     const on = [];
-    if(eatKw('ON')){
+    /* ON 1 = 1 就是沒有條件：左邊每一列配右邊每一列（純量子查詢接回來時就是這樣寫的） */
+    if(!cross && isKw('ON') && at(1).t === 'num' && isOp('=',2) && at(3).t === 'num' && at(1).v === at(3).v &&
+       !isKw('AND',4) && !isKw('OR',4)){ p += 4; cross = true; }
+    else if(cross){ /* CROSS JOIN 沒有 ON */ }
+    else if(eatKw('ON')){
       do {
         const t0 = at(), l = parseExpr();
         if(!eatOp('=')) fail('JOIN 的 ON 只看得懂 a.x = b.y');
@@ -5136,7 +5151,7 @@ function parseSQLText(text){
       do { const c = nameTok(); on.push({left:{kind:'col', col:c}, right:{kind:'col', col:c}}); } while(eatOp(','));
       needOp(')');
     }
-    return {type:type, src:src, on:on};
+    return {type:type, src:src, on:on, cross:cross};
   }
 
   function parseItem(){
@@ -5219,7 +5234,13 @@ function parseSQLText(text){
     if(t.t === 'num'){ p++; return numLit(t.v, 1); }
     if(t.t === 'str'){ p++; return {kind:'lit', v:t.v}; }
     if(isKw('NULL')){ p++; return {kind:'lit', v:null}; }
-    if(isOp('(') && (isKw('SELECT',1) || isKw('WITH',1))) fail('純量子查詢目前畫不出來');
+    /* 純量子查詢：(SELECT AVG(x) FROM t)。建圖時另外算成一欄、接回每一列，能不能做在那裡判斷 */
+    if(isOp('(') && (isKw('SELECT',1) || isKw('WITH',1))){
+      p++;
+      const st = parseStatement();
+      needOp(')');
+      return {kind:'scalar', stmt:st, p:t.p};
+    }
     if(['ANY','ALL','SOME'].some(k=>isKw(k))) fail('ANY / ALL / SOME 子查詢目前畫不出來');
     if(isOp('(')){ p++; const e = parseExpr(); needOp(')'); return e; }
     if(t.t === 'word' && !t.quoted && ['IN','EXISTS','BETWEEN','LIKE','NOT'].indexOf(t.v.toUpperCase()) >= 0)
@@ -5454,6 +5475,7 @@ function parseSQLText(text){
       /* 比較的右邊可以是算式（CURRENT_DATE - INTERVAL '30 days'、price * 0.9）：
          建圖時先算成一欄再比 */
       if(column && EXPR_KINDS.indexOf(e.kind) >= 0 && e.kind !== 'col') return e;
+      if(column && e.kind === 'scalar') return e;        /* x > (SELECT AVG(x) FROM t) */
       if(e.kind !== 'lit' && e.kind !== 'date' && !(column && e.kind === 'col'))
         fail('BETWEEN / IN 的值只支援固定值或固定日期，不能使用函式、目前日期或算式', t0);
       return e;
@@ -5551,6 +5573,9 @@ function astToGraph(parsed){
   const warn = parsed.warn.slice();
   const nodes = [], edges = [], tables = {}, cte = {}, aliasOf = {};
   const builtCols = new Map();
+  const selectInput = new Map();          /* 「選欄位」步驟收到的欄位：子查詢的排序要不要搬到它前面 */
+  const builtKnown = new Set();           /* 輸出欄位確定的步驟（不是從推測的表 SELECT * 來的） */
+  const coreResolvers = new Map();        /* 每段 SELECT 把「表名.欄」換成 JOIN 後欄名的方法（ORDER BY 也要用） */
   let uid = 0;
   const add = (type, extra) => { const n = Object.assign({id:'n'+(++uid), type:type, x:0, y:0}, extra); nodes.push(n); return n; };
   const conn = (a, b, port) => edges.push({from:a.id, to:b.id, port:port || 0});
@@ -5636,6 +5661,7 @@ function astToGraph(parsed){
       const local = aliases(c);
       const ownRefs = o => {
         if(!o || typeof o !== 'object') return [];
+        if(o.kind === 'scalar') return [];               /* 純量子查詢是自己的一層，建圖時另外檢查 */
         if(o.kind === 'sub' || o.kind === 'semi') return o.left ? [o.left] : [];
         if(o.kind === 'col') return [o];
         return [].concat.apply([], Object.values(o).map(ownRefs));
@@ -5650,6 +5676,13 @@ function astToGraph(parsed){
         });
       }
       sources(c).filter(s=>s.kind === 'sub').forEach(s=>prepare(s.stmt, parents));
+      /* 純量子查詢不能引用外層（建圖時擋），所以它自己是最外層 */
+      (function scalars(o){
+        if(!o || typeof o !== 'object') return;
+        if(o.kind === 'scalar'){ prepare(o.stmt, []); return; }
+        if(o.kind === 'semi' || o.kind === 'sub') return;
+        Object.values(o).forEach(scalars);
+      })({items:c.items, where:c.where, having:c.having});
       function term(w, underOr){
         if(w.kind === 'or'){ w.branches.forEach(b=>b.forEach(x=>term(x,true))); return; }
         if(w.kind !== 'semi') return;
@@ -5710,7 +5743,7 @@ function astToGraph(parsed){
       }
       c.where.forEach(w=>term(w,false));
       if(parents.length){
-        const directCols = colRefs({items:c.items, joins:c.joins.map(j=>j.on), groupBy:c.groupBy, having:c.having,
+        const directCols = ownRefs({items:c.items, joins:c.joins.map(j=>j.on), groupBy:c.groupBy, having:c.having,
           where:c.where.filter(w=>w.kind !== 'semi')});
         if(directCols.some(r=>r.tbl && !local.has(r.tbl))) refuseSemi('相關子查詢只支援一層的 WHERE 等值條件');
       }
@@ -5719,25 +5752,43 @@ function astToGraph(parsed){
   prepare(parsed.stmt, []);
   const refs = [], srcTables = [];
   const sourceName = s => (s.ns ? s.ns + '.' : '') + s.name;
-  (function walk(o){
+  /* 沒寫表名的欄位歸給「它所在那段 SELECT 唯一的那張表」：子查詢 (SELECT price FROM prices …)
+     裡的 price 屬於 prices，不是外層的表。整段只有一張表時照舊全歸給它 */
+  const homes = new Map(), cteNames = new Set();
+  (function names(o){
     if(!o || typeof o !== 'object') return;
-    if(Array.isArray(o)){ o.forEach(walk); return; }
-    if(o.kind === 'col') refs.push(o);
+    if(Array.isArray(o.ctes)) o.ctes.forEach(x=>cteNames.add(x.name.toLowerCase()));
+    Object.values(o).forEach(names);
+  })(parsed.stmt);
+  const homeOf = c0 => c0.from && c0.from.kind === 'table' && !c0.joins.length && !cteNames.has(c0.from.name.toLowerCase()) ? sourceName(c0.from) : null;
+  (function walk(o, home){
+    if(!o || typeof o !== 'object') return;
+    if(Array.isArray(o)){ o.forEach(x=>walk(x, home)); return; }
+    if(o.items && 'from' in o && 'joins' in o) home = homeOf(o);     /* 一段 SELECT */
+    if(o.kind === 'col'){ refs.push(o); if(home && !o.tbl) homes.set(o, home); }
     if(o.kind === 'table' && o.name){
       const full = sourceName(o);
       if(srcTables.indexOf(full) < 0) srcTables.push(full);
       if(o.alias) aliasOf[o.alias] = full;
     }
-    Object.keys(o).forEach(k=>walk(o[k]));
-  })(parsed.stmt);
+    /* ORDER BY 寫的是欄名字串，不是欄位節點；沒選出來的排序欄也是那張表的欄位 */
+    if(o.tail && o.core){
+      const c0 = o.core, h = homeOf(c0);
+      const aliases = new Set(c0.items.map(it=>it.alias).filter(Boolean));
+      if(h && !o.unions.length) [o.tail.orderBy].concat((o.tail.more || []).map(m=>m.by)).filter(b=>b && !aliases.has(b)).forEach(b=>{
+        const r = {kind:'col', col:b}; refs.push(r); homes.set(r, h);
+      });
+    }
+    Object.keys(o).forEach(k=>{ if(k !== 'tail') walk(o[k], home); });
+  })(parsed.stmt, null);
 
   const perTable = {};
   srcTables.forEach(t=>{ perTable[t] = []; });
   refs.forEach(r=>{
-    const t = r.tbl ? (aliasOf[r.tbl] || r.tbl) : (srcTables.length === 1 ? srcTables[0] : null);
+    const t = r.tbl ? (aliasOf[r.tbl] || r.tbl) : homes.get(r) || (srcTables.length === 1 ? srcTables[0] : null);
     if(t && perTable[t] && perTable[t].indexOf(r.col) < 0) perTable[t].push(r.col);
   });
-  if(refs.some(r=>!r.tbl) && srcTables.length > 1)
+  if(refs.some(r=>!r.tbl && !homes.has(r)) && srcTables.length > 1)
     warn.push('有些欄位沒寫表名（像 amount 而不是 o.amount），猜不到它屬於哪張表 — 逐步檢視的示範資料可能少幾欄');
 
   function knownCols(src){
@@ -5751,14 +5802,17 @@ function astToGraph(parsed){
   function hasKnownSchema(src){
     if(!src || src.kind !== 'table' || cte[src.name.toLowerCase()]) return false;
     const full = sourceName(src);
-    return !!(state.schema[full] || state.schema[src.name]);
+    const known = state.schema[full] || state.schema[src.name];
+    /* 上次貼 SQL 時推測出來的表只有那段查詢用到的欄位，不是完整的表：
+       拿它來展開 SELECT * 會少欄位 */
+    return !!known && known.label !== '推測';
   }
   const sameCols = (a, b) => !!a && !!b && a.length === b.length && a.every((v,i)=>v === b[i]);
   const exprTable = e => e && e.kind === 'col' ? e.tbl :
     (e && e.kind === 'call' && e.args[0] ? exprTable(e.args[0]) : null);
 
   function buildSource(s){
-    if(s.kind === 'sub') return buildStatement(s.stmt);
+    if(s.kind === 'sub') return buildStatement(s.stmt, true);
     const full = sourceName(s);
     if(s.alias) aliasOf[s.alias] = full;
     const key = s.name.toLowerCase();
@@ -5771,14 +5825,32 @@ function astToGraph(parsed){
     if(!c.from){ warn.push('有一段 SELECT 沒有 FROM，跳過了'); return add('table', {table:'?'}); }
     let cur = buildSource(c.from);
     let cols = knownCols(c.from) || builtCols.get(cur.id) || null;  /* CTE 也要知道欄名，暫存欄才不會撞名 */
-    let colsKnown = hasKnownSchema(c.from) || !!builtCols.get(cur.id);
+    let colsKnown = hasKnownSchema(c.from) || builtKnown.has(cur.id);
     const leftAliases = new Set(c.from.alias ? [c.from.alias] : []);
     const movedRefs = new Set();
+    /* 每一欄是哪個別名的哪一欄：JOIN 會把右表撞名的欄改名（amount → amount_2）、把對照欄併掉。
+       c.amount 要指到 amount_2，不能去掉表名後指到左表的 amount */
+    let prov = cols ? cols.map(n=>({name:n, alias:c.from.alias || null, src:n})) : null;
+    const dropped = new Map();          /* 別名.欄 → 併掉的對照欄改看哪一欄（INNER 才相等） */
+    const resolveRef = r => {
+      if(!r || !r.tbl || !prov || r.resolved) return r;
+      const hit = prov.find(p=>p.alias === r.tbl && p.src === r.col);
+      if(hit){ r.col = hit.name; r.resolved = true; return r; }
+      const d = dropped.get(r.tbl+'.'+r.col);
+      if(d){
+        if(!d.ok) throw {sqlErr:true, pos:r.p || 0,
+          msg:r.tbl+'.'+r.col+' 是 LEFT JOIN 右表的對照欄：步驟只留左表那一欄，沒配到的列兩邊不一樣，目前無法精確對應'};
+        r.col = d.name; r.resolved = true;
+      }
+      return r;
+    };
 
     c.joins.forEach(j=>{
       const right = buildSource(j.src);
       const rc = knownCols(j.src) || builtCols.get(right.id) || null;
       const rightAliases = new Set(j.src.alias ? [j.src.alias] : []);
+      /* ON 裡引用前面 JOIN 進來、已改名的欄位，先換成改名後的欄名 */
+      (j.on || []).forEach(k=>colRefs(k).forEach(r=>{ if(leftAliases.has(r.tbl)) resolveRef(r); }));
       /* a RIGHT JOIN b 就是 b LEFT JOIN a：兩邊對調，畫成 LEFT */
       const flip = j.type === 'RIGHT';
       const jn = add('join', {
@@ -5795,6 +5867,7 @@ function astToGraph(parsed){
           };
         })
       });
+      if(j.cross) jn.cross = true;              /* CROSS JOIN、ON 1 = 1：沒有條件 */
       if(flip){ conn(right, jn, 0); conn(cur, jn, 1); }
       else    { conn(cur, jn, 0); conn(right, jn, 1); }
       cur = jn;
@@ -5805,10 +5878,38 @@ function astToGraph(parsed){
         if(dropSet.has(name) || kept.indexOf(name) >= 0)
           (flip ? leftAliases : rightAliases).forEach(a=>movedRefs.add(a+'.'+name));
       });
+      if(prov && rc){
+        const provR = rc.map(n=>({name:n, alias:j.src.alias || null, src:n}));
+        const keptP = flip ? provR : prov, movedP = flip ? prov : provR;
+        const lay = joinLayout(keptP.map(p=>p.name), movedP.map(p=>p.name), dropSet);
+        joinKeys(jn).forEach(k=>{
+          const gone = movedP.find(p=>p.name === k.right);
+          if(gone && gone.alias) dropped.set(gone.alias+'.'+gone.src, {name:k.left, ok:jn.joinType === 'INNER' && !k.lfn && !k.rfn});
+        });
+        prov = keptP.concat(lay.keep.map(k=>Object.assign({}, movedP[k.i], {name:k.name})));
+      } else prov = null;
       cols = (cols && rc) ? (flip ? joinLayout(rc, cols, dropSet).cols : joinLayout(cols, rc, dropSet).cols) : null;
-      colsKnown = colsKnown && hasKnownSchema(j.src);
+      colsKnown = colsKnown && (hasKnownSchema(j.src) || builtKnown.has(right.id));
       rightAliases.forEach(a=>leftAliases.add(a));
     });
+    /* SELECT、WHERE、GROUP BY、HAVING 裡寫了表名的欄位換成 JOIN 之後真正的欄名。
+       沒有別名的 SELECT c.amount 輸出欄名還是 amount */
+    if(c.joins.length && prov){
+      c.items.forEach(it=>{
+        if(it.kind === 'expr' && it.expr.kind === 'col' && !it.alias && it.expr.tbl){
+          const was = it.expr.col;
+          resolveRef(it.expr);
+          if(it.expr.col !== was) it.alias = was;
+        }
+      });
+      (function walk(o){
+        if(!o || typeof o !== 'object') return;
+        if(o.kind === 'semi' || o.kind === 'sub' || o.kind === 'scalar') return;
+        if(o.kind === 'col'){ resolveRef(o); return; }
+        Object.values(o).forEach(walk);
+      })({items:c.items, where:c.where, groupBy:c.groupBy, having:c.having});
+    }
+    coreResolvers.set(c, resolveRef);
 
     const newAggregate = c.items.some(it=>it.kind === 'expr' && it.expr.kind === 'call' &&
       (it.expr.distinct || it.expr.args.some(a=>a.kind === 'case' || a.kind === 'arith')));
@@ -5837,7 +5938,7 @@ function astToGraph(parsed){
     c.where.filter(w=>w.kind === 'semi').forEach(w=>{
       if([w.left].concat(w.outerRefs || []).filter(Boolean).some(r=>r.tbl && movedRefs.has(r.tbl+'.'+r.col))) refuseSemi('IN 引用的 JOIN 欄位已被移除或改名，無法精確對應');
       if((w.keys || []).some(k=>cols && cols.indexOf(k.left) < 0)) refuseSemi('相關條件的外層欄位無法精確對應');
-      const right = buildStatement(w.stmt);
+      const right = buildStatement(w.stmt, true);
       const rc = builtCols.get(right.id);
       if(rc && (w.keys || []).some(k=>rc.indexOf(k.right) < 0)) refuseSemi('查找欄位在子查詢中已被移除或改名，無法精確對應');
       const n = add('semijoin', {form:w.form, keys:w.keys});
@@ -5967,6 +6068,81 @@ function astToGraph(parsed){
     };
     const isPlainCol = e => e.kind === 'col';
     const colsAtWhere = cols ? cols.slice() : null;
+
+    /* 純量子查詢 (SELECT AVG(x) FROM t)：子查詢自己算成一欄（sub_value），用
+       LEFT JOIN … ON 1 = 1 接到每一列旁邊，條件和算式再看那一欄，最後由「選欄位」拿掉。
+       子查詢沒有列時 LEFT JOIN 補 NULL，跟純量子查詢一樣。兩種情況做不到一樣，一律擋下：
+       可能回好幾列（資料庫會報錯，JOIN 卻會把列變多），以及引用外層欄位的相關子查詢。
+       彙總查詢裡、不在彙總函數裡面的（SUM(x) / (SELECT SUM(x) FROM t)），接在 GROUP BY 後面 */
+    const aggregated = c.groupBy.length > 0 || c.having.length > 0 ||
+      c.items.some(it=>it.kind === 'expr' && containsAgg(it.expr));
+    const scalarJoins = {pre:[], post:[]};
+    const scalarRefuse = (node, msg) => { throw {sqlErr:true, msg:msg, pos:node.p || 0}; };
+    const ownAliases = st => {
+      const names = new Set();
+      (function walk(o){
+        if(!o || typeof o !== 'object') return;
+        if((o.kind === 'table' || o.kind === 'sub') && (o.alias || o.name)) names.add(o.alias || o.name);
+        Object.values(o).forEach(walk);
+      })(st);
+      st.ctes.forEach(x=>names.add(x.name));
+      return names;
+    };
+    const scalarHelper = node => {
+      const st = node.stmt, sc = st.core;
+      if(st.ctes.length || st.unions.length) scalarRefuse(node, '純量子查詢裡的 WITH / UNION 目前做不出對應的步驟');
+      if(!sc.from) scalarRefuse(node, '純量子查詢要有 FROM 來源');
+      if(sc.items.length !== 1 || sc.items[0].kind !== 'expr') scalarRefuse(node, '純量子查詢只能選出一個值（一個欄位或算式）');
+      const e = sc.items[0].expr;
+      const oneRow = !sc.groupBy.length && containsAgg(e);
+      const atMostOne = st.tail.limitZero || st.tail.limit === 1 || sc.top === 1;
+      if(!oneRow && !atMostOne)
+        scalarRefuse(node, '純量子查詢要保證最多一列：寫成沒有 GROUP BY 的彙總（SELECT MAX(x) FROM t），或加 LIMIT 1。'+
+          '不然資料庫遇到好幾列會報錯，接成步驟卻會把列變多');
+      const own = ownAliases(st);
+      const outer = colRefs(st).find(r=>r.tbl && !own.has(r.tbl));
+      if(outer) scalarRefuse(node, '相關的純量子查詢（引用外層的 '+outer.tbl+'.'+outer.col+'）目前做不出對應的步驟');
+      /* 沒寫表名的欄位：子查詢的表結構是貼進來的（不是上次推測的）、裡面卻沒有這欄，就是在引用外層 */
+      const pasted = sc.from.kind === 'table' && !cte[sc.from.name.toLowerCase()] &&
+        (state.schema[sourceName(sc.from)] || state.schema[sc.from.name]);
+      if(!sc.joins.length && pasted && pasted.label !== '推測'){
+        const have = pasted.cols.map(k=>k.name);
+        const stray = colRefs({items:sc.items, where:sc.where, groupBy:sc.groupBy, having:sc.having})
+          .find(r=>!r.tbl && have.indexOf(r.col) < 0);
+        if(stray) scalarRefuse(node, '純量子查詢裡的 '+stray.col+' 不在 '+sc.from.name+' 裡，像是引用外層的欄位（相關子查詢），目前做不出對應的步驟');
+      }
+      let as = 'sub_value', suffix = 2;
+      while(usedCols.has(as.toLowerCase())) as = 'sub_value_' + (suffix++);
+      usedCols.add(as.toLowerCase());
+      return {as:as, node:node};
+    };
+    /* 把每個純量子查詢換成指向輔助欄的欄位；在彙總函數裡面的要在 GROUP BY 之前接 */
+    const swapScalars = (o, phase) => {
+      if(!o || typeof o !== 'object') return;
+      if(o.kind === 'semi' || o.kind === 'sub') return;
+      const inner = o.kind === 'call' && AGG_FNS.indexOf(o.fn) >= 0 ? 'pre' : phase;
+      Object.keys(o).forEach(k=>{
+        const v = o[k];
+        if(v && typeof v === 'object' && v.kind === 'scalar'){
+          const h = scalarHelper(v);
+          scalarJoins[inner].push(h);
+          o[k] = {kind:'col', col:h.as, p:v.p};
+        } else swapScalars(v, inner);
+      });
+    };
+    if(c.groupBy.some(function has(o){ return !!o && typeof o === 'object' && (o.kind === 'scalar' || Object.values(o).some(has)); }))
+      throw {sqlErr:true, msg:'GROUP BY 裡的純量子查詢目前做不出對應的步驟', pos:0};
+    swapScalars(c.where, 'pre');
+    swapScalars(c.items, aggregated ? 'post' : 'pre');
+    swapScalars(c.having, 'post');
+    const joinScalar = h => {
+      h.node.stmt.core.items[0].alias = h.as;
+      const right = buildStatement(h.node.stmt, true);
+      const jn = add('join', {joinType:'LEFT', keys:[], cross:true});
+      conn(cur, jn, 0); conn(right, jn, 1); cur = jn;
+      cols = cols ? cols.concat([h.as]) : null;
+    };
+    scalarJoins.pre.forEach(h=>{ joinScalar(h); helpers.push(h.as); });
     (function lift(list){
       list.forEach(x=>{
         if(x.kind === 'or'){ x.branches.forEach(lift); return; }
@@ -6072,6 +6248,8 @@ function astToGraph(parsed){
       conn(cur, g); cur = g;
       cols = g.keys.concat(g.aggs.map(a=>a.as));
     }
+    /* 彙總之後才用到的純量子查詢（HAVING、包著彙總的算式）：分組完再接上 */
+    scalarJoins.post.forEach(joinScalar);
 
     const aggAliases = {};
     c.items.forEach(it=>{
@@ -6123,7 +6301,7 @@ function astToGraph(parsed){
        所以得知道來源有哪些欄位；不知道就擋下，不然結果會少欄或多一欄 cond_value */
     if(hasStar && helpers.length && !c.groupBy.length && !aggs.length){
       if(!colsAtWhere || !colsKnown)
-        throw {sqlErr:true, msg:'SELECT * 搭配條件裡的函式或算式，要先知道資料表有哪些欄位 —— 請在左邊「資料表」貼上 CREATE TABLE', pos:0};
+        throw {sqlErr:true, msg:'SELECT * 搭配條件裡的函式、算式或子查詢，要先知道資料表有哪些欄位 —— 請在左邊「資料表」貼上 CREATE TABLE', pos:0};
       const keep = [], outCols = [];
       c.items.forEach(it=>{
         if(it.kind === 'star') colsAtWhere.forEach(col=>{ keep.push(col); outCols.push(col); });
@@ -6137,7 +6315,7 @@ function astToGraph(parsed){
       conn(cur, pk); cur = pk;
       cols = outCols;
     }
-    else if(!hasStar && ((!c.groupBy.length && !aggs.length) || caseCols.size || postItems.length || hidden.length || havingLater.length || aggs.some(a=>a.fn === 'COUNT_DISTINCT'))){
+    else if(!hasStar && ((!c.groupBy.length && !aggs.length) || caseCols.size || postItems.length || hidden.length || havingLater.length || scalarJoins.post.length || aggs.some(a=>a.fn === 'COUNT_DISTINCT'))){
       const keep = [], outCols = [];
       c.items.forEach(it=>{
         if(it.kind !== 'expr') return;
@@ -6154,6 +6332,7 @@ function astToGraph(parsed){
       if(keep.length && ((aggs.length || c.groupBy.length) ? !sameCols(cols, outCols) : (!colsKnown || !sameCols(cols, outCols)))){
         const pk = add('select', {cols:keep});
         if(!sameCols(keep, outCols)) pk.outCols = outCols;
+        if(cols) selectInput.set(pk.id, cols.slice());
         conn(cur, pk); cur = pk;
         cols = outCols;
       }
@@ -6162,31 +6341,50 @@ function astToGraph(parsed){
     if(c.distinct){ const d = add('distinct', {}); conn(cur, d); cur = d; }
     if(c.top){ const s = add('sort', {by:'', dir:'DESC', limit:c.top, offset:0}); conn(cur, s); cur = s; }
     builtCols.set(cur.id, cols);
+    /* 輸出欄位真的確定嗎？列出欄位的 SELECT 是；SELECT * / a.* 要看來源是不是貼過結構的表 ——
+       推測的表只有查詢用到的欄位，拿它當完整欄位會把「選欄位」誤認成沒挑 */
+    if(cols && (!hasStar || colsKnown)) builtKnown.add(cur.id);
     return cur;
   }
 
-  function buildStatement(st){
-    st.ctes.forEach(x=>{ cte[x.name.toLowerCase()] = buildStatement(x.body); });
+  function buildStatement(st, nested){
+    st.ctes.forEach(x=>{ cte[x.name.toLowerCase()] = buildStatement(x.body, true); });
     let cur = buildCore(st.core);
     st.unions.forEach(u=>{
       const other = buildCore(u.core);
       const un = add('union', {all:u.all});
       conn(cur, un, 0); conn(other, un, 1);
       builtCols.set(un.id, builtCols.get(cur.id));
+      if(builtKnown.has(cur.id)) builtKnown.add(un.id);
       cur = un;
     });
     if(st.tail.orderBy || st.tail.limit || st.tail.offset || st.tail.limitZero){
       const cols = builtCols.get(cur.id);
-      const s = add('sort', {by:st.tail.orderBy || '', dir:st.tail.dir, limit:st.tail.limit, offset:st.tail.offset});
+      /* ORDER BY c.amount：跟 SELECT 一樣換成 JOIN 之後的欄名 */
+      const res = !st.unions.length && coreResolvers.get(st.core);
+      const named = (by, tbl) => res && tbl ? res({kind:'col', tbl:tbl, col:by}).col : by;
+      const s = add('sort', {by:named(st.tail.orderBy || '', st.tail.byTbl), dir:st.tail.dir, limit:st.tail.limit, offset:st.tail.offset});
       if(st.tail.limitZero) s.limitZero = true;
-      if(st.tail.more && st.tail.more.length) s.more = st.tail.more;
-      conn(cur, s); cur = s;
-      builtCols.set(cur.id, cols);
+      if(st.tail.more && st.tail.more.length) s.more = st.tail.more.map(m=>({by:named(m.by, m.tbl), dir:m.dir}));
+      /* 子查詢裡 ORDER BY 沒選出來的欄位（SELECT price … ORDER BY d DESC LIMIT 1）：
+         排序要在「選欄位」之前，不然 d 已經被拿掉了。最外層由產生 SQL 時處理 */
+      const need = [s.by].concat((s.more || []).map(m=>m.by)).filter(Boolean);
+      const into = nested && cur.type === 'select' && !st.unions.length ? edges.find(e=>e.to === cur.id) : null;
+      const before = into ? selectInput.get(cur.id) : null;
+      if(into && cols && need.some(b=>cols.indexOf(b) < 0) && before && need.every(b=>before.indexOf(b) >= 0)){
+        into.to = s.id;
+        conn(s, cur);
+        builtCols.set(s.id, before);
+      } else {
+        if(builtKnown.has(cur.id)) builtKnown.add(s.id);
+        conn(cur, s); cur = s;
+        builtCols.set(cur.id, cols);
+      }
     }
     return cur;
   }
 
-  const finalNode = buildStatement(parsed.stmt);
+  const finalNode = buildStatement(parsed.stmt, false);
   const out = add('output', {});
   conn(finalNode, out);
 

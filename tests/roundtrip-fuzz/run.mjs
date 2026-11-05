@@ -143,6 +143,28 @@ agg_case_expr: i => `SELECT customer_id, ${pick([
   'SUM(CASE WHEN qty > 1 AND amount > 10 THEN amount END)',
   "COALESCE(SUM(CASE status WHEN 'new' THEN qty END), 0)"])} AS v FROM orders GROUP BY customer_id${i%2?' ORDER BY customer_id':''}`,
 case_general_group: i => { const e = `CASE WHEN amount > ${pick([10,20])} OR qty > 2 THEN 'hi' ELSE 'lo' END`; return `SELECT ${e} AS b, COUNT(*) AS n FROM orders GROUP BY ${e}`; },
+// Scalar subqueries were refused (issue #5). Uncorrelated ones that return at most one row are a LEFT JOIN ON 1 = 1;
+// empty subqueries (no gold payment above 1000) must still give NULL, never drop the outer rows.
+scalar_sub: i => pick([
+  `SELECT id, amount FROM orders WHERE amount ${pick(['>','<','>='])} (SELECT AVG(amount) FROM orders${i%2?" WHERE status = 'paid'":''}) ORDER BY id`,
+  `SELECT id, amount - (SELECT ${pick(['MIN','MAX','AVG'])}(amount) FROM orders) AS d FROM orders ORDER BY id`,
+  'SELECT customer_id, SUM(amount) * 100.0 / (SELECT SUM(amount) FROM orders) AS share FROM orders GROUP BY customer_id ORDER BY customer_id',
+  "SELECT customer_id, COUNT(*) AS n FROM orders GROUP BY customer_id HAVING COUNT(*) >= (SELECT COUNT(*) FROM customers WHERE tier = 'gold') ORDER BY customer_id",
+  'SELECT id, (SELECT city FROM customers ORDER BY id DESC LIMIT 1) AS c FROM orders ORDER BY id',
+  `SELECT id FROM orders WHERE amount > (SELECT paid FROM payments WHERE paid > 1000 LIMIT 1) OR id < ${i%4} ORDER BY id`,
+  'SELECT id, COALESCE((SELECT MAX(paid) FROM payments WHERE order_id > 100), -1) AS p FROM orders ORDER BY id',
+  `SELECT customer_id, SUM(amount - (SELECT MIN(amount) FROM orders)) AS s FROM orders GROUP BY customer_id ORDER BY customer_id`,
+  `SELECT o.id, c.city FROM orders o CROSS JOIN customers c WHERE c.id = ${1+i%5} ORDER BY o.id`]),
+// p.id (renamed id_2 by the JOIN) and c.id (the INNER JOIN key folded into the left one) used to point at the
+// left table's column once the table name was dropped — in WHERE, SELECT, ORDER BY and a later JOIN's ON.
+join_renamed: i => pick([
+  `SELECT o.id, p.id AS pid, p.paid FROM orders o JOIN payments p ON o.id = p.order_id WHERE p.id > ${i%5} ORDER BY o.id, p.id`,
+  `SELECT o.id, c.id AS cid FROM orders o JOIN customers c ON o.customer_id = c.id WHERE c.id <> ${1+i%4} ORDER BY o.id`,
+  'SELECT o.id, o2.amount AS other FROM orders o JOIN orders o2 ON o.customer_id = o2.customer_id WHERE o2.amount > o.amount ORDER BY o.id, o2.id',
+  `SELECT a.id, c.city FROM orders a JOIN orders b ON a.id = b.id JOIN customers c ON b.customer_id = c.id${i%2?" WHERE c.city <> 'Taipei'":''} ORDER BY a.id`,
+  `SELECT o.id, p.paid FROM orders o JOIN payments p ON o.id = p.order_id ORDER BY p.id ${i%2?'DESC':'ASC'}`]),
+// The LEFT JOIN key folded into the left one differs on unmatched rows (NULL vs the left value): must be refused.
+unsupported_left_key: i => `SELECT o.id FROM orders o LEFT JOIN customers c ON o.customer_id = c.id WHERE c.id IS ${i%2?'NOT ':''}NULL`,
 // A column that is neither grouped nor aggregated inside such an expression cannot be rebuilt and must be refused.
 unsupported_post_stray: i => `SELECT customer_id, COUNT(*) + ${pick(['qty','amount'])} AS n FROM orders GROUP BY customer_id`,
 unsupported_aggregate_collision: i => `SELECT SUM(CASE WHEN qty > ${i%3} THEN amount END)${i%2?' AS n':''}, SUM(CASE WHEN qty = 0 THEN amount END)${i%2?' AS n':''} FROM orders`,
@@ -165,13 +187,14 @@ function diff(a,b) {
 const norm = sql => sql.replace(/\s+/g,' ').trim().replace(/;$/,'');
 const counts = {total:0,identical_result:0,different_result:0,regenerated_sql_fails:0,parse_unsupported:0,textual_identical:0};
 const unsupported = {}, classes = new Map(), inputs = new Set();
-const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_') || ['agg_arith','group_expression','count_literal','expr_nested','agg_expr','decimal_division','agg_post','having_only','where_expr','where_star_expr','having_expr','case_general','agg_case_expr','case_general_group','window_more'].includes(k)));
+const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_') || ['agg_arith','group_expression','count_literal','expr_nested','agg_expr','decimal_division','agg_post','having_only','where_expr','where_star_expr','having_expr','case_general','agg_case_expr','case_general_group','window_more','scalar_sub','join_renamed'].includes(k)));
 const mustRefuse = {
   unsupported_aggregate_order:/ORDER BY.*SELECT/,
   unsupported_case_group:/GROUP BY.*CASE/,
   unsupported_aggregate_collision:/彙總.*同名/,
   unsupported_window:/視窗/,
   unsupported_post_stray:/不在 GROUP BY/,
+  unsupported_left_key:/對照欄/,
 };
 for (const [category, make] of Object.entries(families)) for (let i=0;i<16;i++) {
   const base=make(i);
