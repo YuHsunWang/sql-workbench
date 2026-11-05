@@ -2922,6 +2922,82 @@ test('undo / redo: steps back and forth through edits; typing collapses into one
   return 'add/add/undo/undo/redo/redo; 3 keystrokes = 1 step; new edit clears redo';
 });
 
+/* The six invented rows have no NULLs, no repeated join values, no orphans and no
+   ties, so LEFT vs INNER JOIN, RANK vs ROW_NUMBER and NOT IN vs NOT EXISTS all look
+   the same on them. Edge rows must add exactly those cases — but never repeat a
+   primary key, or every JOIN would turn one-to-many and every warning would be noise. */
+test('edge data: adds NULL / repeated / orphan rows; primary keys stay unique', () => {
+  const app = loadApp();
+  app.state.schema = app.demoSchema();
+  const node = name => ({type:'table', table:name});
+  const students = app.state.schema.students, scores = app.state.schema.scores;
+  const st = app.edgeRows(node('students'), students), sc = app.edgeRows(node('scores'), scores);
+  assert.equal(st.length, 3);
+  const ids = students.rows.concat(st).map(r => r[0]);
+  assert.equal(new Set(ids).size, ids.length, 'students.student_id stays unique');
+  assert.equal(sc[0].every(v => v === null), true, 'scores has no primary key: the NULL row is all NULL');
+  assert.deepEqual(json(sc[1].slice(0, 3)), json(scores.rows[0].slice(0, 3)), 'repeat row shares keys and score with row 1');
+  assert.equal(sc[2][0], 999, 'orphan row has a key no other table has');
+  /* with edge rows on, LEFT and INNER JOIN differ, and NOT IN keeps nothing */
+  graphFromSQL(app, 'SELECT s.name FROM students s LEFT JOIN scores sc ON s.student_id = sc.student_id');
+  app.state.schema = app.demoSchema();
+  app.state.edge = true;
+  const left = app.evalNode(app.state.nodes.find(n => n.type === 'output')).rows.length;
+  app.state.nodes.find(n => n.type === 'join').joinType = 'INNER';
+  const inner = app.evalNode(app.state.nodes.find(n => n.type === 'output')).rows.length;
+  assert.ok(left > inner, `LEFT ${left} vs INNER ${inner}`);
+  /* edge rows are never written into the saved schema */
+  assert.equal(app.state.schema.students.rows.length, 6);
+  return `LEFT ${left} vs INNER ${inner} rows; student ids unique; schema untouched`;
+});
+
+/* Each check targets a mistake AI-written SQL makes that is valid SQL and runs
+   without error. Each must fire on the bad shape and stay quiet on its correct
+   neighbour, or users learn to ignore the panel. */
+test('AI SQL check: each trap fires on the wrong query and stays quiet on the right one', () => {
+  const lint = (sql, {edge = true, dialect = 'postgres', schema} = {}) => {
+    const app = loadApp();
+    app.state.dialect = dialect; app.state.edge = edge;
+    app.state.schema = schema || app.demoSchema();
+    const g = app.astToGraph(app.parseSQLText(sql));
+    installGraph(app, g, g.schema);
+    return app.lintGraph().map(f => f.level + ':' + f.msg.replace(/<[^>]+>/g, ''));
+  };
+  const pairs = [
+    ['LEFT JOIN undone by WHERE', /變成 INNER JOIN/,
+      'SELECT s.name, sc.score FROM students s LEFT JOIN scores sc ON s.student_id = sc.student_id WHERE sc.score >= 60',
+      'SELECT s.name, sc.score FROM students s LEFT JOIN scores sc ON s.student_id = sc.student_id WHERE s.gender = \'女\' OR sc.score IS NULL'],
+    ['one-to-many JOIN double counts the duplicated side', /一對多/,
+      'SELECT t.name, SUM(c.teacher_id) AS bad FROM courses c JOIN scores sc ON c.course_id = sc.course_id JOIN teachers t ON c.teacher_id = t.teacher_id GROUP BY t.name',
+      'SELECT c.course_name, SUM(sc.score) AS total FROM courses c JOIN scores sc ON c.course_id = sc.course_id GROUP BY c.course_name'],
+    ['COUNT(*) after LEFT JOIN', /COUNT\(\*\) 接在 LEFT JOIN/,
+      'SELECT t.name, COUNT(*) AS n FROM teachers t LEFT JOIN courses c ON t.teacher_id = c.teacher_id GROUP BY t.name',
+      'SELECT t.name, COUNT(c.course_id) AS n FROM teachers t LEFT JOIN courses c ON t.teacher_id = c.teacher_id GROUP BY t.name'],
+    ['NOT IN with a NULL in the lookup', /^warn:NOT IN/,
+      'SELECT s.name FROM students s WHERE s.student_id NOT IN (SELECT sc.student_id FROM scores sc)',
+      'SELECT s.name FROM students s WHERE NOT EXISTS (SELECT 1 FROM scores sc WHERE sc.student_id = s.student_id)'],
+    ['integer division', /捨去小數/,
+      'SELECT student_id / 3 AS third FROM scores',
+      'SELECT score / 3 AS third FROM scores'],
+    ['LIMIT without ORDER BY', /沒有排序就取前幾筆/,
+      'SELECT * FROM scores LIMIT 3',
+      'SELECT * FROM scores ORDER BY score DESC LIMIT 3'],
+    ['ROW_NUMBER over ties', /同分/,
+      'SELECT course_id, ROW_NUMBER() OVER (PARTITION BY course_id ORDER BY score DESC) AS rk FROM scores',
+      'SELECT course_id, RANK() OVER (PARTITION BY course_id ORDER BY score DESC) AS rk FROM scores'],
+  ];
+  for (const [name, re, bad, good] of pairs) {
+    assert.ok(lint(bad).some(m => re.test(m)), `${name} should fire: ${lint(bad).join(' | ')}`);
+    assert.ok(!lint(good).some(m => re.test(m)), `${name} should stay quiet: ${lint(good).join(' | ')}`);
+  }
+  /* integer division truncates only where the database does it */
+  assert.equal(lint('SELECT student_id / 3 AS third FROM scores', {dialect:'mysql'}).length, 0);
+  /* data-backed checks never claim evidence the clean sample does not have */
+  assert.equal(lint('SELECT course_id, ROW_NUMBER() OVER (PARTITION BY course_id ORDER BY score DESC) AS rk FROM scores', {edge:false}).length, 0);
+  assert.ok(lint(pairs[3][2], {edge:false}).every(m => m.startsWith('info:')), 'NOT IN without a NULL in sight is a heads-up, not a warning');
+  return `${pairs.length} traps × fire / quiet; dialect- and evidence-aware`;
+});
+
 let passed = 0;
 for (const item of cases) {
   try {

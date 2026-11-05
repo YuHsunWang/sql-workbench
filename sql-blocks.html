@@ -431,6 +431,29 @@ input[type="number"]{max-width:88px}
 .dopt label{display:flex;align-items:center;gap:6px;cursor:pointer}
 .dopt input{width:14px;height:14px;accent-color:var(--accent);flex:none}
 .dnote .same{color:var(--accent-ink)}
+/* AI SQL 健檢 */
+.lint{border-top:1px solid var(--line-soft);padding:10px 12px 12px;display:flex;flex-direction:column;gap:6px}
+.lint-h{display:flex;align-items:baseline;gap:8px}
+.lint-h b{font-family:var(--ui);font-weight:700;font-size:11px;letter-spacing:.09em;color:var(--ink-2)}
+.lint-h i{font-style:normal;font-size:11px;color:var(--ink-3);font-family:var(--mono)}
+.lint .hint{margin:0}
+.lint-i{display:block;width:100%;text-align:left;font-size:11.5px;line-height:1.6;color:var(--ink-2);
+  background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--f-wide);border-radius:8px;padding:7px 9px}
+.lint-i.warn{border-left-color:var(--drop)}
+.lint-i:hover{background:var(--surface-2)}
+.lint-i b{display:block;font-family:var(--ui);font-size:10.5px;letter-spacing:.06em;color:var(--ink-3)}
+.lint-i code,.lint-note code{font-family:var(--mono);font-size:11px;color:var(--ink)}
+.lint-i strong,.lint-note strong{color:var(--ink);font-weight:600}
+.lint-note{display:block;margin-top:8px;padding:7px 10px;border-radius:8px;font-size:12px;
+  background:color-mix(in srgb,var(--f-wide) 12%,transparent)}
+.lint-note.warn{background:color-mix(in srgb,var(--drop) 12%,transparent)}
+.lint-note.warn::before,.lint-note.info::before{content:"⚠ ";font-weight:700}
+.nlint{flex:none;display:grid;place-items:center;width:16px;height:16px;border-radius:50%;
+  font-family:var(--ui);font-weight:700;font-size:11px;line-height:1;color:#fff;background:var(--f-wide);cursor:help}
+.nlint.warn{background:var(--drop)}
+.edge-opt{display:inline-flex;align-items:center;gap:6px;margin:0 0 12px;font-size:11.5px;color:var(--ink-2);cursor:pointer}
+.edge-opt input{width:14px;height:14px;accent-color:var(--accent);flex:none}
+table.grid tr.edge td{font-style:italic;background:color-mix(in srgb,var(--f-wide) 7%,transparent)}
 .dnote b{color:var(--ink-2);font-weight:500}
 .dnote code{font-family:var(--mono)}
 
@@ -662,6 +685,7 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
       <pre class="sqlbox" id="sql"></pre>
       <div class="dopt"><label><input type="checkbox" id="quote-all"> 識別字一律加引號（貼進挑剔的工具時比較保險）</label></div>
       <p class="dnote" id="dnote"></p>
+      <div class="lint" id="lint"></div>
     </section>
 
     <section class="panel stage">
@@ -672,6 +696,8 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
         </div>
       </div>
       <div class="stage-body">
+        <label class="edge-opt" title="每張表多三列：NULL、重複的對照值（含同分）、配不到的值。一對多、NULL、同分的問題在乾淨的示意資料上看不出來。">
+          <input type="checkbox" id="edge-data"> 邊界資料：每張表多加 NULL、重複、配不到的列</label>
         <div class="caption" id="caption"></div>
         <div class="flow" id="flow"></div>
         <p class="foot" id="foot"></p>
@@ -894,6 +920,34 @@ function joinLayout(Lcols, Rcols, dropNames){
   });
   return {cols:Lcols.concat(keep.map(k=>k.name)), keep:keep};
 }
+/* ---- 邊界資料 ----
+   編出來的六列太乾淨：沒有 NULL、對照值不重複、每列都配得到、沒有同分。
+   LEFT 和 INNER JOIN、RANK 和 ROW_NUMBER、NOT IN 和 NOT EXISTS 在這種資料上
+   跑出來一模一樣，AI 寫錯的地方就看不出來。打開「邊界資料」每張表多三列：
+     NULL 列   —— 主鍵以外全是 NULL
+     重複列    —— 對照值、數字跟第 1 列一樣（JOIN 一對多、同分），文字取第 3 列
+     配不到的列 —— 對照值是別張表沒有的 999
+   主鍵（id，或 students 的 student_id 這種「表名單數_id」）永遠給新值，
+   不然連主鍵都重複，每個 JOIN 都會變成一對多，警告就沒有意義了。 */
+const KEYISH = c => /(^|_)(id|code|no)$/i.test(c.name) || /編號|代號|代碼/.test(c.ch || '');
+function pkOf(node, t){
+  const first = t.cols[0];
+  if(!first) return -1;
+  const stem = String(node.table || '').toLowerCase().replace(/(ies)$/, 'y').replace(/(s)$/, '');
+  return (/^id$/i.test(first.name) || first.name.toLowerCase() === stem + '_id') ? 0 : -1;
+}
+function edgeRows(node, t){
+  const rows = t.rows, cols = t.cols;
+  if(rows.length < 4 || !cols.length) return [];
+  const pk = pkOf(node, t);
+  const fresh = (i, n) => typeof rows[0][i] === 'number' ? n : String(n);
+  const isNumber = v => typeof v === 'number';
+  return [
+    cols.map((c, i)=>i === pk ? fresh(i, 997) : null),
+    cols.map((c, i)=>i === pk ? fresh(i, 998) : (KEYISH(c) || isNumber(rows[0][i])) ? rows[0][i] : rows[2][i]),
+    cols.map((c, i)=>i === pk ? fresh(i, 999) : KEYISH(c) ? fresh(i, 999) : rows[3][i])
+  ];
+}
 function inEdges(id){ return state.edges.filter(e=>e.to===id).sort((a,b)=>a.port-b.port); }
 function nodeById(id){ return state.nodes.find(n=>n.id===id) || null; }
 function srcOf(id, port){ const e = state.edges.find(e=>e.to===id && e.port===(port||0)); return e ? nodeById(e.from) : null; }
@@ -926,7 +980,7 @@ function evalNode(node, ctx){
 
   case 'table': {
     const t = schemaOf(node);
-    return t ? {cols:t.cols.map(c=>c.name), rows:t.rows.map(r=>r.slice())} : EMPTY;
+    return t ? {cols:t.cols.map(c=>c.name), rows:t.rows.map(r=>r.slice()).concat(state.edge ? edgeRows(node, t) : [])} : EMPTY;
   }
 
   case 'semijoin': {
@@ -1868,7 +1922,11 @@ function renderNodes(){
     /* 註記放在標題列旁邊 —— 一長串代號看不出是哪一組，名字才認得出來 */
     const txt = noteOf(n);
     const note = txt ? '<span class="nnote" title="'+esc(txt)+'">'+esc(txt)+'</span>' : '';
-    let html = '<div class="nhead">'+ICONS[n.type]+'<b>'+m.label+'</b>'+note+'</div>'+
+    const lint = lintFor(n.id);
+    const flag = lint.length
+      ? '<span class="nlint '+(lint.some(f=>f.level === 'warn') ? 'warn' : 'info')+'" title="'+
+        esc(lint.map(f=>f.msg.replace(/<[^>]+>/g, '')).join('\n'))+'">!</span>' : '';
+    let html = '<div class="nhead">'+ICONS[n.type]+'<b>'+m.label+'</b>'+flag+note+'</div>'+
                '<div class="nbody">'+nodeSummary(n)+'</div>';
     const flow = rowFlow(n);
     if(flow) html += '<div class="nrows'+(flow.grew ? ' grew' : '')+'" title="'+esc(flow.tip)+'">'+flow.text+'</div>';
@@ -1887,23 +1945,167 @@ function renderNodes(){
   positionPorts();
   document.getElementById('node-count').textContent = state.nodes.length + ' 步';
 }
+/* 左邊一列最多配到右邊幾列。> 1 就是一對多：左邊的列被複製了。
+   不能只比總列數 —— INNER JOIN 同時刷掉配不到的列，總數可能反而變少 */
+function joinFanout(n){
+  const L = evalNode(srcOf(n.id, 0)), R = evalNode(srcOf(n.id, 1));
+  const pairs = joinKeys(n).map(k=>({l:L.cols.indexOf(k.left), r:R.cols.indexOf(k.right), lfn:k.lfn || '', rfn:k.rfn || ''}))
+    .filter(p=>p.l >= 0 && p.r >= 0);
+  if(!pairs.length) return 0;
+  const count = new Map();
+  R.rows.forEach(r=>{ const k = joinKey(r, pairs, 'r'); if(k !== null) count.set(k, (count.get(k) || 0) + 1); });
+  let most = 0;
+  L.rows.forEach(l=>{ const k = joinKey(l, pairs, 'l'); if(k !== null) most = Math.max(most, count.get(k) || 0); });
+  return most;
+}
 /* 每個步驟進來幾列、出去幾列（示意資料）。KNIME、Alteryx 都把筆數標在連線上：
    JOIN 之後列數暴增，一眼就看得到 */
 function rowFlow(n){
   if(n.type === 'table' || n.type === 'output') return null;
   const first = srcOf(n.id, 0);
   if(!first) return null;
-  let before, after;
-  try { before = evalNode(first).rows.length; after = evalNode(n).rows.length; }
-  catch(err){ return null; }
-  const grew = n.type === 'join' && after > before;
+  let before, after, grew = false;
+  try {
+    before = evalNode(first).rows.length; after = evalNode(n).rows.length;
+    if(n.type === 'join') grew = joinFanout(n) > 1;
+  } catch(err){ return null; }
   return {
+    before: before, after: after,
     text: '示意 ' + (before === after ? after + ' 列' : before + ' → ' + after + ' 列'),
     grew: grew,
     tip: grew
-      ? 'JOIN 之後列數變多了：右邊有重複的對照值，一列配到好幾列。後面再 SUM / COUNT 會重複計算。'
+      ? '一對多：右邊有重複的對照值，左邊一列配到好幾列、被複製了。後面再 SUM / COUNT 會重複計算。'
       : '在示意資料上，這一步收到 ' + before + ' 列、交出 ' + after + ' 列。'
   };
+}
+/* ---- AI SQL 健檢 ----
+   SQLFluff 這類工具看的是寫法；這裡有執行引擎，看的是「意思」：幾種 AI 最常寫錯、
+   語法完全合法、跑起來也不會報錯的陷阱。能用示意資料佐證的就附上數字。
+   只檢查這幾種，沒找到不代表查詢正確 —— 介面上也這樣說（規則 4）。 */
+const INT_TYPE = /^(TINY|SMALL|MEDIUM|BIG)?INT(EGER)?$|^SERIAL$/i;
+function downstreamOf(n){
+  const list = [], seen = new Set();
+  let cur = n;
+  for(;;){
+    const outs = state.edges.filter(e=>e.from === cur.id);
+    if(outs.length !== 1) break;
+    const nx = nodeById(outs[0].to);
+    if(!nx || nx.type === 'output' || seen.has(nx.id)) break;
+    seen.add(nx.id); list.push({n:nx, port:outs[0].port}); cur = nx;
+  }
+  return list;
+}
+function upstreamOf(n){
+  const list = [], seen = new Set();
+  let cur = srcOf(n.id, 0);
+  while(cur && !seen.has(cur.id)){ seen.add(cur.id); list.push(cur); cur = srcOf(cur.id, 0); }
+  return list;
+}
+function lintGraph(){
+  const out = state.nodes.find(n=>n.type === 'output');
+  const last = out ? srcOf(out.id, 0) : null;
+  if(!last || graphIssue(last)) return [];
+  const found = [];
+  const add = (n, level, msg) => found.push({node:n.id, level:level, msg:msg});
+  const code = s => '<code>'+esc(s)+'</code>';
+  const chain = chainOrder();
+
+  chain.forEach(n=>{
+    /* 1. LEFT JOIN 之後在 WHERE 篩右表的欄位：沒配到的列那裡是 NULL，會被刷掉 */
+    if(n.type === 'join' && n.joinType === 'LEFT'){
+      const L = evalNode(srcOf(n.id, 0)).cols, R = evalNode(srcOf(n.id, 1)).cols;
+      const keys = new Set(joinKeys(n).filter(k=>k.left && k.right).map(k=>k.right));
+      let right = new Set(joinLayout(L, R, keys).keep.map(k=>k.name));
+      for(const step of downstreamOf(n)){
+        const m = step.n;
+        if(META[m.type].ins > 1 || m.type === 'groupby') break;
+        if(m.type === 'select' && m.outCols){
+          right = new Set(m.cols.map((c, i)=>right.has(c) ? m.outCols[i] : null).filter(Boolean));
+          continue;
+        }
+        if(m.type !== 'filter') continue;
+        const groups = isOrFilter(m) ? m.any : [[m]];
+        const hits = groups.map(g=>g.find(c=>right.has(c.col) && c.op !== 'IS NULL'));
+        if(hits.every(Boolean)){
+          const c = hits[0];
+          add(m, c.op === 'IS NOT NULL' ? 'info' : 'warn', c.op === 'IS NOT NULL'
+            ? '篩掉右邊是 NULL 的列，等於只留配得到的 —— 跟直接寫 INNER JOIN 一樣，寫 INNER JOIN 比較清楚。'
+            : '這個條件看的是 LEFT JOIN 右邊的 '+code(c.col)+'。沒配到的列那一欄是 NULL，會被這個條件刷掉，'+
+              '<strong>整段效果變成 INNER JOIN</strong>。想保留沒配到的，把條件搬進 JOIN 的 ON，或加上「'+code(c.col+' IS NULL')+'」的 OR。');
+          break;
+        }
+      }
+    }
+
+    /* 2. JOIN 一對多之後再 SUM / COUNT：同一筆被算好幾次（要有示意資料佐證） */
+    if(n.type === 'groupby'){
+      const up = upstreamOf(n);
+      /* 只有加總「被複製的那一邊」（JOIN 左邊）的欄位才會重算；加總右邊（多的那邊）是對的 */
+      const fan = up.find(m=>m.type === 'join' && joinFanout(m) > 1);
+      const leftCols = fan ? evalNode(srcOf(fan.id, 0)).cols : [];
+      const keyCols = new Set(fan ? joinKeys(fan).map(k=>k.left) : []);
+      const counts = n.aggs.filter(a=>['SUM','COUNT','AVG'].indexOf(a.fn) >= 0 &&
+        leftCols.indexOf(a.col) >= 0 && !keyCols.has(a.col) && n.keys.indexOf(a.col) < 0);
+      if(fan && counts.length){
+        add(n, 'warn', '前面的 JOIN 是一對多：示意資料裡右邊同一個對照值最多有 '+joinFanout(fan)+' 列，左邊那一列就被複製成 '+joinFanout(fan)+' 列。'+
+          '這裡的 '+counts.map(a=>code(a.fn+'('+a.col+')')).join('、')+' 會把同一筆<strong>算好幾次</strong>。'+
+          '先把右表彙總成一列一個值再 JOIN，或確認右表的對照欄不會重複。');
+      }
+      /* 5. LEFT JOIN 之後 COUNT(*)：沒配到的那列也算成 1 */
+      if(n.aggs.some(a=>a.fn === 'COUNT' && a.col === '*') && up.some(m=>m.type === 'join' && m.joinType === 'LEFT'))
+        add(n, 'warn', '<code>COUNT(*)</code> 接在 LEFT JOIN 後面：沒配到的那一列也會被<strong>算成 1</strong>，而不是 0。'+
+          '想數「配到幾筆」要寫 COUNT(右表的某一欄)，NULL 才不會被算進去。');
+    }
+
+    /* 3. NOT IN 遇到 NULL：查找那欄只要有一個 NULL，一列都不留 */
+    if(n.type === 'semijoin' && n.form === 'NOT IN'){
+      const R = evalNode(srcOf(n.id, 1)), k = (n.keys || [])[0];
+      const ri = k ? R.cols.indexOf(k.right) : -1;
+      const hasNull = ri >= 0 && R.rows.some(r=>r[ri] == null);
+      add(n, hasNull ? 'warn' : 'info', '<code>NOT IN</code>：查找的那一欄只要出現<strong>一個 NULL</strong>，結果就一列都不剩。'+
+        (hasNull ? '示意資料裡就有 NULL，所以這一步一列都沒留。' : '')+'改用 NOT EXISTS 比較保險。');
+    }
+
+    /* 6. 整數除以整數：PostgreSQL / SQL Server 會捨去小數 */
+    if(n.type === 'derive' && n.op === '/' && !n.fn && (state.dialect === 'postgres' || state.dialect === 'mssql')){
+      const src = srcOf(n.id, 0), cols = evalNode(src).cols;
+      const isInt = v => cols.indexOf(v) >= 0 ? INT_TYPE.test(colType(src, v)) : /^-?\d+$/.test(String(v));
+      if(INT_TYPE.test(colType(src, n.left)) && isInt(n.right))
+        add(n, 'warn', '兩邊都是整數：在 '+D().name+' 整數除以整數會<strong>捨去小數</strong>（7 / 2 = 3）。'+
+          '要小數的話先轉成 DECIMAL，或把除數寫成 '+code('2.0')+' 這種帶小數點的數字。');
+    }
+
+    /* 9. 沒排序就取前 N 筆 */
+    if(n.type === 'sort' && !n.by && (Number(n.limit) > 0 || Number(n.offset) > 0))
+      add(n, 'warn', '<strong>沒有排序就取前幾筆</strong>：資料庫每次給的可能是不同的那幾筆。選一個排序欄位，結果才固定。');
+
+    /* 10. ROW_NUMBER 遇到同分（要有示意資料佐證） */
+    if(n.type === 'window' && n.fn === 'ROW_NUMBER' && n.orderBy){
+      const S = evalNode(srcOf(n.id, 0));
+      const pi = n.partitionBy.map(c=>S.cols.indexOf(c)), oi = S.cols.indexOf(n.orderBy);
+      const seen = new Set();
+      const tie = oi >= 0 && S.rows.some(r=>{
+        if(r[oi] == null) return false;
+        const k = JSON.stringify(pi.map(i=>r[i]).concat([r[oi]]));
+        if(seen.has(k)) return true; seen.add(k); return false;
+      });
+      if(tie) add(n, 'info', '示意資料裡同一組有<strong>同分</strong>的列：'+code('ROW_NUMBER')+' 會隨便挑一個當第 1，每次跑可能不一樣。'+
+        '要同分同名次用 RANK / DENSE_RANK。');
+    }
+  });
+  return found;
+}
+const lintFor = id => (state.lint || []).filter(f=>f.node === id);
+const LINT_RULES = 'LEFT JOIN 被 WHERE 變成 INNER、JOIN 一對多重複計算、LEFT JOIN 後 COUNT(*)、NOT IN 遇到 NULL、整數相除、沒排序取前 N 筆、ROW_NUMBER 同分';
+function renderLint(){
+  const box = document.getElementById('lint');
+  const list = state.lint || [];
+  const label = id => { const n = nodeById(id); return n ? META[n.type].label : ''; };
+  box.innerHTML = '<div class="lint-h"><b>AI SQL 健檢</b><i>'+(list.length ? list.length+' 項' : '沒發現')+'</i></div>'+
+    (list.length
+      ? list.map(f=>'<button class="lint-i '+f.level+'" data-node="'+f.node+'"><b>'+label(f.node)+'</b>'+f.msg+'</button>').join('')
+      : '<p class="hint">沒看到這幾種常見陷阱：'+LINT_RULES+'。只檢查這幾種，不代表查詢一定正確。</p>')+
+    (state.edge ? '' : '<p class="hint">打開下面的<b>邊界資料</b>，一對多、同分、NULL 的問題才看得出來。</p>');
 }
 function positionPorts(){
   state.nodes.forEach(n=>{
@@ -3283,11 +3485,13 @@ function buildSteps(){
   if(tables.length) steps.push({
     node:'@tables',
     title:'來源',
-    cap:'先看原料。<strong>欄位是你 schema 裡真的有的，列是編出來的示意資料</strong>。後面每一步都只是把這些列搬來搬去。',
+    cap:'先看原料。<strong>欄位是你 schema 裡真的有的，列是編出來的示意資料</strong>。後面每一步都只是把這些列搬來搬去。'+
+        (state.edge ? '<br>已打開<strong>邊界資料</strong>：每張表最後三列（斜體）是故意加的 —— NULL 列、對照值和數字跟第一列重複的列、對照值配不到的列。' : ''),
     render: box => tables.forEach((t,i)=>{
       if(i) box.appendChild(mark('＋'));
       const s = schemaOf(t);
-      box.appendChild(miniTable(tableLabel(t) + (s.label ? '（'+s.label+'）' : ''), evalNode(t)));
+      box.appendChild(miniTable(tableLabel(t) + (s.label ? '（'+s.label+'）' : ''), evalNode(t),
+        state.edge ? {edgeFrom:s.rows.length} : {}));
     })
   });
 
@@ -3719,7 +3923,8 @@ function miniTable(name, data, o){
   shown.forEach((x, idx)=>{
     const tint = o.tint ? o.tint(x.r, idx, x.i) : null;
     const dropped = o.drop ? o.drop(x.r, idx, x.i) : false;
-    html += '<tr class="r'+(tint ? ' tinted' : '')+(dropped ? ' drop' : '')+
+    const edge = o.edgeFrom !== undefined && x.i >= o.edgeFrom;
+    html += '<tr class="r'+(tint ? ' tinted' : '')+(dropped ? ' drop' : '')+(edge ? ' edge' : '')+
             '" style="animation-delay:'+(idx*42)+'ms'+(tint ? ';--tc:'+tint : '')+'">';
     x.r.forEach((v, ci)=>{
       const numeric = v !== null && v !== '' && !isNaN(Number(v));
@@ -3773,7 +3978,8 @@ function renderStage(){
   });
 
   document.getElementById('caption').innerHTML =
-    '<span class="num">STEP '+(i+1)+' / '+steps.length+'</span><p>'+s.cap+'</p>';
+    '<span class="num">STEP '+(i+1)+' / '+steps.length+'</span><p>'+s.cap+
+    (s.node ? lintFor(s.node).map(f=>'<span class="lint-note '+f.level+'">'+f.msg+'</span>').join('') : '')+'</p>';
   const flow = document.getElementById('flow');
   flow.innerHTML = '';
   try { s.render(flow); }
@@ -3903,10 +4109,12 @@ function refresh(keepInspector){
   const ds = keepInspector && document.activeElement && document.activeElement.dataset;
   const focusKey = ds && ds.f ? '[data-f="'+ds.f+'"]'+
     (ds.ob !== undefined ? '[data-ob="'+ds.ob+'"][data-oc="'+ds.oc+'"]' : '') : null;
+  try { state.lint = lintGraph(); } catch(err){ state.lint = []; }   /* 健檢出錯不能拖垮整頁 */
   renderNodes();
   drawWires();
   if(!keepInspector) renderInspector();
   document.getElementById('sql').innerHTML = sqlHTML(buildSQL());
+  renderLint();
   document.getElementById('dnote').innerHTML = dialectNote();
   state.steps = buildSteps();
   if(state.step >= state.steps.length) state.step = state.steps.length - 1;
@@ -5309,6 +5517,20 @@ dsel.addEventListener('change', ()=>{
   state.dialect = dsel.value;
   try { localStorage.setItem('sqlblocks.dialect', state.dialect); } catch(err){}
   refresh();
+});
+const edgeBox = document.getElementById('edge-data');
+try { state.edge = localStorage.getItem('sqlblocks.edge') === '1'; } catch(err){}
+edgeBox.checked = !!state.edge;
+edgeBox.addEventListener('change', ()=>{
+  state.edge = edgeBox.checked;
+  try { localStorage.setItem('sqlblocks.edge', state.edge ? '1' : '0'); } catch(err){}
+  refresh();
+});
+document.getElementById('lint').addEventListener('click', e=>{
+  const b = e.target.closest && e.target.closest('[data-node]');
+  if(!b || !nodeById(b.dataset.node)) return;
+  select(b.dataset.node);
+  revealNode(b.dataset.node);
 });
 const qall = document.getElementById('quote-all');
 try { state.quoteAll = localStorage.getItem('sqlblocks.quoteAll') === '1'; } catch(err){}
