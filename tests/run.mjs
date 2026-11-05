@@ -4000,6 +4000,153 @@ test('stage-4 review #7: ROUND and SUBSTR previews never show a value the databa
   return `ROUND(-2.5) = ${lite.a}, ROUND(-0.25, 1) = ${lite.b} like SQLite; SUBSTR from 0 left to the database`;
 });
 
+/* Code review on PR #7: when both tables have v, the JOIN renames b.v to v_2. A
+   window's PARTITION BY / ORDER BY b.v kept only "v", so it silently ordered by the
+   LEFT table's v and LAG returned another row's value. */
+test('code review: a table-qualified window key follows the JOIN rename', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE a(id INT, v INT); CREATE TABLE b(id INT, v INT); INSERT INTO a VALUES (1,100),(2,10),(3,50); INSERT INTO b VALUES (1,5),(2,20),(3,20);');
+  const rows = sql => json(db.prepare(sql + ' ORDER BY 1').all().map(r => Object.values(r)));
+  const shapes = [
+    'SELECT a.id, LAG(b.v) OVER (ORDER BY b.v, a.id) AS prev FROM a JOIN b ON a.id = b.id',
+    'SELECT a.id, ROW_NUMBER() OVER (PARTITION BY b.v ORDER BY a.v) AS rn FROM a JOIN b ON a.id = b.id',
+    'SELECT a.id, SUM(a.v) OVER (ORDER BY b.v DESC, a.id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS s FROM a JOIN b ON a.id = b.id',
+  ];
+  for (const sql of shapes) {
+    const app = loadApp();
+    app.state.dialect = 'postgres';
+    app.document.getElementById('ddl').value = 'CREATE TABLE a (id INT, v INT); CREATE TABLE b (id INT, v INT);';
+    app.document.getElementById('btn-parse').listeners.click();
+    graphFromSQL(app, sql);
+    const generated = app.buildSQL();
+    assert.match(generated, /OVER \((PARTITION BY v_2 ORDER BY v |ORDER BY v_2 )/, sql);
+    assert.deepEqual(rows(generated.replace(/;\s*$/, '')), rows(sql), sql);
+  }
+  return `${shapes.length} windows keyed on the renamed b.v match SQLite`;
+});
+
+/* Code review on PR #7: MySQL has no FULL JOIN, so it is written as LEFT JOIN plus
+   the right rows that matched nothing. FULL JOIN … ON 1 = 1 had no second half, so
+   an empty left table lost every right row. */
+test('code review: MySQL FULL JOIN without a condition keeps right rows when the left is empty', () => {
+  const sql = 'SELECT a.id, b.y FROM a FULL JOIN b ON 1 = 1';
+  const sorted = rows => json(rows).map(r => JSON.stringify(r)).sort();
+  const cases = [[[], [[1, 5], [2, 6]]], [[[1, 7]], [[1, 5], [2, 6]]], [[[1, 7], [2, 8]], []], [[], []]];
+  for (const [left, right] of cases) {
+    const db = new DatabaseSync(':memory:');
+    db.exec('CREATE TABLE a(id INT, x INT); CREATE TABLE b(k INT, y INT);');
+    left.forEach(r => db.prepare('INSERT INTO a VALUES (?, ?)').run(...r));
+    right.forEach(r => db.prepare('INSERT INTO b VALUES (?, ?)').run(...r));
+    const want = sorted(db.prepare(sql).all().map(r => Object.values(r)));
+    const app = loadApp();
+    app.state.dialect = 'mysql';
+    app.document.getElementById('ddl').value = 'CREATE TABLE a (id INT, x INT); CREATE TABLE b (k INT, y INT);';
+    app.document.getElementById('btn-parse').listeners.click();
+    const graph = graphFromSQL(app, sql);
+    for (const generated of [app.buildSQL(), app.buildCompactSQL()]) {
+      assert.match(generated, /NOT EXISTS \(SELECT 1 FROM a\)/);
+      assert.deepEqual(sorted(db.prepare(generated.replace(/`/g, '"')).all().map(r => Object.values(r))), want, generated);
+    }
+    installGraph(app, graph, {a: {cols: [{name: 'id'}, {name: 'x'}], rows: left}, b: {cols: [{name: 'k'}, {name: 'y'}], rows: right}});
+    assert.deepEqual(sorted(app.evalNode(graph.nodes.find(n => n.type === 'output')).rows), want);
+    db.close();
+  }
+  return `${cases.length} empty / non-empty combinations exact in CTE, compact and preview`;
+});
+
+/* Code review on PR #7: a subquery's ORDER BY (no LIMIT) folded into a GROUP BY or
+   DISTINCT block became the outer ORDER BY, on a column that is no longer there —
+   PostgreSQL rejects it (SQLite does not, so this checks the SQL itself). The sort
+   does not change which rows come out, and the CTE format never wrote it either. */
+test('code review: the compact format drops an ordering folded past GROUP BY or DISTINCT', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE t(id INT, v INT); INSERT INTO t VALUES (1,1),(2,1),(3,2),(4,3);');
+  const rows = sql => json(db.prepare(sql).all().map(r => Object.values(r))).map(r => JSON.stringify(r)).sort();
+  const app = loadApp();
+  app.state.dialect = 'postgres';
+  for (const sql of ['SELECT v, COUNT(*) n FROM (SELECT * FROM t ORDER BY id) x GROUP BY v', 'SELECT DISTINCT v FROM (SELECT * FROM t ORDER BY id) x']) {
+    graphFromSQL(app, sql);
+    const compact = app.buildCompactSQL();
+    assert.doesNotMatch(compact, /ORDER BY/, compact);
+    assert.deepEqual(rows(compact), rows(sql));
+  }
+  /* with a LIMIT the sort decides which rows are grouped, so it stays */
+  const limited = 'SELECT v, COUNT(*) n FROM (SELECT * FROM t ORDER BY id LIMIT 3) x GROUP BY v';
+  graphFromSQL(app, limited);
+  assert.match(app.buildCompactSQL(), /ORDER BY id ASC\s+LIMIT 3/);
+  assert.deepEqual(rows(app.buildCompactSQL()), rows(limited));
+  return 'GROUP BY and DISTINCT drop the stale ORDER BY; a sort with LIMIT is kept';
+});
+
+/* Code review on PR #7: the cleanup for psql output (rule lines, "(12 rows)", empty
+   rows) also ran on CSV, silently deleting the user's own records. It now applies
+   only to column lists; a CSV loses nothing but blank lines. */
+test('code review: a CSV keeps empty records and values that look like psql output', () => {
+  const app = loadApp();
+  const add = (name, text) => {
+    app.document.getElementById('csv-name').value = name;
+    app.document.getElementById('csv-text').value = text;
+    app.document.getElementById('btn-csv').listeners.click();
+    return app.state.schema[name].rows;
+  };
+  assert.deepEqual(json(add('c', 'a,b\n1,2\n,\n3,4\n---,x\n(12 rows),y\n')), [['1', '2'], [null, null], ['3', '4'], ['---', 'x'], ['(12 rows)', 'y']]);
+  assert.deepEqual(json(add('d', 'a\n1\n---\n(12 rows)\n\n   \n2\n')), [['1'], ['---'], ['(12 rows)'], ['2']]);
+  /* psql output pasted as a column list is still cleaned */
+  app.document.getElementById('ddl').value = ' table_name | column_name | data_type\n------------+-------------+-----------\n t1         | a           | integer\n(1 row)\n';
+  app.document.getElementById('btn-parse').listeners.click();
+  assert.deepEqual(json(app.state.schema.t1.cols.map(c => c.name)), ['a']);
+  return 'empty record and ---, (12 rows) kept in CSV; blank lines skipped; psql rule lines still dropped from column lists';
+});
+
+/* Code review on PR #7: a scalar subquery's value is renamed sub_value, but its own
+   ORDER BY x / ORDER BY 1 still named the old alias x, so the generated SQL failed
+   with "no such column". Mixed with a column it does not select (ORDER BY w, x), the
+   sort has to run before the select, under the source names. */
+test('code review: a scalar subquery may sort by its own alias or position', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE a(id INT); CREATE TABLE b(v INT, w INT); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (3,1),(9,0),(4,5),(7,5);');
+  const rows = sql => json(db.prepare(sql).all().map(r => Object.values(r)));
+  const shapes = [
+    'SELECT id, (SELECT v AS x FROM b ORDER BY x DESC LIMIT 1) AS s FROM a',
+    'SELECT id, (SELECT v AS x FROM b ORDER BY 1 DESC LIMIT 1) AS s FROM a',
+    'SELECT id, (SELECT v + 1 AS x FROM b ORDER BY x LIMIT 1) AS s FROM a',
+    'SELECT id, (SELECT v AS x FROM b ORDER BY w DESC, x LIMIT 1) AS s FROM a',
+    'SELECT id FROM a WHERE id < (SELECT w AS x FROM b ORDER BY x DESC LIMIT 1)',
+    'SELECT * FROM (SELECT v AS x FROM b ORDER BY w DESC, x LIMIT 2) t',
+  ];
+  for (const sql of shapes) {
+    const app = loadApp();
+    app.state.dialect = 'postgres';
+    graphFromSQL(app, sql);
+    for (const generated of [app.buildSQL(), app.buildCompactSQL()]) assert.deepEqual(rows(generated), rows(sql), generated);
+  }
+  return `${shapes.length} subqueries sorting by alias, position or both exact in CTE and compact`;
+});
+
+/* Found while checking the review above: the compact format sorts by the source
+   expression, but a bare name in ORDER BY means the OUTPUT column first. With
+   SELECT v AS w, w AS v … ORDER BY v it wrote ORDER BY w — the other column. */
+test('code review: compact ORDER BY is not captured by another column\'s alias', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE b(v INT, w INT, z INT); INSERT INTO b VALUES (3,1,0),(9,0,1),(4,5,2),(7,5,3);');
+  const rows = sql => json(db.prepare(sql).all().map(r => Object.values(r)));
+  const shapes = [
+    'SELECT v AS w, w AS v FROM b ORDER BY v DESC',
+    'SELECT v AS w, w AS v FROM b ORDER BY w DESC LIMIT 2',
+    'SELECT * FROM (SELECT v AS w, w AS v FROM b ORDER BY v DESC LIMIT 2) t',
+    /* z is not in the guessed table (nothing names it on b), so it is written as is */
+    'SELECT v AS w FROM (SELECT * FROM b ORDER BY w DESC LIMIT 3) t ORDER BY z',
+  ];
+  for (const sql of shapes) {
+    const app = loadApp();
+    app.state.dialect = 'postgres';
+    graphFromSQL(app, sql);
+    const compact = app.buildCompactSQL();
+    assert.deepEqual(rows(compact), rows(sql), compact);
+  }
+  return `${shapes.length} swapped or unseen sort columns exact in compact`;
+});
+
 let passed = 0;
 for (const item of cases) {
   try {

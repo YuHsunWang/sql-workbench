@@ -1951,10 +1951,14 @@ function buildCompactSQL(){
      被「選欄位」拿掉的欄，沒有 DISTINCT / GROUP BY 時照樣排得到；排不到就回 null */
   const sortExpr = (b, key) => {
     const item = b.items ? b.items.find(i=>i.name === key) : b.extras.find(e=>e.name === key);
-    if(item) return usable(item) ? inline(item) : q(key);
+    /* ORDER BY 裡沒寫表名的欄名先對輸出欄名：SELECT v AS w, w AS v 時寫 ORDER BY w，
+       排的是輸出的 w（原本的 v）。撞到別的輸出欄名時改寫輸出名，或排不到 */
+    const captured = x => !!b.items && b.items.some(i=>i !== item && q(i.name).toLowerCase() === x.sql.toLowerCase());
+    if(item) return usable(item) && !captured(item) ? inline(item) : q(key);
     if(b.groupBy || b.distinct) return null;
-    const x = b.items ? (b.extras.find(e=>e.name === key) || b.src[key]) : b.src[key];
-    return usable(x) ? inline(x) : null;
+    /* 推測的表只知道查詢用到的欄：不在清單裡的就照寫名字（跟 lookOr 一樣） */
+    const x = (b.items ? (b.extras.find(e=>e.name === key) || b.src[key]) : b.src[key]) || {sql:q(key), kind:'col'};
+    return usable(x) && !captured(x) ? inline(x) : null;
   };
   /* n 能不能併進 b（b 的最後一步就是 n 的來源，而且只餵給 n） */
   function canMerge(b, n){
@@ -1984,6 +1988,9 @@ function buildCompactSQL(){
       if(n.cols && n.cols.length)
         b.items = n.cols.map((c, i)=>Object.assign({}, lookOr(b, c), {name:(n.outCols || n.cols)[i]}));
     } else if(n.type === 'groupby'){
+      /* 分組、去重之前的排序（沒有 LIMIT 才併得進來）不影響有哪些列；留著的話會變成外層的
+         ORDER BY，排的是分組後已經不在的欄，PostgreSQL 直接報錯。一步一段格式本來就不寫 */
+      b.order = null;
       const keyOf = k => inline(lookOr(b, k));
       /* SELECT 和 GROUP BY 寫一模一樣的式子（SQL Server 要求一致） */
       b.groupBy = n.keys.map(keyOf);
@@ -1991,7 +1998,7 @@ function buildCompactSQL(){
         .concat(n.aggs.map(a=>({name:a.as, kind:'agg',
           sql:(a.fn === 'COUNT_DISTINCT' ? 'COUNT(DISTINCT ' : a.fn+'(')+(a.col === '*' ? '*' : keyOf(a.col))+')'})));
     } else if(n.type === 'distinct'){
-      b.distinct = true;
+      b.distinct = true; b.order = null;
     } else if(n.type === 'sort'){
       const lim = Number(n.limit) || 0, offset = Math.max(0, Number(n.offset) || 0);
       b.order = sortKeys(n).map(k=>(sortExpr(b, k.by) || q(k.by))+' '+k.dir);
@@ -2317,13 +2324,12 @@ function joinSQLParts(n, ref, tblAs){
   Lc.forEach(c=>{ cols[c] = A+'.'+q(c); });
   lay.keep.forEach(k=>{ cols[k.name] = B+'.'+q(k.src); });
   /* MySQL 沒有 FULL JOIN：先 LEFT JOIN，再補上右表沒配到的列（右表 LEFT JOIN 左表、左邊是 NULL 的）。
-     配得到的列，左邊第一組條件的欄位一定不是 NULL（NULL 配不上任何東西），所以拿它分辨 */
+     配得到的列，左邊第一組條件的欄位一定不是 NULL（NULL 配不上任何東西），所以拿它分辨。
+     沒有條件（ON 1 = 1）時右表每一列都配得到左表每一列，只有左表整張是空的才會沒配到 */
   let opaque = null;
   if(n.joinType === 'FULL' && state.dialect === 'mysql')
-    opaque = ks.length
-      ? '  SELECT '+list(sel, 9)+'\n  FROM '+from('LEFT')+'\n  UNION ALL\n  SELECT '+list(sel, 9)+'\n  FROM '+ref(R)+tblAs+B+'\n  LEFT JOIN '+ref(L)+tblAs+A+'\n    ON '+on+
-        '\n  WHERE '+castSQL(ks[0].lfn, A+'.'+q(ks[0].left))+' IS NULL'
-      : '  SELECT '+list(sel, 9)+'\n  FROM '+from('LEFT')+' /* MySQL 的 FULL JOIN 要有對照條件 */';
+    opaque = '  SELECT '+list(sel, 9)+'\n  FROM '+from('LEFT')+'\n  UNION ALL\n  SELECT '+list(sel, 9)+'\n  FROM '+ref(R)+tblAs+B+'\n  LEFT JOIN '+ref(L)+tblAs+A+'\n    ON '+on+
+      '\n  WHERE '+(ks.length ? castSQL(ks[0].lfn, A+'.'+q(ks[0].left))+' IS NULL' : 'NOT EXISTS (SELECT 1 FROM '+ref(L)+')');
   return {sel:sel, from:from(n.joinType), cols:cols, opaque:opaque, out:lay.cols};
 }
 /* 「加一欄」的三種步驟（分類貼標、算欄位、視窗）算出那一欄的式子，不含 AS。
@@ -4670,17 +4676,19 @@ function splitTable(txt){
     }
     if(ch === '"' && !cell.trim()){ cell = ''; quoted = true; i++; continue; }
     if(ch === delim){ endCell(); i++; continue; }
+    /* 整行空白不是一列；「,」是一列全空的資料，"" 是一格空字串，都要留 */
+    if(ch === '\n' && !row.length && !started && !cell.trim()){ cell = ''; i++; continue; }
     if(ch === '\n'){ endCell(); rows.push(row); row = []; i++; continue; }
     cell += ch; i++;
   }
-  if(cell || row.length){ endCell(); rows.push(row); }
-  return rows.map(r=>r.map(c=>c.trim()))
-    /* psql 的分隔線、(12 rows) 和空行不是資料 */
-    .filter(r=>r.some(c=>c !== '') && !(r.length === 1 && /^[-+=\s]+$|^\(\d+ rows?\)$/i.test(r[0])) && !r.every(c=>/^[-+=]*$/.test(c)));
+  if(cell.trim() || started || row.length){ endCell(); rows.push(row); }
+  return rows.map(r=>r.map(c=>c.trim()));
 }
 /* 資料庫查出來的欄位清單（table_name, column_name, data_type[, 說明]）→ 一次建好所有表 */
 function parseColumnList(txt){
-  const rows = splitTable(txt);
+  /* psql 的分隔線、(12 rows) 不是欄位。只在這裡濾：CSV 裡的 --- 或 (12 rows) 是使用者的資料 */
+  const rows = splitTable(txt)
+    .filter(r=>r.some(c=>c !== '') && !(r.length === 1 && /^[-+=\s]+$|^\(\d+ rows?\)$/i.test(r[0])) && !r.every(c=>/^[-+=]*$/.test(c)));
   const out = {}, skipped = [];
   if(!rows.length) return {tables:out, skipped:skipped};
   let ti = 0, ci = 1, yi = 2, mi = 3, body = rows;
@@ -6232,9 +6240,11 @@ function parseSQLText(text){
             if(args.length > 2) w.def = args[2];
           }
           needOp('(');
+          /* 留著整個欄位節點、不只欄名：JOIN 會把右表撞名的欄改名，ORDER BY b.v 要等建圖時
+             換成 v_2；只留 v 就會照左表的 v 排 */
           const winCol = what => { const t0 = at(), e = parseExpr();
             if(e.kind !== 'col') fail('視窗的 '+what+' 目前只能是欄位，不能是算式或函式', t0);
-            return e.col; };
+            return e; };
           if(isKw('PARTITION') && isKw('BY',1)){ p += 2; do { w.partitionBy.push(winCol('PARTITION BY')); } while(eatOp(',')); }
           if(isKw('ORDER') && isKw('BY',1)){
             p += 2;
@@ -7080,7 +7090,14 @@ function astToGraph(parsed){
     swapScalars(c.items, aggregated ? 'post' : 'pre');
     swapScalars(c.having, 'post');
     const joinScalar = h => {
-      h.node.stmt.core.items[0].alias = h.as;
+      const st = h.node.stmt, item = st.core.items[0];
+      /* 子查詢自己的 ORDER BY x、ORDER BY 1 排的是改名前的輸出欄：跟著換成輔助欄的名字，
+         不然排序那一步找不到 x */
+      const old = String(item.alias || exprName(item.expr)).toLowerCase();
+      const renamed = (by, tbl) => !tbl && by && String(by).toLowerCase() === old;
+      if(renamed(st.tail.orderBy, st.tail.byTbl)) st.tail.orderBy = h.as;
+      (st.tail.more || []).forEach(m=>{ if(renamed(m.by, m.tbl)) m.by = h.as; });
+      item.alias = h.as;
       const right = buildStatement(h.node.stmt, true);
       const jn = add('join', {joinType:'LEFT', keys:[], cross:true});
       conn(cur, jn, 0); conn(right, jn, 1); cur = jn;
@@ -7222,13 +7239,13 @@ function astToGraph(parsed){
       const n = add('window', {
         fn: e.fn,                       /* 其他函式在解析時就擋掉了 */
         col: (!a0 || a0.kind === 'star' || e.fn === 'NTILE') ? '*' : exprName(a0),
-        partitionBy: e.w.partitionBy.slice(),
-        orderBy: e.w.orderBy || '',
+        partitionBy: e.w.partitionBy.map(r=>r.col),
+        orderBy: e.w.orderBy ? e.w.orderBy.col : '',
         dir: e.w.dir,
         as: it.alias || exprName(e)
       });
       /* 只在用到時才記，舊的步驟和存檔長得跟以前一樣 */
-      if(e.w.thenBy && e.w.thenBy.length) n.thenBy = e.w.thenBy.map(k=>({col:k.col, dir:k.dir}));
+      if(e.w.thenBy && e.w.thenBy.length) n.thenBy = e.w.thenBy.map(k=>({col:k.col.col, dir:k.dir}));
       if(e.w.frame) n.frame = e.w.frame;
       if(e.w.tiles !== undefined) n.tiles = e.w.tiles;
       if(e.w.offset !== undefined) n.offset = e.w.offset;
@@ -7315,7 +7332,11 @@ function astToGraph(parsed){
       const need = [s.by].concat((s.more || []).map(m=>m.by)).filter(Boolean);
       const into = nested && cur.type === 'select' && !st.unions.length ? edges.find(e=>e.to === cur.id) : null;
       const before = into ? selectInput.get(cur.id) : null;
-      if(into && cols && need.some(b=>cols.indexOf(b) < 0) && before && need.every(b=>before.indexOf(b) >= 0)){
+      /* ORDER BY w, x 混著沒選的欄和輸出別名（v AS x）：搬到「選欄位」前面時，x 要換回原本的 v */
+      const srcName = b => { const i = into && cur.outCols ? cur.outCols.indexOf(b) : -1; return i >= 0 ? cur.cols[i] : b; };
+      if(into && cols && need.some(b=>cols.indexOf(b) < 0) && before && need.every(b=>before.indexOf(srcName(b)) >= 0)){
+        s.by = srcName(s.by);
+        (s.more || []).forEach(m=>{ m.by = srcName(m.by); });
         into.to = s.id;
         conn(s, cur);
         builtCols.set(s.id, before);

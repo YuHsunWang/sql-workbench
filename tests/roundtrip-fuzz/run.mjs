@@ -154,7 +154,9 @@ scalar_sub: i => pick([
   `SELECT id FROM orders WHERE amount > (SELECT paid FROM payments WHERE paid > 1000 LIMIT 1) OR id < ${i%4} ORDER BY id`,
   'SELECT id, COALESCE((SELECT MAX(paid) FROM payments WHERE order_id > 100), -1) AS p FROM orders ORDER BY id',
   `SELECT customer_id, SUM(amount - (SELECT MIN(amount) FROM orders)) AS s FROM orders GROUP BY customer_id ORDER BY customer_id`,
-  `SELECT o.id, c.city FROM orders o CROSS JOIN customers c WHERE c.id = ${1+i%5} ORDER BY o.id`]),
+  `SELECT o.id, c.city FROM orders o CROSS JOIN customers c WHERE c.id = ${1+i%5} ORDER BY o.id`,
+  // The value is renamed sub_value; the subquery's own ORDER BY x / 1 / (order_id, x) must follow it.
+  `SELECT id, (SELECT paid AS x FROM payments ORDER BY ${pick(['x DESC','1 DESC','order_id DESC, x','x, id'])} LIMIT 1) AS c FROM orders ORDER BY id`]),
 // p.id (renamed id_2 by the JOIN) and c.id (the INNER JOIN key folded into the left one) used to point at the
 // left table's column once the table name was dropped — in WHERE, SELECT, ORDER BY and a later JOIN's ON.
 join_renamed: i => pick([
@@ -162,7 +164,10 @@ join_renamed: i => pick([
   `SELECT o.id, c.id AS cid FROM orders o JOIN customers c ON o.customer_id = c.id WHERE c.id <> ${1+i%4} ORDER BY o.id`,
   'SELECT o.id, o2.amount AS other FROM orders o JOIN orders o2 ON o.customer_id = o2.customer_id WHERE o2.amount > o.amount ORDER BY o.id, o2.id',
   `SELECT a.id, c.city FROM orders a JOIN orders b ON a.id = b.id JOIN customers c ON b.customer_id = c.id${i%2?" WHERE c.city <> 'Taipei'":''} ORDER BY a.id`,
-  `SELECT o.id, p.paid FROM orders o JOIN payments p ON o.id = p.order_id ORDER BY p.id ${i%2?'DESC':'ASC'}`]),
+  `SELECT o.id, p.paid FROM orders o JOIN payments p ON o.id = p.order_id ORDER BY p.id ${i%2?'DESC':'ASC'}`,
+  // A window's PARTITION BY / ORDER BY p.id kept only "id" and ordered by the left table's id.
+  `SELECT o.id, p.id AS pid, ${pick(['LAG(p.paid) OVER (ORDER BY p.id DESC)','ROW_NUMBER() OVER (PARTITION BY o.id ORDER BY p.id DESC)',
+    'SUM(p.paid) OVER (ORDER BY o.amount, p.id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)'])} AS w FROM orders o JOIN payments p ON o.id = p.order_id ORDER BY o.id, p.id`]),
 // FULL OUTER JOIN was refused (issue #5). Unmatched rows on both sides survive; the right key stays as id_2.
 full_join: i => pick([
   `SELECT o.id, c.id AS cid, c.city FROM orders o FULL OUTER JOIN customers c ON o.customer_id = c.id ORDER BY o.id, c.id`,
