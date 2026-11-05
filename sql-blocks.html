@@ -2269,7 +2269,7 @@ function renderNodes(){
     const lint = lintFor(n.id);
     const flag = lint.length
       ? '<span class="nlint '+(lint.some(f=>f.level === 'warn') ? 'warn' : 'info')+'" title="'+
-        esc(lint.map(f=>f.msg.replace(/<[^>]+>/g, '')).join('\n'))+'">!</span>' : '';
+        attrText(lint.map(f=>f.msg).join('\n'))+'">!</span>' : '';
     let html = '<div class="nhead">'+ICONS[n.type]+'<b>'+m.label+'</b>'+flag+note+'</div>'+
                '<div class="nbody">'+nodeSummary(n)+'</div>';
     const flow = rowFlow(n);
@@ -2909,6 +2909,14 @@ function colChoices(avail, cur, ok){
 const colChip = (c, on, attr) => '<button class="chip" '+attr+'="'+c+'" aria-pressed="'+on+'"><b>'+c+'</b>'+
   (chOf(c) ? '<i>'+chOf(c)+'</i>' : '')+'</button>';
 function esc(v){ return String(v == null ? '' : v).replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+/* 已經是 HTML 的訊息（使用者的值用 esc 跳脫過）要放進 title / aria-label：
+   拿掉標籤、把實體還原成原本的字，再整段跳脫一次（連 & 一起），
+   不然 &lt; 會被當成字面再跳脫一次，提示裡就出現 &amp;lt; */
+const HTML_ENTITY = {lt:'<', gt:'>', quot:'"', amp:'&', '#39':"'"};
+function attrText(html){
+  const text = String(html).replace(/<[^>]+>/g, '').replace(/&(lt|gt|quot|amp|#39);/g, (m, k)=>HTML_ENTITY[k]);
+  return esc(text.replace(/&/g, '&amp;'));
+}
 const OPS = ['>=','>','<=','<','=','<>'];
 
 function renderInspector(){
@@ -4185,7 +4193,7 @@ function vennHTML(o){
   const legend = o.sets.map((s, i)=>
     '<div'+(foc.indexOf(i) >= 0 ? ' class="vcur"' : '')+'><i style="background:'+SET_COLORS[i]+'"></i>'+SET_TAGS[i]+' '+esc(s.name)+
     (s.text ? '：<code>'+esc(s.text)+'</code>' : '')+(foc.indexOf(i) >= 0 ? '　← 這一塊' : '')+'</div>').join('');
-  return '<div class="venn"><svg viewBox="0 0 '+W+' '+L.h+'" role="img" aria-label="'+esc(o.caption.replace(/<[^>]+>/g, ''))+'">'+
+  return '<div class="venn"><svg viewBox="0 0 '+W+' '+L.h+'" role="img" aria-label="'+attrText(o.caption)+'">'+
          '<defs>'+defs+'</defs>'+frame+fill+marks+spots+'</svg>'+
          '<div class="vlegend">'+legend+'<div><i class="vkeepdot"></i>有底色 = 會留下來</div></div>'+
          '<p class="vcap">'+o.caption+'</p></div>';

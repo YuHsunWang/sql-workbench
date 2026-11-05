@@ -3050,6 +3050,37 @@ test('AI SQL check: each trap fires on the wrong query and stays quiet on the ri
   return `${pairs.length} traps × fire / quiet; dialect- and evidence-aware`;
 });
 
+/* The flag's tooltip is made from the check's message, which is already HTML
+   with the user's names escaped. Escaping it again shows "&lt;" in the tooltip
+   instead of "<" (issue #6); not escaping it would let a name become a tag. */
+test('AI SQL check: the flag tooltip shows the name as typed, once escaped', () => {
+  const sql = 'SELECT * FROM (SELECT s.name, sc.score AS sc2 FROM students s LEFT JOIN scores sc ON s.student_id = sc.student_id) d WHERE d.sc2 >= 60';
+  /* what a browser does once with an attribute value */
+  const decode = s => s.replace(/&(lt|gt|quot|amp|#39);/g, (m, k) => ({lt:'<', gt:'>', quot:'"', amp:'&', '#39':"'"}[k]));
+  const names = ['score < 60 & up', '"><img src=x onerror=alert(1)>'];
+  for (const name of names) {
+    const app = loadApp();
+    app.state.edge = true; app.state.dialect = 'postgres';
+    app.state.schema = app.demoSchema();
+    const g = app.astToGraph(app.parseSQLText(sql));
+    installGraph(app, g, g.schema);
+    /* the alias renamed in the panel, where the paste-time name check does not run */
+    const sel = g.nodes.find(n => n.type === 'select'), filter = g.nodes.find(n => n.type === 'filter');
+    sel.outCols[sel.outCols.indexOf('sc2')] = name;
+    filter.col = name;
+    app.state.lint = app.lintGraph();
+    app.renderNodes();
+    const flagged = app.document.getElementById('surface').children
+      .map(el => /<span class="nlint[^"]*" title="([^"]*)">/.exec(el.innerHTML)).filter(Boolean);
+    assert.equal(flagged.length, 1, `one step flagged for ${name}`);
+    const title = flagged[0][1];
+    assert.doesNotMatch(title, /</, `no raw tag in the attribute for ${name}`);
+    assert.ok(decode(title).includes('右邊的 ' + name + '。'), `tooltip reads the name as typed: ${decode(title)}`);
+    assert.doesNotMatch(decode(title), /&(lt|gt|quot|amp);/, `no entity left after one decode: ${decode(title)}`);
+  }
+  return `${names.length} names read back as typed in the flag tooltip`;
+});
+
 /* Review of PR #1 (five findings). Each case reproduces the reported sequence. */
 
 /* COALESCE(city, '<unknown>') imported fine, but its saved snapshot was rejected
