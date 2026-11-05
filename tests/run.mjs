@@ -2998,6 +2998,89 @@ test('AI SQL check: each trap fires on the wrong query and stays quiet on the ri
   return `${pairs.length} traps × fire / quiet; dialect- and evidence-aware`;
 });
 
+/* Review of PR #1 (five findings). Each case reproduces the reported sequence. */
+
+/* COALESCE(city, '<unknown>') imported fine, but its saved snapshot was rejected
+   because the kept SQL argument contains <, so a reload replaced the canvas with
+   the sample and the share link would not open. */
+test('review #1: a quoted literal with < in a function argument survives reload and sharing', async () => {
+  const app = loadApp();
+  graphFromSQL(app, "SELECT COALESCE(city, '<unknown>') AS c FROM t");
+  const saved = JSON.stringify(app.snapshot());
+  assert.equal(app.validSnapshot(JSON.parse(saved)), true);
+  const back = loadApp({'sqlblocks.graph': saved});
+  assert.equal(back.buildSQL(), app.buildSQL());
+  /* an argument that is not a quoted literal still may not carry markup */
+  const evil = JSON.parse(saved);
+  evil.nodes.find(n => n.type === 'derive').args[1] = '<img src=x onerror=alert(1)>';
+  assert.equal(app.validSnapshot(evil), false);
+  const code = await app.encodeShare(saved);
+  assert.equal(app.validSnapshot(JSON.parse(await app.decodeShare(code))), true);
+  return "'<unknown>' kept across reload and share; bare markup still refused";
+});
+
+/* Undo, then edit again within 1.2 s: the new keystroke was merged into the restored
+   entry, so the next undo removed the whole block instead of the new edit. */
+test('review #2: typing right after an undo is a new undo step', () => {
+  const app = loadApp();
+  app.addNode('sort', {by:'course_id', dir:'DESC', limit:0, offset:0});
+  const sort = () => app.state.nodes.find(n => n.type === 'sort');
+  sort().limit = 5; app.recordHistory(true);
+  app.undo();
+  assert.equal(sort().limit, 0);
+  sort().limit = 7; app.recordHistory(true);
+  app.undo();
+  assert.ok(sort(), 'the sort block is still there');
+  assert.equal(sort().limit, 0);
+  return 'undo after re-editing reverts only the new limit';
+});
+
+/* NOW() keeps a "no arguments" flag; after switching the function to ABS and picking
+   score in the panel, the SQL still said ABS() — which does not run. */
+test('review #3: picking a function or its column in the panel drops the no-argument flag', () => {
+  const app = loadApp();
+  const g = graphFromSQL(app, 'SELECT NOW() AS ts FROM scores');
+  const d = g.nodes.find(n => n.type === 'derive');
+  app.state.sel = d.id;
+  const change = (f, value) => app.inspector.listeners.change({target:{dataset:{f}, value}});
+  change('fn', 'ABS');
+  change('left', 'score');
+  assert.match(app.buildSQL(), /ABS\(score\) AS ts/);
+  return 'NOW() → ABS(score) after two panel edits';
+});
+
+/* A DISTINCT between the one-to-many JOIN and the SUM removes the copies; the check
+   still claimed SUM double-counts. It now looks at what the aggregate receives. */
+test('review #4: no double-counting warning once DISTINCT has removed the copies', () => {
+  const schema = {
+    orders:{label:'', cols:[{name:'id'}, {name:'amount'}], rows:[[1, 10], [2, 20]]},
+    items:{label:'', cols:[{name:'order_id'}, {name:'sku'}], rows:[[1, 'a'], [1, 'b'], [2, 'c']]},
+  };
+  const lint = sql => { const app = loadApp(); const g = graphFromSQL(app, sql); installGraph(app, g, schema); return app.lintGraph().map(f => f.msg); };
+  assert.ok(!lint('SELECT SUM(d.amount) AS total FROM (SELECT DISTINCT o.id, o.amount FROM orders o JOIN items i ON o.id = i.order_id) d').some(m => /一對多/.test(m)));
+  assert.ok(lint('SELECT SUM(o.amount) AS total FROM orders o JOIN items i ON o.id = i.order_id').some(m => /一對多/.test(m)));
+  /* DISTINCT that keeps a right-side column does not remove the copies */
+  assert.ok(lint('SELECT SUM(d.amount) AS total FROM (SELECT DISTINCT o.id, o.amount, i.sku FROM orders o JOIN items i ON o.id = i.order_id) d').some(m => /一對多/.test(m)));
+  return 'quiet after DISTINCT o.id, o.amount; fires without it and when DISTINCT keeps i.sku';
+});
+
+/* Following the integer-division advice (divisor 2.0) produced student_id / '2.0':
+   a string, which PostgreSQL rejects. A decimal operand is written as typed. */
+test('review #5: a decimal divisor typed in the panel is written as a number', () => {
+  const app = loadApp(); app.state.dialect = 'postgres';
+  const g = graphFromSQL(app, 'SELECT student_id / 2 AS half FROM scores');
+  installGraph(app, g, app.demoSchema());
+  assert.ok(app.lintGraph().some(f => /捨去小數/.test(f.msg)));
+  g.nodes.find(n => n.type === 'derive').right = '2.0';
+  assert.match(app.buildSQL(), /student_id \/ 2\.0 AS half/);
+  assert.ok(!app.lintGraph().some(f => /捨去小數/.test(f.msg)));
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE scores(student_id INTEGER); INSERT INTO scores VALUES (3);');
+  assert.deepEqual(json(db.prepare(app.buildSQL().replace(/^\/\*.*\*\/\n/, '')).all().map(r => r.half)), [1.5]);
+  db.close();
+  return 'warning clears and student_id / 2.0 = 1.5 in SQLite';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {

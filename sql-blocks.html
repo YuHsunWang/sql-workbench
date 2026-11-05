@@ -1374,7 +1374,12 @@ const isNum = v => numish(v) !== null;
 const strLit = v => "'"+String(v).replace(/\\/g, state.dialect === 'mysql' ? '\\\\' : '\\').replace(/'/g,"''")+"'";
 const lit = v => isNum(v) ? String(numish(v)) : strLit(v);
 const sqlLit = (v, str) => v === null ? 'NULL' : str ? strLit(v) : lit(v);
-function operand(v, cols){ return cols.indexOf(v) >= 0 ? q(v) : (isNum(v) ? String(Number(v)) : lit(v)); }
+function operand(v, cols){
+  if(cols.indexOf(v) >= 0) return q(v);
+  /* 2.0 原樣保留：寫成 '2.0' 是字串，寫成 2 是整數除法 —— 都不是使用者填的意思 */
+  if(/^-?\d+\.\d+$/.test(String(v).trim())) return String(v).trim();
+  return isNum(v) ? String(Number(v)) : lit(v);
+}
 /* Validate the calendar as well as the shape; Date.parse alone accepts February 30. */
 function validDate(v){
   if(typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v) || v.slice(0,4) === '0000') return false;
@@ -2046,7 +2051,16 @@ function lintGraph(){
       const keyCols = new Set(fan ? joinKeys(fan).map(k=>k.left) : []);
       const counts = n.aggs.filter(a=>['SUM','COUNT','AVG'].indexOf(a.fn) >= 0 &&
         leftCols.indexOf(a.col) >= 0 && !keyCols.has(a.col) && n.keys.indexOf(a.col) < 0);
-      if(fan && counts.length){
+      /* 中間如果有 DISTINCT（或另一個 GROUP BY）把複製出來的列併回去，就沒有重算。
+         看彙總真正收到的資料：左邊的欄位在那裡還有重複的列，才算重算 */
+      const survives = () => {
+        const S = evalNode(srcOf(n.id, 0));
+        const idx = leftCols.map(c=>S.cols.indexOf(c)).filter(i=>i >= 0);
+        if(!idx.length) return false;
+        const seen = new Set();
+        return S.rows.some(r=>{ const k = JSON.stringify(idx.map(i=>r[i])); if(seen.has(k)) return true; seen.add(k); return false; });
+      };
+      if(fan && counts.length && survives()){
         add(n, 'warn', '前面的 JOIN 是一對多：示意資料裡右邊同一個對照值最多有 '+joinFanout(fan)+' 列，左邊那一列就被複製成 '+joinFanout(fan)+' 列。'+
           '這裡的 '+counts.map(a=>code(a.fn+'('+a.col+')')).join('、')+' 會把同一筆<strong>算好幾次</strong>。'+
           '先把右表彙總成一列一個值再 JOIN，或確認右表的對照欄不會重複。');
@@ -2893,6 +2907,9 @@ inspector.addEventListener('change', e=>{
   else if(f === 'all') n.all = (v === 'x');
   else if(n.type === 'filter') quoteForText(n, n, f, v);
   else n[f] = v;
+  /* 匯入的 NOW() 記著「沒有參數」；使用者換了函式或選了參數欄位，就照新的寫，
+     不然會寫出 ABS() 這種跑不動的 SQL */
+  if(n.type === 'derive' && (f === 'fn' || f === 'left')) delete n.noArgs;
   prune(n);
   refresh(true);
 });
@@ -4170,6 +4187,8 @@ function redo(){
   restoreGraph(JSON.parse(snap));
 }
 function restoreGraph(s){
+  /* 復原／重做之後再打字是新的一筆，不能併進剛剛那筆，不然會蓋掉復原回來的狀態 */
+  hist.lastSoft = false;
   state.schema = s.schema; state.nodes = s.nodes; state.edges = s.edges; state.uid = s.uid;
   QUOTED_SRC.clear(); (s.quoted || []).forEach(x=>QUOTED_SRC.add(x));
   setSrcLabel(s.src || '');
@@ -4216,6 +4235,15 @@ function validSnapshot(s){
     }
     if(o && typeof o === 'object') Object.keys(o).forEach(k=>{
       if(/[<"]/.test(k)) ok = false;
+      /* 函式步驟照抄的參數原文：COALESCE(city, '<unknown>') 的 '<unknown>' 是 SQL 字串常值，
+         畫出來前都會跳脫，可以帶 < 和 "；其他形狀（像欄名）照樣擋 */
+      if(k === 'args' && Array.isArray(o[k])){
+        o[k].forEach(a=>{
+          if(typeof a === 'string'){ if(/[<"]/.test(a) && !/^'(?:[^']|'')*'$/.test(a.trim())) ok = false; }
+          else scan(a, '', o[k], inRows);
+        });
+        return;
+      }
       scan(o[k], k, o, inRows || (k === 'rows' && parent === s.schema));
     });
   })(s, '', null, false);
