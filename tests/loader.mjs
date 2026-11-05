@@ -73,6 +73,8 @@ export function loadApp(stored = {}) {
     },
     navigator: { clipboard: { async writeText() {} } },
     setTimeout() { return 0; }, clearTimeout() {},
+    /* the share-link codec runs on the real web APIs Node also has */
+    TextEncoder, TextDecoder, CompressionStream, DecompressionStream, Blob, Response, btoa, atob,
     addEventListener() {}, requestAnimationFrame() { return 0; },
   };
   context.window = context;
@@ -91,6 +93,7 @@ export function loadApp(stored = {}) {
     'orFromPlain', 'orAddGroup', 'orAddCond', 'orDelTerm', 'isOrFilter',
     'renderInspector', 'inspector', 'buildSteps', 'orVenn', 'joinPairsVenn', 'andChain', 'andVenn', 'andAfter', 'andFromPlain', 'adoptCols', 'colChoices',
     'prune', 'renderStage', 'rowFlow', 'sqlHTML', 'stepIndexFor', 'select',
+    'snapshot', 'validSnapshot', 'undo', 'redo', 'recordHistory', 'hist', 'encodeShare', 'decodeShare',
   ];
   const marker = '})();';
   const at = match[1].lastIndexOf(marker);

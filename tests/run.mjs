@@ -2832,10 +2832,100 @@ test('linking: every block maps to its SQL segment and its step; JOIN fan-out is
   return 'segments cover every block once, text unchanged, click jumps to step, 3 → 5 rows flagged';
 });
 
+/* Reloading the page used to throw the whole canvas away. Autosave must bring back
+   every graph an import can produce — including values with < and " in them, which
+   are escaped wherever they are drawn — or a reload silently loses the user's work. */
+test('autosave: every imported graph survives a reload, byte for byte', () => {
+  const bad = `"><img src=x onerror=alert(1)>`;
+  const shapes = [
+    `SELECT * FROM t WHERE city = '${bad}'`,
+    `SELECT * FROM t WHERE city IN ('a', '${bad}') OR qq BETWEEN 1 AND 5`,
+    `SELECT CASE WHEN qq = 5 THEN '${bad}' ELSE city END AS lbl FROM t`,
+    `SELECT '${bad}' AS k FROM t`,
+    'SELECT o.id, c.city FROM o LEFT JOIN c ON o.cid = c.id WHERE c.city IS NULL ORDER BY o.id DESC LIMIT 3',
+    'SELECT o.id FROM o WHERE NOT EXISTS (SELECT 1 FROM p WHERE p.oid = o.id)',
+    'SELECT cid, SUM(price * qty) AS rev, COUNT(DISTINCT sku) AS n FROM o GROUP BY cid HAVING SUM(price * qty) > 10',
+    'SELECT id, RANK() OVER (PARTITION BY cid ORDER BY amt DESC) AS r FROM o',
+    'SELECT "Mixed" FROM t UNION ALL SELECT x FROM u',
+  ];
+  for (const sql of shapes) {
+    const app = loadApp();
+    graphFromSQL(app, sql);
+    const saved = JSON.stringify(app.snapshot());
+    assert.equal(app.validSnapshot(JSON.parse(saved)), true, sql);
+    const stored = {'sqlblocks.graph': saved};
+    const back = loadApp(stored);
+    assert.equal(JSON.stringify({n:back.state.nodes, e:back.state.edges, s:back.state.schema}),
+                 JSON.stringify({n:app.state.nodes, e:app.state.edges, s:app.state.schema}), sql);
+    assert.equal(back.buildSQL(), app.buildSQL(), sql);
+  }
+  /* corrupt storage never stops the page from starting */
+  for (const junk of ['{', 'null', '{"v":1}', JSON.stringify({v:1, schema:{}, nodes:[{id:'n1', type:'nope', x:0, y:0}], edges:[], uid:1})]) {
+    const app = loadApp({'sqlblocks.graph': junk});
+    assert.ok(app.state.nodes.some(n => n.type === 'output'), junk);
+  }
+  return `${shapes.length} imported graphs reload identically; 4 corrupt saves fall back to the sample`;
+});
+
+/* A share link is a URL anyone can craft. Names (tables, columns, aliases) are drawn
+   into HTML, so a link carrying markup in a name, an unknown operator or a dangling
+   edge must be refused as a whole, not partly loaded. */
+test('share link: crafted canvases are refused; real ones round-trip through the URL code', async () => {
+  const app = loadApp();
+  graphFromSQL(app, 'SELECT o.id, c.city FROM o INNER JOIN c ON o.cid = c.id WHERE o.amt >= 10');
+  const good = JSON.parse(JSON.stringify(app.snapshot()));
+  const evil = [
+    s => { s.nodes.find(n => n.type === 'table').table = '<img src=x onerror=alert(1)>'; },
+    s => { s.schema.o.cols[0].name = 'id" onmouseover="alert(1)'; },
+    s => { s.schema['<b>x</b>'] = {label:'', cols:[], rows:[]}; },
+    s => { s.nodes.find(n => n.type === 'filter').op = '<script>'; },
+    s => { const f = s.nodes.find(n => n.type === 'filter'); f.valCol = true; f.val = '<img>'; },
+    s => { s.edges.push({from:'ghost', to:s.nodes[0].id, port:0}); },
+    s => { s.nodes.push({id:'zz', type:'output', x:0, y:0}); },
+    s => { s.nodes[0].x = 'left:0;background:url(x)'; },
+  ];
+  for (const harm of evil) {
+    const s = JSON.parse(JSON.stringify(good));
+    harm(s);
+    assert.equal(app.validSnapshot(s), false, harm.toString());
+  }
+  const code = await app.encodeShare(JSON.stringify(good));
+  assert.match(code, /^[zj][A-Za-z0-9_-]+$/);
+  assert.deepEqual(JSON.parse(await app.decodeShare(code)), good);
+  return `${evil.length} crafted canvases refused; link code ${code.length} chars round-trips`;
+});
+
+/* Undo has to cover every edit, because every edit ends in refresh(); typing in the
+   step panel refreshes on each key and must collapse into one undo step. */
+test('undo / redo: steps back and forth through edits; typing collapses into one step', () => {
+  const app = loadApp();
+  const start = app.state.nodes.length;
+  app.addNode('distinct', {});
+  app.addNode('sort', {by:'course_id', dir:'DESC', limit:0, offset:0});
+  assert.equal(app.state.nodes.length, start + 2);
+  app.undo();
+  assert.equal(app.state.nodes.length, start + 1);
+  app.undo();
+  assert.equal(app.state.nodes.length, start);
+  app.undo();
+  assert.equal(app.state.nodes.length, start, 'nothing before the first state');
+  app.redo(); app.redo();
+  assert.equal(app.state.nodes.length, start + 2);
+  const sort = app.state.nodes.find(n => n.type === 'sort');
+  const depth = app.hist.past.length;
+  for (const lim of [1, 12, 123]) { sort.limit = lim; app.recordHistory(true); }
+  assert.equal(app.hist.past.length, depth + 1, 'three keystrokes are one undo step');
+  app.undo();
+  assert.equal(app.state.nodes.find(n => n.type === 'sort').limit, 0);
+  app.addNode('distinct', {});
+  assert.equal(app.hist.future.length, 0, 'a new edit clears redo');
+  return 'add/add/undo/undo/redo/redo; 3 keystrokes = 1 step; new edit clears redo';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {
-    const detail = item.fn();
+    const detail = await item.fn();
     passed++;
     console.log(`PASS ${item.name} — ${detail}`);
   } catch (error) {

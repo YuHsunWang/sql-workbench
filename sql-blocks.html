@@ -165,6 +165,7 @@ button{font:inherit;color:inherit;cursor:pointer}
   border:1px solid var(--line);background:var(--surface);border-radius:6px;padding:3px 8px;transition:.15s;
 }
 .phead .mini:hover{border-color:var(--ink-3);color:var(--ink)}
+.phead .mini[disabled]{opacity:.42;cursor:default}
 .canvas.drop-on{box-shadow:inset 0 0 0 2px var(--accent)}
 .canvas.panning{cursor:grabbing}
 .phead h2{margin:0;font-family:var(--ui);font-weight:700;font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-2)}
@@ -559,6 +560,7 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
       <button class="btn ghost" id="btn-basic">基本範例</button>
       <button class="btn ghost" id="btn-adv">進階範例</button>
       <button class="btn" id="btn-import">↩ 貼 SQL 反解</button>
+      <button class="btn" id="btn-share" title="把整張畫布放進網址，傳給別人打開就是同一個畫面">分享連結</button>
       <button class="btn" id="btn-copy">複製 SQL</button>
     </div>
   </header>
@@ -567,7 +569,9 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
 
     <section class="panel" id="canvas-panel">
       <div class="phead"><h2>畫布</h2>
-        <button class="mini" id="btn-tidy" style="margin-left:auto">整理版面</button>
+        <button class="mini" id="btn-undo" style="margin-left:auto" title="復原（Ctrl+Z）" disabled>↶ 復原</button>
+        <button class="mini" id="btn-redo" title="重做（Ctrl+Shift+Z）" disabled>↷ 重做</button>
+        <button class="mini" id="btn-tidy">整理版面</button>
         <button class="mini" id="btn-max">⤢ 最大化</button>
         <span class="srcbadge" id="src-label" hidden></span>
         <span class="sub" id="node-count"></span>
@@ -3912,7 +3916,168 @@ function refresh(keepInspector){
     const back = inspector.querySelector(focusKey);
     if(back) back.focus();
   }
+  recordHistory(keepInspector);
 }
+
+/* ============================================================
+   9b. 復原／重做、自動保存、分享連結
+   ============================================================ */
+/* 一份快照就是整張畫布：schema（含示意資料）、步驟、連線、哪些名字要保留引號。
+   每次 refresh 後跟上一份比，不一樣才記一筆 —— 所有改動最後都會走到 refresh，
+   不用在每個按鈕各自記 */
+const HISTORY_MAX = 100;
+const hist = {past:[], future:[], mute:false, lastAt:0, lastSoft:false};
+function snapshot(){
+  return {v:1, schema:state.schema, nodes:state.nodes, edges:state.edges, uid:state.uid,
+          quoted:Array.from(QUOTED_SRC), src:document.getElementById('src-label').textContent || ''};
+}
+function recordHistory(soft){
+  if(hist.mute) return;
+  const snap = JSON.stringify(snapshot());
+  const top = hist.past[hist.past.length - 1];
+  if(snap === top) return;
+  /* 在設定面板裡打字每按一鍵都會 refresh：連續打的字併成一筆，不然要按幾十次復原 */
+  const now = Date.now();
+  if(soft && hist.lastSoft && now - hist.lastAt < 1200 && hist.past.length > 1) hist.past[hist.past.length - 1] = snap;
+  else hist.past.push(snap);
+  if(hist.past.length > HISTORY_MAX) hist.past.shift();
+  hist.future = [];
+  hist.lastAt = now; hist.lastSoft = !!soft;
+  saveGraph(snap);
+  updateHistoryButtons();
+}
+function updateHistoryButtons(){
+  document.getElementById('btn-undo').disabled = hist.past.length < 2;
+  document.getElementById('btn-redo').disabled = !hist.future.length;
+}
+function undo(){
+  if(hist.past.length < 2) return;
+  hist.future.push(hist.past.pop());
+  restoreGraph(JSON.parse(hist.past[hist.past.length - 1]));
+}
+function redo(){
+  if(!hist.future.length) return;
+  const snap = hist.future.pop();
+  hist.past.push(snap);
+  restoreGraph(JSON.parse(snap));
+}
+function restoreGraph(s){
+  state.schema = s.schema; state.nodes = s.nodes; state.edges = s.edges; state.uid = s.uid;
+  QUOTED_SRC.clear(); (s.quoted || []).forEach(x=>QUOTED_SRC.add(x));
+  setSrcLabel(s.src || '');
+  if(!nodeById(state.sel)) { state.sel = null; state.inspOpen = false; }
+  hist.mute = true;
+  try { renderSchema(); refresh(); } finally { hist.mute = false; }
+  saveGraph(JSON.stringify(snapshot()));
+  updateHistoryButtons();
+}
+function saveGraph(snap){
+  try { localStorage.setItem('sqlblocks.graph', snap); } catch(err){ /* 滿了或被擋：不影響使用 */ }
+}
+
+/* 從分享連結或瀏覽器存檔讀回來的東西都不能信：形狀要對，而且名字、值裡不能帶
+   < 或 "——這些字串會被畫進 HTML（規則 3）。比較符號只能出現在 op 欄位，而且要是認得的 */
+const SNAP_OPS = new Set(FILTER_OPS.concat(['+','-','*','/','OR','IN','NOT IN','EXISTS','NOT EXISTS']));
+function validSnapshot(s){
+  if(!s || typeof s !== 'object' || s.v !== 1) return false;
+  if(!s.schema || typeof s.schema !== 'object' || Array.isArray(s.schema)) return false;
+  if(!Array.isArray(s.nodes) || !Array.isArray(s.edges)) return false;
+  const ids = new Set();
+  for(const n of s.nodes){
+    if(!n || typeof n.id !== 'string' || !META[n.type] || ids.has(n.id)) return false;
+    if(typeof n.x !== 'number' || typeof n.y !== 'number') return false;
+    ids.add(n.id);
+  }
+  if(s.nodes.filter(n=>n.type === 'output').length !== 1) return false;
+  for(const e of s.edges){
+    if(!e || !ids.has(e.from) || !ids.has(e.to) || !Number.isInteger(e.port) || e.port < 0) return false;
+  }
+  if(!Number.isInteger(s.uid) || s.uid < 0) return false;
+  if(s.quoted && !Array.isArray(s.quoted)) return false;
+  /* 值（篩選值、CASE 的結果、固定值、註記、示意資料）一律跳脫後才畫，可以帶任何字；
+     名字（表名、欄名、別名）匯入時就擋掉 < 和 "，這裡也一樣擋 */
+  const valueOK = (key, parent) => key === 'note' || key === 'literal' ||
+    (key === 'val' && !parent.valCol) || (key === 'then' && !parent.thenCol) || (key === 'other' && !parent.otherCol);
+  let ok = true;
+  (function scan(o, key, parent, inRows){
+    if(!ok) return;
+    if(typeof o === 'string'){
+      if(key === 'op' || key === 'form'){ if(!SNAP_OPS.has(o)) ok = false; }
+      else if(/[<"]/.test(o) && !inRows && !(parent && !Array.isArray(parent) && valueOK(key, parent))) ok = false;
+      return;
+    }
+    if(o && typeof o === 'object') Object.keys(o).forEach(k=>{
+      if(/[<"]/.test(k)) ok = false;
+      scan(o[k], k, o, inRows || (k === 'rows' && parent === s.schema));
+    });
+  })(s, '', null, false);
+  return ok;
+}
+
+/* 分享連結：整張畫布壓縮後放在網址 # 後面，不會送到任何伺服器 */
+const b64url = bytes => { let s = ''; bytes.forEach(b=>{ s += String.fromCharCode(b); });
+  return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); };
+const unb64url = str => { const s = atob(str.replace(/-/g,'+').replace(/_/g,'/'));
+  return Uint8Array.from(s, c=>c.charCodeAt(0)); };
+async function encodeShare(json){
+  const raw = new TextEncoder().encode(json);
+  if(typeof CompressionStream === 'function'){
+    const buf = await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer();
+    return 'z' + b64url(new Uint8Array(buf));
+  }
+  return 'j' + b64url(raw);
+}
+async function decodeShare(code){
+  const kind = code[0], bytes = unb64url(code.slice(1));
+  if(kind === 'j') return new TextDecoder().decode(bytes);
+  if(kind === 'z' && typeof DecompressionStream === 'function')
+    return await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).text();
+  throw new Error('unsupported');
+}
+async function loadFromHash(){
+  if(typeof location === 'undefined') return false;
+  const m = /^#g=([A-Za-z0-9_-]+)$/.exec(location.hash || '');
+  if(!m) return false;
+  let snap = null;
+  try { snap = JSON.parse(await decodeShare(m[1])); } catch(err){ snap = null; }
+  if(!validSnapshot(snap)){ shareMsg('這個分享連結讀不出來，或含有不能安全載入的內容，已略過。'); return false; }
+  restoreGraph(snap);
+  /* 收到連結的人原本的畫布還在復原紀錄裡，按一下復原就回得去 */
+  hist.past.push(JSON.stringify(snapshot())); hist.future = []; updateHistoryButtons();
+  shareMsg('已載入分享連結的畫布（按復原可回到你原本的畫布）。');
+  return true;
+}
+function shareMsg(txt){
+  const el = document.getElementById('src-label');
+  setSrcLabel(txt);
+  setTimeout(()=>{ if(el.textContent === txt) setSrcLabel(''); }, 4000);
+}
+
+document.getElementById('btn-undo').addEventListener('click', undo);
+document.getElementById('btn-redo').addEventListener('click', redo);
+document.getElementById('btn-share').addEventListener('click', async e=>{
+  const b = e.currentTarget;
+  try {
+    const code = await encodeShare(JSON.stringify(snapshot()));
+    const url = location.href.split('#')[0] + '#g=' + code;
+    try { window.history.replaceState(null, '', url); } catch(err){}
+    await navigator.clipboard.writeText(url);
+    b.textContent = '已複製連結';
+  } catch(err){ b.textContent = '複製失敗'; }
+  setTimeout(()=>{ b.textContent = '分享連結'; }, 1600);
+});
+document.addEventListener('keydown', e=>{
+  if(!(e.ctrlKey || e.metaKey) || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if(k !== 'z' && k !== 'y') return;
+  /* 正在輸入框裡打字時，讓瀏覽器自己的復原處理文字 */
+  const el = document.activeElement;
+  if(el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return;
+  if(!overlay.hidden) return;
+  e.preventDefault();
+  if(k === 'y' || e.shiftKey) redo(); else undo();
+});
+if(typeof addEventListener === 'function') addEventListener('hashchange', ()=>{ loadFromHash(); });
 
 /* ============================================================
    10. 反解：SQL -> 步驟
@@ -5154,10 +5319,21 @@ qall.addEventListener('change', ()=>{
   refresh();
 });
 
-state.schema = demoSchema();
-presetBasic();
-renderSchema();
-refresh();
+/* 開機：上次的畫布還在就接著用（重新整理不再全部歸零），讀不回來才放基本範例。
+   網址帶著分享連結的話，解壓完再換成那一張。 */
+let saved = null;
+try { saved = JSON.parse(localStorage.getItem('sqlblocks.graph') || 'null'); } catch(err){ saved = null; }
+if(validSnapshot(saved)){
+  restoreGraph(saved);
+} else {
+  try { localStorage.removeItem('sqlblocks.graph'); } catch(err){}
+  state.schema = demoSchema();
+  presetBasic();
+  renderSchema();
+  refresh();
+}
+hist.past = [JSON.stringify(snapshot())]; hist.future = []; updateHistoryButtons();
+loadFromHash();
 })();
 </script>
 
