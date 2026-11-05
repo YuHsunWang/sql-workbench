@@ -722,8 +722,8 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
       </div>
       <div id="stmt-pick"></div>
       <div id="parse-out"></div>
-      <p class="supported">看得懂：<code>WITH</code> · <code>SELECT</code> · <code>DISTINCT</code> · <code>FROM</code> · 子查詢 · <code>JOIN … ON</code> · <code>WHERE</code>（AND / OR / 括號）· <code>BETWEEN</code> · <code>IN</code> · <code>IN (SELECT …)</code> · <code>EXISTS</code>（含 NOT；相關條件只支援內外欄位相等且以 AND 串接）· <code>LIKE</code> · <code>IS NULL</code> · <code>CASE WHEN</code> · 四則運算 · 聚合函數 · <code>GROUP BY</code> · <code>HAVING</code> · 視窗函數 <code>OVER</code> · <code>UNION</code> · <code>ORDER BY</code> · <code>LIMIT</code> / <code>TOP</code> / <code>FETCH FIRST</code>。<br>
-      看不懂：相關子查詢（上述等值形式除外）、純量子查詢、<code>ANY / ALL / SOME</code>、<code>PIVOT</code>、<code>LAG / LEAD / NTILE</code>、視窗框架 <code>ROWS BETWEEN</code>、函式包函式（像 <code>UPPER(TRIM(x))</code>、<code>ROUND(AVG(x), 2)</code>）。碰到會直接告訴你卡在第幾行第幾個字。</p>
+      <p class="supported">看得懂：<code>WITH</code> · <code>SELECT</code> · <code>DISTINCT</code> · <code>FROM</code> · 子查詢 · <code>JOIN … ON</code> · <code>WHERE</code>（AND / OR / 括號）· <code>BETWEEN</code> · <code>IN</code> · <code>IN (SELECT …)</code> · <code>EXISTS</code>（含 NOT；相關條件只支援內外欄位相等且以 AND 串接）· <code>LIKE</code> · <code>IS NULL</code> · <code>CASE</code>（含 AND / OR、<code>CASE x WHEN</code>）· 多層算式與函式（<code>price * qty * (1 - d)</code>、<code>UPPER(TRIM(x))</code>、<code>||</code>）· 條件裡的函式（<code>YEAR(d) = 2024</code>）· <code>CURRENT_DATE</code> / <code>INTERVAL</code> · 聚合函數（含 <code>ROUND(AVG(x), 2)</code>、<code>SUM(CASE …) / COUNT(*)</code>）· <code>GROUP BY</code> · <code>HAVING</code> · 視窗函數 <code>OVER</code> · <code>UNION</code> · <code>ORDER BY</code> · <code>LIMIT</code> / <code>TOP</code> / <code>FETCH FIRST</code>。<br>
+      看不懂：相關子查詢（上述等值形式除外）、純量子查詢、<code>ANY / ALL / SOME</code>、<code>PIVOT</code>、<code>FULL OUTER JOIN</code>、非等值 JOIN、<code>LAG / LEAD / NTILE</code>、視窗框架 <code>ROWS BETWEEN</code>。碰到會直接告訴你卡在第幾行第幾個字。</p>
     </div>
   </div>
 </div>
@@ -1766,7 +1766,7 @@ const SAFE_TYPE = /^[A-Za-z_][A-Za-z0-9_ ]*(\(\s*\d+\s*(,\s*\d+\s*)?\))?$/;
 function exprCols(t){
   if(!t || typeof t !== 'object') return [];
   if(t.kind === 'col') return [t.col];
-  return [].concat.apply([], ['a','b'].map(k=>exprCols(t[k])).concat((t.args || []).map(exprCols)));
+  return [].concat.apply([], (Array.isArray(t) ? t : Object.values(t)).map(exprCols));
 }
 /* 整數值但原本寫成小數（2.0）就留著小數點，除法才不會變成整數除法 */
 const decText = (v, dec) => dec && Number.isInteger(v) ? String(v) + '.0' : String(v);
@@ -1787,6 +1787,9 @@ function exprSQL(t){
       return parts.map(wrapExpr).join(' || ');
     }
     case 'call': return t.fn+'('+t.args.map(exprSQL).join(', ')+(t.castType ? ' AS '+t.castType : '')+')';
+    case 'date': return dateSQL(t.v);
+    case 'case': return 'CASE '+t.branches.map(b=>'WHEN '+condExprSQL(b.when)+' THEN '+exprSQL(b.then)).join(' ')+
+                        (t.other ? ' ELSE '+exprSQL(t.other) : '')+' END';
   }
   return '?';
 }
@@ -1818,7 +1821,16 @@ function evalExpr(t, row, cols){
   switch(t.kind){
     case 'col': { const i = cols.indexOf(t.col); return i < 0 ? BY_DB : row[i]; }
     case 'lit': return t.v;
+    case 'date': return t.v;
     case 'kw':  return BY_DB;
+    case 'case': {
+      for(const b of t.branches){
+        const hit = evalCond(b.when, row, cols);
+        if(hit === BY_DB) return BY_DB;
+        if(hit === true) return evalExpr(b.then, row, cols);
+      }
+      return t.other ? evalExpr(t.other, row, cols) : null;
+    }
     case 'arith': {
       const a = evalExpr(t.a, row, cols), b = evalExpr(t.b, row, cols);
       if(a === BY_DB || b === BY_DB) return BY_DB;
@@ -1889,10 +1901,89 @@ function cleanExpr(e){
       if(e.castType) out.castType = e.castRaw;
       return out;
     }
+    case 'date': return {kind:'date', v:e.v};
+    case 'case': {
+      /* 「分類貼標」形狀的 CASE 放在算式裡（price * CASE … END）時也換成一般形狀 */
+      const branches = e.general ? e.branches : e.branches.map(b=>({when:[b.cond], then:b.then}));
+      const out = {kind:'case', branches:branches.map(b=>({when:cleanCond(b.when), then:cleanExpr(b.then)}))};
+      if(e.other) out.other = cleanExpr(e.other);
+      return out;
+    }
     case 'window': refuse('視窗函數放在算式裡目前做不出對應的步驟'); break;
-    case 'case':   refuse('CASE 放在算式裡目前做不出對應的步驟'); break;
   }
   refuse('這個算式目前做不出對應的步驟');
+}
+/* CASE WHEN 的條件：一串用 AND 串的條件，其中一項可以是 OR（每一支又是 AND 串） */
+function cleanCond(list){
+  return {kind:'and', items:list.map(c=>{
+    const refuse = msg => { throw {sqlErr:true, msg:msg, pos:Number.isInteger(c.p) ? c.p : 0}; };
+    switch(c.kind){
+      case 'or':      return {kind:'or', branches:c.branches.map(cleanCond)};
+      case 'cmp':     return {kind:'cmp', op:c.op, l:cleanExpr(c.left), r:cleanExpr(c.right)};
+      case 'between': return {kind:'between', neg:!!c.neg, l:cleanExpr(c.left), lo:cleanExpr(c.lo), hi:cleanExpr(c.hi)};
+      case 'in':      return {kind:'in', neg:!!c.neg, l:cleanExpr(c.left), vals:c.vals.map(cleanExpr)};
+      case 'like':    return {kind:'like', neg:!!c.neg, l:cleanExpr(c.left), pat:cleanExpr(c.pat)};
+      case 'null':    return {kind:'null', neg:!!c.neg, l:cleanExpr(c.left)};
+    }
+    refuse('CASE 裡的這種條件目前做不出對應的步驟');
+  })};
+}
+function condExprSQL(c){
+  switch(c.kind){
+    case 'and': return c.items.map(x=>x.kind === 'or' && c.items.length > 1 ? '('+condExprSQL(x)+')' : condExprSQL(x)).join(' AND ');
+    case 'or':  return c.branches.map(b=>b.items.length > 1 ? '('+condExprSQL(b)+')' : condExprSQL(b)).join(' OR ');
+    case 'cmp': return exprSQL(c.l)+' '+c.op+' '+exprSQL(c.r);
+    case 'between': return exprSQL(c.l)+(c.neg ? ' NOT' : '')+' BETWEEN '+exprSQL(c.lo)+' AND '+exprSQL(c.hi);
+    case 'in':  return exprSQL(c.l)+(c.neg ? ' NOT' : '')+' IN ('+c.vals.map(exprSQL).join(', ')+')';
+    case 'like':return exprSQL(c.l)+(c.neg ? ' NOT' : '')+' LIKE '+exprSQL(c.pat);
+    case 'null':return exprSQL(c.l)+' IS '+(c.neg ? 'NOT ' : '')+'NULL';
+  }
+  return '?';
+}
+/* SQL 的三值邏輯：true / false / null（UNKNOWN）。CASE 只走 true 的那支；
+   算不出來（BY_DB）就整個 CASE 都算不出來 */
+function evalCond(c, row, cols){
+  const ev = t => evalExpr(t, row, cols);
+  switch(c.kind){
+    case 'and': {
+      let res = true;
+      for(const x of c.items){ const v = evalCond(x, row, cols); if(v === BY_DB) return BY_DB; if(v === false) return false; if(v === null) res = null; }
+      return res;
+    }
+    case 'or': {
+      let res = false;
+      for(const b of c.branches){ const v = evalCond(b, row, cols); if(v === BY_DB) return BY_DB; if(v === true) return true; if(v === null) res = null; }
+      return res;
+    }
+    case 'null': { const v = ev(c.l); if(v === BY_DB) return BY_DB; return (v == null) !== c.neg; }
+  }
+  const l = ev(c.l);
+  if(l === BY_DB) return BY_DB;
+  let hit;
+  if(c.kind === 'cmp'){
+    const r = ev(c.r);
+    if(r === BY_DB) return BY_DB;
+    if(l == null || r == null) return null;
+    return cmp(l, c.op, r);
+  }
+  if(l == null) return null;
+  if(c.kind === 'between'){
+    const lo = ev(c.lo), hi = ev(c.hi);
+    if(lo === BY_DB || hi === BY_DB) return BY_DB;
+    if(lo == null || hi == null) return null;
+    hit = cmp(l, '>=', lo) && cmp(l, '<=', hi);
+  } else if(c.kind === 'in'){
+    const vals = c.vals.map(ev);
+    if(vals.indexOf(BY_DB) >= 0) return BY_DB;
+    hit = vals.some(v=>v != null && cmp(l, '=', v));
+    if(!hit && vals.some(v=>v == null)) return null;
+  } else if(c.kind === 'like'){
+    const pat = ev(c.pat);
+    if(pat === BY_DB) return BY_DB;
+    if(pat == null) return null;
+    hit = cmp(l, 'LIKE', pat);
+  } else return BY_DB;
+  return c.neg ? !hit : hit;
 }
 const isExprDerive = n => !!n && n.type === 'derive' && !!n.expr;
 
@@ -4769,12 +4860,12 @@ function parseSQLText(text){
     }
     return left;
   }
+  /* CASE、COUNT(DISTINCT …)、SUM(CASE …) 放在算式裡（SUM(CASE …) * 1.0 / COUNT(*)）
+     以前一律擋下；現在建圖時拆成輔助欄，這裡只擋視窗函數 */
   function binGuard(a, b, t0){
-    if([a, b].some(e=>e.kind === 'case' || specialAgg(e))) fail('CASE 或不重複計數外面再接算式，目前做不出對應的步驟', t0);
+    if([a, b].some(e=>e.kind === 'window')) fail('視窗函數放在算式裡目前做不出對應的步驟', t0);
   }
 
-  const specialAgg = e => e.kind === 'call' && AGG_FNS.indexOf(e.fn) >= 0 &&
-    (e.distinct || e.args.some(a=>a.kind === 'case'));
 
   function parseAtom(){
     const t = at();
@@ -4834,9 +4925,8 @@ function parseSQLText(text){
         needOp(')');
         if(distinct && (args.length !== 1 || args[0].kind !== 'col'))
           fail('COUNT(DISTINCT …) 目前只支援單一欄位', t);
-        if(args.some(specialAgg)) fail('CASE 彙總或不重複計數外面再包函式，目前做不出對應的步驟', t);
-        if(args.some(a=>a.kind === 'case') && (AGG_FNS.indexOf(fn) < 0 || args.length !== 1))
-          fail('CASE 目前只能單獨放在 SELECT，或作為 SUM / COUNT / AVG / MIN / MAX 的唯一參數', t);
+        if(args.some(a=>a.kind === 'case') && AGG_FNS.indexOf(fn) >= 0 && args.length !== 1)
+          fail(fn+'(…) 只能有一個參數', t);
         if(eatKw('OVER')){
           if(distinct) fail('視窗函數不支援 COUNT(DISTINCT …)：PostgreSQL / SQL Server 不接受這種寫法', t);
           if(args.some(a=>a.kind === 'case')) fail('視窗函數裡的 CASE 目前做不出對應的步驟', t);
@@ -4879,29 +4969,45 @@ function parseSQLText(text){
     fail('看不懂這裡的寫法');
   }
 
+  /* CASE 有兩種步驟：
+     「分類貼標」—— 每個 WHEN 都是「同一欄 比較 固定值」、THEN / ELSE 是欄位或固定值，
+       面板裡可以一條一條改；
+     「算欄位（算式）」—— 其他寫法（AND / OR、不同欄位、CASE x WHEN …、THEN 放算式），
+       整個 CASE 存成算式樹，SQL 從樹重寫，逐步檢視照 SQL 的規則算 */
   function parseCase(){
     const start = at();
     needKw('CASE');
-    if(!isKw('WHEN')) fail('只看得懂 CASE WHEN <條件> 這種寫法，不支援 CASE <欄位> WHEN');
-    const branches = [];
+    let subject = null;
+    if(!isKw('WHEN')) subject = parseExpr();          /* CASE status WHEN 'a' THEN … */
+    const general = [];
     let other = null;
-    /* 分支可選欄位或固定值，但算式無法原樣放進分類步驟 */
-    const value = () => {
-      const t0 = at(), e = parseExpr();
-      if(e.kind !== 'lit' && e.kind !== 'col') fail('CASE 的 THEN / ELSE 目前只能是欄位或固定值（字串、數字或 NULL），不能是算式', t0);
-      return e;
-    };
     while(eatKw('WHEN')){
-      const c = litCond();
-      if(c.kind !== 'cmp' || c.right.kind !== 'lit') fail('CASE WHEN 裡目前只支援簡單比較（= > < >= <= <>）');
-      if(branches.length && (c.left.col !== branches[0].cond.left.col || c.left.tbl !== branches[0].cond.left.tbl))
-        fail('CASE 的每個 WHEN 目前必須看同一個欄位', start);
+      const t0 = at();
+      let when;
+      if(subject){
+        const v = parseExpr();
+        if(v.kind === 'lit' && v.v === null) fail('CASE x WHEN NULL 永遠比不到（NULL 跟誰比都不成立）；要找空值請寫 CASE WHEN x IS NULL', t0);
+        when = [{kind:'cmp', left:subject, op:'=', right:v}];
+      } else when = parseConds();
+      if(when.some(function semi(c){ return c.kind === 'semi' || (c.kind === 'or' && c.branches.some(b=>b.some(semi))); }))
+        fail('CASE 裡的子查詢（IN / EXISTS）目前畫不出來', t0);
       needKw('THEN');
-      branches.push({cond:c, then:value()});
+      general.push({when:when, then:parseExpr()});
     }
-    if(eatKw('ELSE')) other = value();
+    if(!general.length) fail('CASE 後面需要 WHEN');
+    if(eatKw('ELSE')) other = parseExpr();
     needKw('END');
-    return {kind:'case', branches:branches, other:other, p:start.p};
+    /* 放得進「分類貼標」的就用舊的形狀，面板才改得到 */
+    const simpleVal = e => e.kind === 'lit' || e.kind === 'col';
+    const cmpOf = b => b.when.length === 1 && b.when[0].kind === 'cmp' ? b.when[0] : null;
+    const first = cmpOf(general[0]);
+    const fits = !subject && general.every(b=>{
+      const c = cmpOf(b);
+      return c && c.left.kind === 'col' && c.right.kind === 'lit' && simpleVal(b.then) &&
+        c.left.col === first.left.col && c.left.tbl === first.left.tbl;
+    }) && (!other || simpleVal(other));
+    if(fits) return {kind:'case', branches:general.map(b=>({cond:b.when[0], then:b.then})), other:other, p:start.p};
+    return {kind:'case', general:true, branches:general, other:other, p:start.p};
   }
 
   function parseCond(){
@@ -5063,6 +5169,7 @@ function exprName(e){
   if(e.kind === 'concat') return exprName(e.a) + '_text';
   if(e.kind === 'kw') return e.v.toLowerCase();
   if(e.kind === 'case') return 'label';
+  if(e.kind === 'date') return 'date_value';
   return 'expr';
 }
 
@@ -5375,6 +5482,11 @@ function astToGraph(parsed){
     const caseCols = new Map(), caseNames = new Map();
     const usedCols = new Set((cols || []).concat(refs.map(r=>r.col), c.items.map(it=>it.alias).filter(Boolean)).map(x=>x.toLowerCase()));
     const appendCase = (e, alias) => {
+      if(e.general){                     /* 放不進「分類貼標」的 CASE：存成算式 */
+        appendDerive(e, alias);
+        caseNames.set(aggKey(e), alias);
+        return;
+      }
       const spec = {col:exprName(e.branches[0].cond.left), as:alias,
         branches:e.branches.map(b=>{
           const branch = {op:b.cond.op, val:b.cond.right.v, then:b.then.kind === 'col' ? b.then.col : b.then.v};
@@ -5456,10 +5568,11 @@ function astToGraph(parsed){
           if(!a0 || a0.kind === 'star') col = '*';
           else if(a0.kind === 'col') col = a0.col;
           else if(e.fn === 'COUNT' && a0.kind === 'lit' && a0.v !== null) col = '*';
-          else if(['arith','concat','call'].indexOf(a0.kind) >= 0 && !hasAgg(a0)){
-            col = 'calc_value'; let s2 = 2;
-            while(usedCols.has(col.toLowerCase())) col = 'calc_value_' + (s2++);
-            appendDerive(a0, col);
+          else if(['arith','concat','call','case'].indexOf(a0.kind) >= 0 && !hasAgg(a0)){
+            const base = a0.kind === 'case' ? 'case_value' : 'calc_value';
+            col = base; let s2 = 2;
+            while(usedCols.has(col.toLowerCase())) col = base + '_' + (s2++);
+            if(a0.kind === 'case') appendCase(a0, col); else appendDerive(a0, col);
           }
           else throw {sqlErr:true, msg:e.fn+'(…) 裡的寫法目前做不出對應的步驟', pos:e.p};
           h = {key:key, fn:e.distinct ? 'COUNT_DISTINCT' : e.fn, col:col, as:as};
@@ -5507,7 +5620,7 @@ function astToGraph(parsed){
       if(e.kind === 'case'){
         const alias = it.alias || 'label';
         const sameName = name => name.toLowerCase() === alias.toLowerCase();
-        if((colsKnown && (cols || []).some(sameName)) || e.branches.some(b=>sameName(b.cond.left.col) || (b.then.kind === 'col' && sameName(b.then.col))) || (e.other && e.other.kind === 'col' && sameName(e.other.col)))
+        if((colsKnown && (cols || []).some(sameName)) || colRefs(e).some(r=>sameName(r.col)))
           throw {sqlErr:true, msg:'CASE 的新欄名 '+alias+' 與來源欄位同名，目前步驟不能覆蓋原欄位；請換一個別名', pos:e.p};
         appendCase(e, alias);
       } else if(e.kind === 'call' && AGG_FNS.indexOf(e.fn) >= 0 && e.args[0] && e.args[0].kind === 'case'){

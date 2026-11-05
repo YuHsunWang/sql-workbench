@@ -114,6 +114,23 @@ where_expr: i => `SELECT id, status FROM orders WHERE ${pick(["COALESCE(status, 
 where_star_expr: i => `SELECT *${i%2?', amount * 2 AS d':''} FROM orders WHERE ${pick(['amount + qty > 20', "COALESCE(status, 'x') <> 'void'", 'qty * 10 < amount'])}`,
 // HAVING over an expression of aggregates.
 having_expr: i => `SELECT customer_id${i%2?', COUNT(*) AS n':''} FROM orders GROUP BY customer_id HAVING ${pick(['MAX(amount) - MIN(amount) > 5','SUM(amount) * 1.0 / COUNT(*) >= 20','COALESCE(SUM(qty), 0) > 2','COUNT(*) > AVG(qty)'])}`,
+// CASE with AND / OR, several columns, CASE x WHEN, IN / BETWEEN / LIKE / IS NULL, or expressions in THEN was refused.
+case_general: i => `SELECT id, ${pick([
+  "CASE WHEN amount > 10 AND qty > 1 THEN 'big' ELSE 'small' END",
+  "CASE status WHEN 'new' THEN 1 WHEN 'paid' THEN 2 ELSE 0 END",
+  "CASE WHEN status IN ('new', 'paid') OR note IS NULL THEN amount * 2 END",
+  'CASE WHEN amount BETWEEN 10 AND 30 THEN qty ELSE 0 - qty END',
+  "CASE WHEN note LIKE 'r%' THEN UPPER(note) ELSE status END",
+  "CASE WHEN amount > qty * 10 THEN 'x' END",
+  'CASE WHEN amount IS NULL THEN 0 ELSE amount END + qty',
+  "CASE WHEN status NOT IN ('void') AND (qty > 2 OR amount < 15) THEN 1 ELSE 0 END"])} AS v FROM orders${i%2?' WHERE id > 3':''}`,
+// CASE inside aggregates inside expressions: conversion rates, conditional sums.
+agg_case_expr: i => `SELECT customer_id, ${pick([
+  "ROUND(100.0 * SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) / COUNT(*), 1)",
+  'COUNT(DISTINCT status) * 1.0 / COUNT(*)',
+  'SUM(CASE WHEN qty > 1 AND amount > 10 THEN amount END)',
+  "COALESCE(SUM(CASE status WHEN 'new' THEN qty END), 0)"])} AS v FROM orders GROUP BY customer_id${i%2?' ORDER BY customer_id':''}`,
+case_general_group: i => { const e = `CASE WHEN amount > ${pick([10,20])} OR qty > 2 THEN 'hi' ELSE 'lo' END`; return `SELECT ${e} AS b, COUNT(*) AS n FROM orders GROUP BY ${e}`; },
 // A column that is neither grouped nor aggregated inside such an expression cannot be rebuilt and must be refused.
 unsupported_post_stray: i => `SELECT customer_id, COUNT(*) + ${pick(['qty','amount'])} AS n FROM orders GROUP BY customer_id`,
 unsupported_aggregate_collision: i => `SELECT SUM(CASE WHEN qty > ${i%3} THEN amount END)${i%2?' AS n':''}, SUM(CASE WHEN qty = 0 THEN amount END)${i%2?' AS n':''} FROM orders`,
@@ -136,7 +153,7 @@ function diff(a,b) {
 const norm = sql => sql.replace(/\s+/g,' ').trim().replace(/;$/,'');
 const counts = {total:0,identical_result:0,different_result:0,regenerated_sql_fails:0,parse_unsupported:0,textual_identical:0};
 const unsupported = {}, classes = new Map(), inputs = new Set();
-const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_') || ['agg_arith','group_expression','count_literal','expr_nested','agg_expr','decimal_division','agg_post','having_only','where_expr','where_star_expr','having_expr'].includes(k)));
+const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_') || ['agg_arith','group_expression','count_literal','expr_nested','agg_expr','decimal_division','agg_post','having_only','where_expr','where_star_expr','having_expr','case_general','agg_case_expr','case_general_group'].includes(k)));
 const mustRefuse = {
   unsupported_aggregate_order:/ORDER BY.*SELECT/,
   unsupported_case_group:/GROUP BY.*CASE/,

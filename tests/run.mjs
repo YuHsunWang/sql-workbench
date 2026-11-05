@@ -2032,8 +2032,6 @@ test('review: CASE without ELSE gives NULL, not the text NULL', () => {
 
 test('review: SQL whose meaning the steps would change is refused, not imported', () => {
   const parseRefused = [
-    "SELECT CASE WHEN x = 1 THEN y * 2 ELSE 'n' END AS t FROM t", /* an expression cannot fit a branch */
-    "SELECT CASE WHEN x > amt THEN 'a' ELSE 'b' END AS t FROM t",  /* x > amt became x > 0 */
     'SELECT city, amt FROM t ORDER BY 3',                          /* no third item */
   ];
   parseRefused.forEach(sqlError);
@@ -2042,7 +2040,9 @@ test('review: SQL whose meaning the steps would change is refused, not imported'
   {
     const db = new DatabaseSync(':memory:');
     db.exec("CREATE TABLE w(name TEXT, a INTEGER, b INTEGER); INSERT INTO w VALUES ('a',1,1),('A',2,5),(NULL,4,0);");
-    for (const sql of ["SELECT name, a FROM w WHERE UPPER(name) = 'A'", 'SELECT name FROM w WHERE a + b > 3']) {
+    /* the two CASEs were refused (x > amt once became x > 0); they are expression blocks now */
+    for (const sql of ["SELECT name, a FROM w WHERE UPPER(name) = 'A'", 'SELECT name FROM w WHERE a + b > 3',
+                       "SELECT CASE WHEN a = 1 THEN b * 2 ELSE -1 END AS t FROM w", "SELECT CASE WHEN a > b THEN 'a' ELSE 'b' END AS t FROM w"]) {
       const generated = roundTrip(sql);
       assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()), sql);
     }
@@ -2297,6 +2297,9 @@ test('CASE: column branches, fixed values and NULL remain editable and round-tri
 test('aggregate: unsupported CASE expressions and windowed DISTINCT fail clearly', () => {
   const window = sqlError('SELECT COUNT(DISTINCT amt) OVER (PARTITION BY city) AS n FROM t');
   assert.match(window.msg, /視窗.*PostgreSQL.*SQL Server/);
+  /* these were refused; CASE inside expressions and aggregates is built exactly now */
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE t(qty INTEGER, amt INTEGER); INSERT INTO t VALUES (1,10),(0,20),(2,NULL),(NULL,5),(3,-1);');
   for (const sql of [
     'SELECT SUM(CASE WHEN qty > 0 THEN amt END) * 2 AS n FROM t',
     'SELECT SUM(CASE WHEN qty > 0 THEN amt * 2 END) AS n FROM t',
@@ -2305,11 +2308,15 @@ test('aggregate: unsupported CASE expressions and windowed DISTINCT fail clearly
     'SELECT CASE WHEN qty > 0 THEN amt END * 2 AS n FROM t',
     'SELECT COALESCE(SUM(CASE WHEN qty > 0 THEN amt END), 0) AS n FROM t',
     'SELECT SUM(CASE WHEN qty > 0 THEN amt WHEN amt > 0 THEN qty END) AS n FROM t',
-  ]) assert.match(sqlError(sql).msg, /CASE/);
+  ]) {
+    const generated = roundTrip(sql);
+    assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()), sql);
+  }
+  db.close();
   assert.match(graphError('SELECT CASE WHEN qty > 0 THEN amt END AS amt FROM t').msg, /同名/);
   assert.match(graphError('SELECT COUNT(DISTINCT b.amt) AS n FROM a JOIN b ON a.id = b.id WHERE a.amt > 0').msg, /JOIN/);
   assert.match(graphError('SELECT 1 AS v, COUNT(DISTINCT amt) AS n FROM t').msg, /彙總後/);
-  return 'window DISTINCT, aggregate arithmetic, branch arithmetic, wrapper and mixed WHEN columns refused';
+  return 'window DISTINCT refused; 7 CASE-in-expression / aggregate shapes exact in SQLite';
 });
 
 /* A HAVING lookup based only on sum_label or count_x confuses different CASEs,
@@ -2504,7 +2511,9 @@ test('filter refusal: dynamic dates, arithmetic and nontrivial date lists', () =
       assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()), rhs);
   }
   assert.match(graphError("SELECT * FROM nowhere WHERE d >= CURRENT_DATE").msg, /CREATE TABLE/);
-  assert.match(graphError("SELECT * FROM t WHERE sale_date >= DATE '2026-01-01' + 1").msg, /函式|日期|算式/);
+  { const one = loadApp(); one.state.dialect = 'postgres'; one.state.schema = known;
+    graphFromSQL(one, "SELECT * FROM t WHERE sale_date >= DATE '2026-01-01' + 1");
+    assert.match(one.buildSQL(), /DATE '2026-01-01' \+ 1 AS cond_value/); }
   db.close();
   for(const bad of ['2026-02-30','2025-02-29','2026-1-01','0000-01-01','2026-13-01','not-a-date']){
     assert.match(sqlError("SELECT * FROM t WHERE sale_date = DATE '"+bad+"'").msg, /YYYY-MM-DD/);
@@ -3144,7 +3153,11 @@ test('expressions: tree rewritten per dialect, preview agrees with SQLite, missi
            INSERT INTO r VALUES ('  Ab ', 2, 4), (NULL, 3, NULL), ('x', NULL, 0), ('aaa', 1.25, 2);`);
   const rows = db.prepare('SELECT s, n, m FROM r').all().map(o => [o.s, o.n, o.m]);
   for (const e of ['UPPER(TRIM(s))', "COALESCE(s, 'none') || '!'", 'n * m + 1', '(n + 1) * (m - 1)', 'NULLIF(m, 0) * 2',
-                   'ROUND(n / 3.0, 2)', 'LENGTH(s) - 1', "REPLACE(s, 'a', 'b')", 'ABS(n - m)', 'COALESCE(m, n, 0) / 2.0']) {
+                   'ROUND(n / 3.0, 2)', 'LENGTH(s) - 1', "REPLACE(s, 'a', 'b')", 'ABS(n - m)', 'COALESCE(m, n, 0) / 2.0',
+                   /* CASE follows SQL's three-valued logic: UNKNOWN never takes a branch */
+                   "CASE WHEN n > 1 AND m IS NOT NULL THEN s ELSE '-' END", "CASE WHEN s IN ('x', NULL) THEN 1 ELSE 0 END",
+                   "CASE WHEN s NOT IN ('x', NULL) THEN 1 ELSE 0 END", 'CASE WHEN n BETWEEN 1 AND 2 OR m = 0 THEN n * 10 END',
+                   "CASE s WHEN 'x' THEN 'X' WHEN 'aaa' THEN 'A' END", "CASE WHEN s LIKE '%b%' THEN 1 WHEN s IS NULL THEN 2 ELSE 3 END"]) {
     const one = loadApp(); one.state.dialect = 'postgres';
     const g = graphFromSQL(one, `SELECT ${e} AS v FROM r`);
     installGraph(one, g, {r:{label:'', cols:[{name:'s'}, {name:'n'}, {name:'m'}], rows}});
