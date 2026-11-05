@@ -297,6 +297,9 @@ test('security: a pasted value carrying HTML is text in every block, step and pa
     `SELECT COALESCE(city, '${bad}') AS c FROM t`,
     `SELECT city, COUNT(*) AS n FROM t GROUP BY city HAVING city <> '${bad}'`,
     `SELECT UPPER(COALESCE(city, '${bad}')) || 'x' AS k FROM t`,
+    `SELECT * FROM t WHERE UPPER(city) = '${bad}'`,
+    `SELECT CASE WHEN qq = 5 AND city = '${bad}' THEN 1 ELSE 0 END AS flag FROM t`,
+    `SELECT city, ROUND(AVG(qq), 1) AS a FROM t GROUP BY city HAVING MAX(qq) > 1 OR city = '${bad}'`,
   ];
   for (const sql of positions) {
     const graph = graphFromSQL(api, sql);
@@ -308,6 +311,9 @@ test('security: a pasted value carrying HTML is text in every block, step and pa
       api.renderInspector();
       outputs.push(['panel ' + n.type, api.inspector.innerHTML]);
     }
+    api.state.lint = api.lintGraph();
+    api.renderLint();
+    outputs.push(['lint panel', api.document.getElementById('lint').innerHTML], ['SQL view', api.sqlHTML(api.buildSQL())]);
     for (const [where, html] of outputs) assert.doesNotMatch(String(html), /<img/, `${where} for ${sql}`);
   }
   return `${positions.length} positions × every block, step and panel`;
