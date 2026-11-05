@@ -90,7 +90,7 @@ export function loadApp(stored = {}) {
     'nodeSummary', 'removeNode', 'addNode', 'viewCenter', 'noteOf', 'autoNote',
     'orFromPlain', 'orAddGroup', 'orAddCond', 'orDelTerm', 'isOrFilter',
     'renderInspector', 'inspector', 'buildSteps', 'orVenn', 'joinPairsVenn', 'andChain', 'andVenn', 'andAfter', 'andFromPlain', 'adoptCols', 'colChoices',
-    'prune', 'renderStage',
+    'prune', 'renderStage', 'rowFlow', 'sqlHTML', 'stepIndexFor', 'select',
   ];
   const marker = '})();';
   const at = match[1].lastIndexOf(marker);

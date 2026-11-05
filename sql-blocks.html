@@ -335,6 +335,13 @@ textarea{
   100% {box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 0%,transparent),var(--shadow-m)}
 }
 .node.justadded{animation:justadded .9s ease-out 2}
+/* 逐步檢視正在看的那一站、滑過 SQL 那一段對應的步驟 */
+.node.onstage{outline:2px dashed color-mix(in srgb,var(--c) 70%,transparent);outline-offset:4px}
+.node.sqlhover{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 30%,transparent),var(--shadow-m)}
+.nrows{margin:0 10px 8px;padding-top:6px;border-top:1px dashed var(--line-soft);
+  font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.nrows.grew{color:var(--drop);font-weight:500}
+.nrows.grew::before{content:"⚠ "}
 
 /* ---------- inspector ---------- */
 .rowf{display:flex;align-items:center;gap:8px;margin-bottom:8px}
@@ -415,6 +422,9 @@ input[type="number"]{max-width:88px}
 .sqlbox .s{color:var(--f-wide)}
 .sqlbox .n{color:var(--f-coll)}
 .sqlbox .c{color:var(--ink-3);font-style:italic}
+.sqlbox .seg{cursor:pointer;border-radius:4px;transition:background .15s}
+.sqlbox .seg:hover{background:color-mix(in srgb,var(--accent) 7%,transparent)}
+.sqlbox .seg.hot{background:var(--accent-soft);box-shadow:-3px 0 0 var(--accent)}
 .dnote{margin:0;padding:8px 12px;border-top:1px solid var(--line-soft);font-size:11px;color:var(--ink-3);line-height:1.6}
 .dopt{padding:8px 12px 0;font-size:11.5px;color:var(--ink-2)}
 .dopt label{display:flex;align-items:center;gap:6px;cursor:pointer}
@@ -1458,6 +1468,7 @@ function applyNotes(nodes, sql){
 function buildSQL(){
   const out = state.nodes.find(n=>n.type === 'output');
   const last = out ? srcOf(out.id, 0) : null;
+  state.sqlSegs = {};
   const problem = graphIssue(last);
   if(problem) return '-- 無法產生 SQL：'+problem;
   if(!last) return '-- 把步驟接到「結果」，SQL 就會長出來。';
@@ -1471,7 +1482,7 @@ function buildSQL(){
   const all = chainOrder().filter(n=>n !== tailSort && n !== tailSelect);
 
   /* 一連串只餵給下一個 filter 的 filter，併成一個 CTE、WHERE 用 AND 串 */
-  const absorbed = {};
+  const absorbed = {}, absorber = {};
   const onlyFeeds = s => state.edges.filter(e=>e.from === s.id).length === 1;
   all.forEach(n=>{
     const s = srcOf(n.id, 0);
@@ -1480,6 +1491,7 @@ function buildSQL(){
     if(n.type === 'filter' && s.type === 'filter') absorbed[s.id] = true;
     /* 「選欄位」只是餵給下一塊時，把欄位清單併進去，不用自己一層 CTE */
     if(s.type === 'select' && !s.outCols && ['filter','distinct','sort'].indexOf(n.type) >= 0) absorbed[s.id] = true;
+    if(absorbed[s.id]) absorber[s.id] = n.id;
   });
   const order = all.filter(n=>!absorbed[n.id]);
   /* 回頭找被併掉的 select 提供的欄位清單 */
@@ -1623,6 +1635,16 @@ function buildSQL(){
     if(sql) parts.push(names[n.id]+' AS (\n'+sql+'\n)');
   });
 
+  /* 哪一段 SQL 是哪個步驟寫的：被併進別人那層的，算在併它的那一段 */
+  const segs = {'': [out ? out.id : '']};
+  const owner = id => { while(absorber[id]) id = absorber[id]; return id; };
+  all.forEach(n=>{
+    const name = names[owner(n.id)];
+    if(name) (segs[name] = segs[name] || []).push(n.id);
+  });
+  [tailSort, tailSelect].forEach(n=>{ if(n) segs[''].push(n.id); });
+  state.sqlSegs = segs;
+
   let out_sql = noteManifest(chainOrder());
   if(parts.length) out_sql += 'WITH ' + parts.join(',\n') + '\n';
   if(tailSort){
@@ -1689,6 +1711,30 @@ function highlight(sql){
     .replace(KW, '<span class="k">$&</span>')
     .replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="n">$1</span>');
 }
+/* 把 SQL 切成一段一段（每個 CTE 一段，最後的 SELECT 一段），每段記得是哪幾個步驟寫的，
+   點步驟時才標得出對應的那段，滑過那段也能反過來亮起步驟 */
+function sqlHTML(sql){
+  const segs = state.sqlSegs || {};
+  const out = [];
+  let cur = null, buf = [];
+  const flush = () => {
+    if(!buf.length) return;
+    const ids = cur !== null && segs[cur] ? segs[cur] : null;
+    const text = highlight(buf.join('\n'));
+    out.push(ids ? '<span class="seg" data-seg="'+esc(cur)+'">'+text+'</span>' : text);
+    buf = [];
+  };
+  sql.split('\n').forEach(line=>{
+    const start = /^(?:WITH )?([A-Za-z_]\w*) AS \($/.exec(line);
+    if(start && segs[start[1]]){ flush(); cur = start[1]; buf.push(line); return; }
+    if(cur !== null && cur !== '' && /^\),?$/.test(line)){ buf.push(line); flush(); cur = null; return; }
+    if(cur === null && /^(SELECT|FROM)\b/.test(line) && segs['']){ flush(); cur = ''; }
+    buf.push(line);
+  });
+  flush();
+  return out.join('\n');
+}
+const segNodes = name => (state.sqlSegs || {})[name] || [];
 
 /* ============================================================
    5. CANVAS
@@ -1820,6 +1866,8 @@ function renderNodes(){
     const note = txt ? '<span class="nnote" title="'+esc(txt)+'">'+esc(txt)+'</span>' : '';
     let html = '<div class="nhead">'+ICONS[n.type]+'<b>'+m.label+'</b>'+note+'</div>'+
                '<div class="nbody">'+nodeSummary(n)+'</div>';
+    const flow = rowFlow(n);
+    if(flow) html += '<div class="nrows'+(flow.grew ? ' grew' : '')+'" title="'+esc(flow.tip)+'">'+flow.text+'</div>';
     for(let i=0;i<m.ins;i++){
       const linked = state.edges.some(x=>x.to === n.id && x.port === i);
       html += '<div class="port in'+(linked ? ' linked' : '')+'" data-port="'+i+'" data-node="'+n.id+'"'+
@@ -1834,6 +1882,24 @@ function renderNodes(){
   });
   positionPorts();
   document.getElementById('node-count').textContent = state.nodes.length + ' 步';
+}
+/* 每個步驟進來幾列、出去幾列（示意資料）。KNIME、Alteryx 都把筆數標在連線上：
+   JOIN 之後列數暴增，一眼就看得到 */
+function rowFlow(n){
+  if(n.type === 'table' || n.type === 'output') return null;
+  const first = srcOf(n.id, 0);
+  if(!first) return null;
+  let before, after;
+  try { before = evalNode(first).rows.length; after = evalNode(n).rows.length; }
+  catch(err){ return null; }
+  const grew = n.type === 'join' && after > before;
+  return {
+    text: '示意 ' + (before === after ? after + ' 列' : before + ' → ' + after + ' 列'),
+    grew: grew,
+    tip: grew
+      ? 'JOIN 之後列數變多了：右邊有重複的對照值，一列配到好幾列。後面再 SUM / COUNT 會重複計算。'
+      : '在示意資料上，這一步收到 ' + before + ' 列、交出 ' + after + ' 列。'
+  };
 }
 function positionPorts(){
   state.nodes.forEach(n=>{
@@ -2230,6 +2296,38 @@ function select(id, open){
   else if(id !== state.sel) state.inspOpen = false;   /* 換了一塊就先收起來，點一下才開 */
   if(!id) state.inspOpen = false;
   state.sel = id; renderNodes(); drawWires(); renderInspector();
+  /* 下面的逐步檢視跟著跳到這個步驟那一站，不用自己一顆一顆找 */
+  const k = stepIndexFor(id);
+  if(k >= 0 && k !== state.step){ state.step = k; renderStage(); }
+  else syncLinks();
+}
+function stepIndexFor(id){
+  const n = nodeById(id);
+  if(!n) return -1;
+  if(n.type === 'table') return state.steps.findIndex(s=>s.node === '@tables');
+  return state.steps.findIndex(s=>s.node === id);
+}
+/* 畫布、SQL、逐步檢視三邊對齊：選到的步驟在 SQL 裡標出它那段，
+   逐步檢視目前那一站的步驟在畫布上描一圈 */
+function syncLinks(){
+  const sqlEl = document.getElementById('sql');
+  let first = null;
+  [].slice.call(sqlEl.querySelectorAll('.seg')).forEach(el=>{
+    const on = !!state.sel && segNodes(el.dataset.seg).indexOf(state.sel) >= 0;
+    el.classList.toggle('hot', on);
+    if(on && !first) first = el;
+  });
+  if(first && typeof first.scrollIntoView === 'function' && first.offsetTop !== undefined){
+    const top = first.offsetTop - sqlEl.offsetTop;
+    if(top < sqlEl.scrollTop || top > sqlEl.scrollTop + sqlEl.clientHeight - 40)
+      sqlEl.scrollTo({top:Math.max(0, top - 8), behavior:'smooth'});
+  }
+  const cur = state.steps[state.step];
+  const onStage = cur ? cur.node : null;
+  [].slice.call(surface.querySelectorAll('.node')).forEach(el=>{
+    const n = nodeById(el.dataset.id);
+    el.classList.toggle('onstage', !!n && (onStage === n.id || (onStage === '@tables' && n.type === 'table')));
+  });
 }
 function opt(v, cur, label){ return '<option value="'+v+'"'+(String(v)===String(cur)?' selected':'')+'>'+(label||v)+'</option>'; }
 /* 欄位的中文名：在所有表裡找第一個對得上的 */
@@ -3179,6 +3277,7 @@ function buildSteps(){
   const steps = [];
   const tables = state.nodes.filter(n=>n.type === 'table' && schemaOf(n));
   if(tables.length) steps.push({
+    node:'@tables',
     title:'來源',
     cap:'先看原料。<strong>欄位是你 schema 裡真的有的，列是編出來的示意資料</strong>。後面每一步都只是把這些列搬來搬去。',
     render: box => tables.forEach((t,i)=>{
@@ -3195,7 +3294,13 @@ function buildSteps(){
     return steps;
   }
 
+  /* 每一站記得是哪個步驟產生的：點畫布上的步驟就能跳到它那一站 */
   chainOrder().forEach(n=>{
+    const before = steps.length;
+    stepsFor(n);
+    for(let k = before; k < steps.length; k++) steps[k].node = n.id;
+  });
+  function stepsFor(n){
     const s0 = srcOf(n.id, 0);
     const S = evalNode(s0);
 
@@ -3414,11 +3519,12 @@ function buildSteps(){
         render: box => box.appendChild(miniTable('彙總結果', G, {tint:(r,i)=>TINTS[i % TINTS.length]}))
       });
     }
-  });
+  }
 
   if(out){
     const R = evalNode(out);
     if(R.cols.length) steps.push({
+      node:out.id,
       title:'完成',
       cap:'這是下面那段 SQL 跑在<strong>示意資料</strong>上的樣子。<strong>改上面任何一個步驟，SQL 和這張表會同時跟著變。</strong>',
       render: box => box.appendChild(miniTable('最終結果', R, {tint:(r,i)=>TINTS[i % TINTS.length]}))
@@ -3674,7 +3780,28 @@ function renderStage(){
     '資料是示意的，這台工具自己編的，不是你資料庫裡的數字。這裡示範的是每一步「怎麼算」，換成真資料算法一樣。';
   document.getElementById('btn-prev').disabled = i === 0;
   document.getElementById('btn-next').disabled = i === steps.length - 1;
+  syncLinks();
 }
+/* 滑過 SQL 的某一段，畫布上亮起寫出它的步驟；點一下就選起那個步驟 */
+(function(){
+  const sqlEl = document.getElementById('sql');
+  const light = name => [].slice.call(surface.querySelectorAll('.node')).forEach(el=>
+    el.classList.toggle('sqlhover', name !== null && segNodes(name).indexOf(el.dataset.id) >= 0));
+  sqlEl.addEventListener('mouseover', e=>{
+    const seg = e.target.closest && e.target.closest('.seg');
+    light(seg ? seg.dataset.seg : null);
+  });
+  sqlEl.addEventListener('mouseleave', ()=>light(null));
+  sqlEl.addEventListener('click', e=>{
+    const seg = e.target.closest && e.target.closest('.seg');
+    if(!seg) return;
+    const ids = segNodes(seg.dataset.seg);
+    const id = ids[ids.length - 1];
+    if(!id || !nodeById(id)) return;
+    select(id);
+    revealNode(id);
+  });
+})();
 
 document.getElementById('btn-prev').addEventListener('click', ()=>{ state.step--; renderStage(); });
 document.getElementById('btn-next').addEventListener('click', ()=>{ state.step++; renderStage(); });
@@ -3775,7 +3902,7 @@ function refresh(keepInspector){
   renderNodes();
   drawWires();
   if(!keepInspector) renderInspector();
-  document.getElementById('sql').innerHTML = highlight(buildSQL());
+  document.getElementById('sql').innerHTML = sqlHTML(buildSQL());
   document.getElementById('dnote').innerHTML = dialectNote();
   state.steps = buildSteps();
   if(state.step >= state.steps.length) state.step = state.steps.length - 1;

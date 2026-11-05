@@ -2799,6 +2799,39 @@ test('semi-join review: JOIN-renamed keys, text codes, UNION lookups, table name
   return 'joined-table key refused; text codes, UNION lookup and matched table agree with SQLite';
 });
 
+/* Canvas, SQL and step-by-step view link up: every step must belong to exactly one
+   SQL segment (absorbed filters/selects included, or clicking it highlights nothing),
+   splitting the SQL into segments must not change a character of it, clicking a
+   block must jump the step view to that block, and a JOIN that multiplies rows must
+   say so on the block. */
+test('linking: every block maps to its SQL segment and its step; JOIN fan-out is flagged', () => {
+  const app = loadApp();
+  app.state.dialect = 'postgres';
+  const graph = graphFromSQL(app, 'SELECT o.id, o.amt, c.city FROM o INNER JOIN c ON o.cid = c.id WHERE o.amt > 1 AND c.city IS NOT NULL ORDER BY o.amt DESC LIMIT 3');
+  installGraph(app, graph, {
+    o:{label:'', cols:[{name:'id'}, {name:'cid'}, {name:'amt'}], rows:[[1, 1, 5], [2, 2, 7], [3, 1, 2]]},
+    c:{label:'', cols:[{name:'id'}, {name:'city'}], rows:[[1, 'A'], [1, 'B'], [2, 'C']]},
+  });
+  const sql = app.buildSQL();
+  const owners = {};
+  Object.entries(app.state.sqlSegs).forEach(([seg, ids]) => ids.forEach(id => { assert.equal(owners[id], undefined, id + ' in two segments'); owners[id] = seg; }));
+  app.chainOrder().forEach(n => assert.notEqual(owners[n.id], undefined, n.type + ' has no SQL segment'));
+  const html = app.sqlHTML(sql);
+  assert.match(html, /class="seg" data-seg="joined"/);
+  const text = html.replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  assert.equal(text, sql);
+  app.state.steps = app.buildSteps();
+  app.chainOrder().forEach(n => assert.ok(app.stepIndexFor(n.id) >= 0, n.type + ' has no step'));
+  const join = graph.nodes.find(n => n.type === 'join');
+  app.select(join.id);
+  assert.equal(app.state.steps[app.state.step].node, join.id);
+  assert.equal(app.stepIndexFor(graph.nodes.find(n => n.type === 'table').id), 0);
+  const flow = app.rowFlow(join);
+  assert.equal(flow.grew, true);
+  assert.match(flow.text, /3 → 5 列/);
+  return 'segments cover every block once, text unchanged, click jumps to step, 3 → 5 rows flagged';
+});
+
 let passed = 0;
 for (const item of cases) {
   try {
