@@ -2039,9 +2039,15 @@ test('review: SQL whose meaning the steps would change is refused, not imported'
     'SELECT city, amt FROM t ORDER BY 3',                          /* no third item */
   ];
   parseRefused.forEach(sqlError);
-  /* only in HAVING, so the steps have no count_all column to filter */
-  graphError('SELECT city FROM t GROUP BY city HAVING COUNT(*) > 1');
-  return `${parseRefused.length + 1} lossy shapes refused`;
+  /* once refused because the count existed only in HAVING; now counted in a hidden
+     column, filtered, and dropped again — the result has only city */
+  const db = new DatabaseSync(':memory:');
+  db.exec("CREATE TABLE t(city TEXT, amt INTEGER); INSERT INTO t VALUES ('tp',1),('tp',2),('tc',3);");
+  const sql = 'SELECT city FROM t GROUP BY city HAVING COUNT(*) > 1';
+  const generated = roundTrip(sql);
+  assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()));
+  db.close();
+  return `${parseRefused.length} lossy shapes refused; HAVING-only COUNT(*) exact`;
 });
 
 test('review: HAVING on an aggregate filters the aliased column', () => {
@@ -2635,7 +2641,7 @@ test('DEV-240: failed SQL imports leave the graph and quoting unchanged', () => 
   };
   paste('SELECT "CamelCol" FROM "MyTable"');
   const before = app.buildSQL(), canvas = JSON.stringify(app.state.nodes);
-  for (const sql of ['SELECT FROM', "SELECT 'unfinished", 'SELECT x FROM t GROUP BY x HAVING SUM(x) > 1']) {
+  for (const sql of ['SELECT FROM', "SELECT 'unfinished", 'SELECT x, LAG(x) OVER (ORDER BY x) AS p FROM t']) {
     paste(sql);
     assert.match(app.document.getElementById('parse-out').innerHTML, /class="perr"/);
     assert.equal(app.buildSQL(), before, sql);
@@ -3137,6 +3143,30 @@ test('expressions: tree rewritten per dialect, preview agrees with SQLite, missi
   pick.cols = pick.cols.filter(c => c !== 'qty');
   assert.match(gone.buildSQL(), /無法產生 SQL：.*qty/);
   return '|| per dialect; alias stripped; 10 expressions match SQLite in preview and SQL; unknown fn labelled; missing column reported';
+});
+
+/* ROUND(AVG(x), 2) and SUM(a) * 1.0 / COUNT(*) were refused: an aggregate inside an
+   expression. They become GROUP BY (hidden agg_value columns) → expression → 選欄位
+   that drops the helpers, so the result has exactly the pasted columns in order. An
+   aggregate already selected on its own is reused, not counted twice. */
+test('post-aggregate expressions: hidden aggregates, exact columns, no double counting', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE o(c TEXT, amt INTEGER, qty INTEGER);
+           INSERT INTO o VALUES ('x',10,1),('x',25,2),('y',7,NULL),('y',NULL,3),('z',40,4);`);
+  for (const sql of [
+    'SELECT c, ROUND(AVG(amt), 1) AS a FROM o GROUP BY c ORDER BY c',
+    'SELECT c, SUM(amt) * 1.0 / COUNT(*) AS per, COUNT(*) AS n FROM o GROUP BY c ORDER BY per DESC, c',
+    'SELECT MAX(amt) - MIN(amt) AS spread FROM o',
+    'SELECT c, COALESCE(SUM(qty), 0) AS q FROM o GROUP BY c HAVING SUM(amt) > 10 ORDER BY c',
+  ]) {
+    const generated = roundTrip(sql);
+    assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()), sql);
+  }
+  const twice = roundTrip('SELECT c, SUM(amt) * 1.0 / COUNT(*) AS per, COUNT(*) AS n FROM o GROUP BY c');
+  assert.equal((twice.match(/COUNT\(\*\)/g) || []).length, 1, 'COUNT(*) computed once and reused');
+  assert.doesNotMatch(twice.split('picked AS')[1], /agg_value/, 'helpers are dropped before the result');
+  db.close();
+  return '4 shapes exact in SQLite and round-trip; shared COUNT(*); helpers dropped';
 });
 
 let passed = 0;

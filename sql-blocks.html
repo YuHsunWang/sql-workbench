@@ -5370,18 +5370,82 @@ function astToGraph(parsed){
         if(r.tbl && movedRefs.has(r.tbl+'.'+r.col))
           throw {sqlErr:true, msg:'算式引用的 '+r.tbl+'.'+r.col+' 在 JOIN 步驟已被移除或改名，目前無法精確對應', pos:e.p || 0};
       });
-      const n = add('derive', simple ? {
-        left: e.a.col, op: e.op,
-        right: (e.b.kind === 'lit' ? decText(e.b.v, e.b.dec) : e.b.col),
-        as: alias
-      } : {expr: cleanExpr(e), as: alias});
+      /* 「函式（一個來源欄位，其他參數都是固定值）」照舊用可以換欄位的函式步驟；
+         UPPER(TRIM(a))、DATE_TRUNC('month', d)、COALESCE(o.a, o.b) 這種
+         來源不只一欄、或包了好幾層的，存成算式樹 —— 以前不是被擋，就是把 o.b 原文抄進
+         沒有 o 這個別名的 CTE。三種的分法只寫在這裡，匯入和重新匯入才會分成同一種步驟。
+         CONVERT(type, expr, style) 的來源欄位是第二個參數，第一個是型別。 */
+      const at0 = e.fn === 'CONVERT' ? 1 : 0, a0 = e.args ? e.args[at0] : null;
+      const plainCall = e.kind === 'call' && AGG_FNS.indexOf(e.fn) < 0 &&
+        (!a0 || a0.kind === 'col' || a0.kind === 'star') &&
+        e.args.every((a, i)=>i === at0 || a.kind === 'lit' || (e.fn === 'CONVERT' && i === 0));
+      let spec;
+      if(simple) spec = {left: e.a.col, op: e.op, right: (e.b.kind === 'lit' ? decText(e.b.v, e.b.dec) : e.b.col), as: alias};
+      else if(plainCall){
+        spec = {fn: e.fn, left: (!a0 || a0.kind === 'star') ? '*' : exprName(a0), as: alias};
+        /* NOW() 沒有參數，不能寫回成 NOW(*) */
+        if(!e.args.length) spec.noArgs = true;
+        /* 其他參數（COALESCE 的預設值、CONVERT 的型別和樣式、CAST 的型別）要帶著走 */
+        if(e.raws.length > 1){
+          spec.args = e.raws.slice(); spec.argAt = at0;
+          /* 來源欄那一格寫 SQL 時會換成 left，原文（可能是 AVG(amt)、t.x）不用留 */
+          spec.args[at0] = spec.left;
+        }
+        if(e.castRaw) spec.castAs = e.castRaw;
+      }
+      else spec = {expr: cleanExpr(e), as: alias};
+      const n = add('derive', spec);
       conn(cur, n); cur = n;
       cols = cols ? cols.concat([n.as]) : null;
       usedCols.add(alias.toLowerCase());
     };
+    /* ROUND(AVG(x), 2)、SUM(a) * 1.0 / COUNT(*)：算式包著彙總。拆成三步 ——
+       GROUP BY 先算出每個彙總（藏起來的 agg_value 欄），之後一塊「算欄位」用這些欄算出
+       結果，最後「選欄位」把藏起來的欄拿掉、照原本順序排好 */
+    const hasAgg = e => !!e && typeof e === 'object' &&
+      ((e.kind === 'call' && AGG_FNS.indexOf(e.fn) >= 0) || ['a','b'].some(k=>hasAgg(e[k])) || (e.args || []).some(hasAgg));
+    const hidden = [], postItems = [];
+    const liftAggs = e => {
+      if(e.kind === 'call' && AGG_FNS.indexOf(e.fn) >= 0){
+        const key = aggKey(e);
+        /* SELECT 裡本來就有同一個彙總（COUNT(*) AS n）就用那一欄，不要算兩次 */
+        const own = c.items.find(it=>it.kind === 'expr' && it.expr.kind === 'call' && aggKey(it.expr) === key);
+        if(own) return {kind:'col', col:own.alias || exprName(own.expr), p:e.p};
+        let h = hidden.find(x=>x.key === key);
+        if(!h){
+          let as = 'agg_value', suffix = 2;
+          while(usedCols.has(as.toLowerCase())) as = 'agg_value_' + (suffix++);
+          usedCols.add(as.toLowerCase());
+          const a0 = e.args[0];
+          let col;
+          if(e.args.length > 1) throw {sqlErr:true, msg:e.fn+'(…) 只能有一個參數', pos:e.p};
+          if(!a0 || a0.kind === 'star') col = '*';
+          else if(a0.kind === 'col') col = a0.col;
+          else if(e.fn === 'COUNT' && a0.kind === 'lit' && a0.v !== null) col = '*';
+          else if(['arith','concat','call'].indexOf(a0.kind) >= 0 && !hasAgg(a0)){
+            col = 'calc_value'; let s2 = 2;
+            while(usedCols.has(col.toLowerCase())) col = 'calc_value_' + (s2++);
+            appendDerive(a0, col);
+          }
+          else throw {sqlErr:true, msg:e.fn+'(…) 裡的寫法目前做不出對應的步驟', pos:e.p};
+          h = {key:key, fn:e.distinct ? 'COUNT_DISTINCT' : e.fn, col:col, as:as};
+          hidden.push(h);
+        }
+        return {kind:'col', col:h.as, p:e.p};
+      }
+      if(e.kind === 'window') throw {sqlErr:true, msg:'視窗函數放在算式裡目前做不出對應的步驟', pos:e.p || 0};
+      const out = Object.assign({}, e);
+      ['a','b'].forEach(k=>{ if(e[k]) out[k] = liftAggs(e[k]); });
+      if(e.args) out.args = e.args.map(liftAggs);
+      return out;
+    };
     c.items.forEach(it=>{
       if(it.kind !== 'expr') return;
       const e = it.expr;
+      if(!(e.kind === 'call' && AGG_FNS.indexOf(e.fn) >= 0) && e.kind !== 'case' && hasAgg(e)){
+        postItems.push({it:it, tree:liftAggs(e)});
+        return;
+      }
       if(e.kind === 'case'){
         const alias = it.alias || 'label';
         const sameName = name => name.toLowerCase() === alias.toLowerCase();
@@ -5410,30 +5474,18 @@ function astToGraph(parsed){
       } else if(e.kind === 'window'){
         windows.push(it);
       } else if(e.kind === 'call' && AGG_FNS.indexOf(e.fn) < 0){
-        /* CONVERT(type, expr, style) 的來源欄位是第二個參數，不是第一個（那是型別）；
-           其他函式（CAST/TRIM/UPPER…）都是第一個參數就是來源欄位。 */
-        const at0 = e.fn === 'CONVERT' ? 1 : 0, a0 = e.args[at0];
-        /* 「函式（一個來源欄位，其他參數都是固定值）」照舊用可以換欄位的函式步驟；
-           UPPER(TRIM(a))、DATE_TRUNC('month', d)、COALESCE(o.a, o.b) 這種
-           來源不只一欄、或包了好幾層的，存成算式樹 —— 以前不是被擋，就是把 o.b 原文抄進
-           沒有 o 這個別名的 CTE */
-        const plain = (!a0 || a0.kind === 'col' || a0.kind === 'star') &&
-          e.args.every((a, i)=>i === at0 || a.kind === 'lit' || (e.fn === 'CONVERT' && i === 0));
-        if(!plain){ appendDerive(e, it.alias || exprName(e)); return; }
-        const n = add('derive', {
-          fn: e.fn,
-          left: (!a0 || a0.kind === 'star') ? '*' : exprName(a0),
-          as: it.alias || exprName(e)
-        });
-        /* NOW() 沒有參數，不能寫回成 NOW(*) */
-        if(!e.args.length) n.noArgs = true;
-        /* 其他參數（COALESCE 的預設值、CONVERT 的型別和樣式、CAST 的型別）要帶著走 */
-        if(e.raws.length > 1){ n.args = e.raws.slice(); n.argAt = at0; }
-        if(e.castRaw) n.castAs = e.castRaw;
-        conn(cur, n); cur = n;
-        cols = cols ? cols.concat([n.as]) : null;
+        appendDerive(e, it.alias || exprName(e));
       }
     });
+
+    /* 只寫在 HAVING 的彙總（HAVING SUM(amount) > 10，SELECT 裡沒有 SUM）也藏一欄來算，
+       篩完再由「選欄位」拿掉。以前會直接擋下 */
+    (function liftHaving(list){
+      list.forEach(x=>{
+        if(x.kind === 'or') x.branches.forEach(liftHaving);
+        else if(x.left && x.left.kind === 'call' && AGG_FNS.indexOf(x.left.fn) >= 0) liftAggs(x.left);
+      });
+    })(c.having);
 
     const aggs = [];
     c.items.forEach(it=>{
@@ -5452,6 +5504,7 @@ function astToGraph(parsed){
         aggs.push({fn:it.expr.distinct ? 'COUNT_DISTINCT' : it.expr.fn, col:col, as:it.alias || exprName(it.expr)});
       }
     });
+    hidden.forEach(h=>aggs.push({fn:h.fn, col:h.col, as:h.as}));
     if(c.groupBy.length || aggs.length){
       const keys = c.groupBy.map(g=>{
         if(g.kind === 'col') return g.col;
@@ -5480,7 +5533,16 @@ function astToGraph(parsed){
       if(it.kind === 'expr' && it.expr.kind === 'call' && AGG_FNS.indexOf(it.expr.fn) >= 0)
         aggAliases[aggKey(it.expr)] = it.alias || exprName(it.expr);
     });
+    hidden.forEach(h=>{ if(!aggAliases[h.key]) aggAliases[h.key] = h.as; });
     condBlocks(c.having, aggAliases).forEach(spec=>{ const f = add('filter', spec); conn(cur, f); cur = f; });
+
+    postItems.forEach(x=>{
+      /* 彙總之後只剩分組欄和彙總結果；算式裡其他欄位在原 SQL 裡也不合法 */
+      const avail = cols || [];
+      const stray = exprCols(cleanExpr(x.tree)).find(c=>avail.indexOf(c) < 0);
+      if(stray) throw {sqlErr:true, msg:'算式裡的 '+stray+' 不在 GROUP BY 裡，也不是彙總，目前做不出對應的步驟', pos:x.it.expr.p || 0};
+      appendDerive(x.tree, x.it.alias || exprName(x.it.expr));
+    });
 
     windows.forEach(it=>{
       const e = it.expr;
@@ -5501,7 +5563,7 @@ function astToGraph(parsed){
        少了這塊，反解出來的 SQL 會變成整張表抓 —— 原本只要 4 欄的查詢會拖回 40 欄。
        彙總通常已經只吐 key + 聚合欄；新彙總若改了順序或 key 別名，仍要補選欄位。 */
     const hasStar = c.items.some(it=>it.kind === 'star');
-    if(!hasStar && ((!c.groupBy.length && !aggs.length) || caseCols.size || aggs.some(a=>a.fn === 'COUNT_DISTINCT'))){
+    if(!hasStar && ((!c.groupBy.length && !aggs.length) || caseCols.size || postItems.length || hidden.length || aggs.some(a=>a.fn === 'COUNT_DISTINCT'))){
       const keep = [], outCols = [];
       c.items.forEach(it=>{
         if(it.kind !== 'expr') return;
