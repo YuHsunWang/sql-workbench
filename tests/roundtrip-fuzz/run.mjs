@@ -163,6 +163,18 @@ join_renamed: i => pick([
   'SELECT o.id, o2.amount AS other FROM orders o JOIN orders o2 ON o.customer_id = o2.customer_id WHERE o2.amount > o.amount ORDER BY o.id, o2.id',
   `SELECT a.id, c.city FROM orders a JOIN orders b ON a.id = b.id JOIN customers c ON b.customer_id = c.id${i%2?" WHERE c.city <> 'Taipei'":''} ORDER BY a.id`,
   `SELECT o.id, p.paid FROM orders o JOIN payments p ON o.id = p.order_id ORDER BY p.id ${i%2?'DESC':'ASC'}`]),
+// FULL OUTER JOIN was refused (issue #5). Unmatched rows on both sides survive; the right key stays as id_2.
+full_join: i => pick([
+  `SELECT o.id, c.id AS cid, c.city FROM orders o FULL OUTER JOIN customers c ON o.customer_id = c.id ORDER BY o.id, c.id`,
+  'SELECT COALESCE(o.customer_id, c.id) AS k, o.amount, c.tier FROM orders o FULL JOIN customers c ON o.customer_id = c.id ORDER BY k, o.amount',
+  `SELECT o.id, p.paid FROM orders o FULL JOIN payments p ON o.id = p.order_id WHERE ${pick(['o.id IS NULL','p.paid IS NULL','p.id > 2','o.amount >= 20'])} ORDER BY o.id, p.id`,
+  `SELECT o.id, p.id AS pid FROM orders o FULL JOIN payments p ON o.id = p.order_id AND o.amount ${pick(['<>','>','<='])} p.paid ORDER BY o.id, p.id`]),
+// Non-equi JOIN conditions (BETWEEN, <, <=, >, >=, <>) were refused (issue #5); NULL on either side never matches.
+nonequi_join: i => pick([
+  `SELECT o.id, p.id AS pid FROM orders o JOIN payments p ON o.amount ${pick(['<','<=','>','>=','<>'])} p.paid ORDER BY o.id, p.id`,
+  `SELECT a.id, b.id AS bid FROM date_sales a ${i%2?'LEFT ':''}JOIN date_sales b ON a.sale_date BETWEEN b.sale_date AND b.cutoff_date ORDER BY a.id, b.id`,
+  `SELECT o.id, p.id AS pid FROM orders o LEFT JOIN payments p ON o.id = p.order_id AND p.paid >= o.qty ORDER BY o.id, p.id`,
+  `SELECT o.id, c.id AS cid FROM customers c RIGHT JOIN orders o ON o.customer_id ${pick(['<','>='])} c.id ORDER BY o.id, c.id`]),
 // The LEFT JOIN key folded into the left one differs on unmatched rows (NULL vs the left value): must be refused.
 unsupported_left_key: i => `SELECT o.id FROM orders o LEFT JOIN customers c ON o.customer_id = c.id WHERE c.id IS ${i%2?'NOT ':''}NULL`,
 // A column that is neither grouped nor aggregated inside such an expression cannot be rebuilt and must be refused.
@@ -187,7 +199,7 @@ function diff(a,b) {
 const norm = sql => sql.replace(/\s+/g,' ').trim().replace(/;$/,'');
 const counts = {total:0,identical_result:0,different_result:0,regenerated_sql_fails:0,parse_unsupported:0,textual_identical:0};
 const unsupported = {}, classes = new Map(), inputs = new Set();
-const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_') || ['agg_arith','group_expression','count_literal','expr_nested','agg_expr','decimal_division','agg_post','having_only','where_expr','where_star_expr','having_expr','case_general','agg_case_expr','case_general_group','window_more','scalar_sub','join_renamed'].includes(k)));
+const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_') || ['agg_arith','group_expression','count_literal','expr_nested','agg_expr','decimal_division','agg_post','having_only','where_expr','where_star_expr','having_expr','case_general','agg_case_expr','case_general_group','window_more','scalar_sub','join_renamed','full_join','nonequi_join'].includes(k)));
 const mustRefuse = {
   unsupported_aggregate_order:/ORDER BY.*SELECT/,
   unsupported_case_group:/GROUP BY.*CASE/,
@@ -224,6 +236,19 @@ for (const [category, make] of Object.entries(families)) for (let i=0;i<16;i++) 
   const item={sql,regenerated,diff:failure?`original rows ${stable(original.rows.slice(0,4))}; regenerated: ${failure}`:diff(original,actual)};
   if (!classes.has(key)||sql.length<classes.get(key).sql.length) classes.set(key,item);
 }
+// MySQL has no FULL JOIN; its LEFT JOIN UNION ALL rewrite must give the same rows too.
+api.state.dialect = 'mysql';
+let mysqlFull = 0;
+for (const sql of [...inputs].filter(s=>/FULL/.test(s))) {
+  graphFromSQL(api, sql);
+  const regenerated = api.buildSQL(), ordered = /\bORDER\s+BY\b/i.test(sql);
+  if (!/UNION ALL/.test(regenerated)) throw new Error(`MySQL FULL JOIN not rewritten: ${regenerated}`);
+  const original = query(sql, ordered), actual = query(regenerated, ordered);
+  if (stable(original) !== stable(actual)) throw new Error(`MySQL FULL JOIN rewrite differs for ${sql}: ${diff(original, actual)}`);
+  mysqlFull++;
+}
+api.state.dialect = 'postgres';
+console.log('MYSQL_FULL '+mysqlFull);
 // Recheck simpler candidate inputs instead of merely calling the shortest random case minimal.
 const reduced = {
   'alias/execution': {sql:'SELECT id x FROM orders', location:'sql-blocks.html:4222'},

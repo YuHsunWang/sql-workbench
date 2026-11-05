@@ -86,9 +86,77 @@ test('regression: HAVING uses the aggregate output alias', () => {
   return 'COUNT(*) HAVING threshold returns the aliased count';
 });
 
-test('regression: FULL OUTER JOIN is refused when the graph cannot represent it', () => {
-  sqlError('SELECT a.id FROM a FULL OUTER JOIN b ON a.id=b.id');
-  return 'FULL OUTER JOIN raises sqlErr';
+/* FULL OUTER JOIN and non-equi conditions (BETWEEN, <, >=, <>) were refused (issue #5).
+   FULL keeps both sides' unmatched rows and the right key column — a right-only row's
+   key exists only there; MySQL, which has no FULL JOIN, gets LEFT JOIN UNION ALL the
+   unmatched right rows (written as right LEFT JOIN left: SQLite 3.53 pushes an outer
+   WHERE wrongly into a RIGHT JOIN inside UNION ALL). BETWEEN is its two comparisons. */
+test('join: FULL OUTER and non-equi conditions are exact in SQL and preview', () => {
+  const db = new DatabaseSync(':memory:');
+  const data = {
+    o: {cols: ['id', 'cid', 'd', 'amount'], rows: [[1, 1, '2024-01-05', 10], [2, 2, '2024-02-10', 20], [3, 9, '2024-03-01', null], [4, null, null, 40], [5, 1, '2023-12-31', 5]]},
+    c: {cols: ['id', 'city'], rows: [[1, 'A'], [2, null], [3, 'C'], [null, 'D']]},
+    p: {cols: ['pid', 'start', 'stop', 'rate'], rows: [[1, '2024-01-01', '2024-01-31', 3], [2, '2024-02-01', '2024-02-29', 4], [3, '2024-01-15', '2024-02-15', 5]]},
+  };
+  for (const [t, {cols, rows}] of Object.entries(data)) {
+    db.exec(`CREATE TABLE ${t}(${cols.join(', ')})`);
+    const ins = db.prepare(`INSERT INTO ${t} VALUES (${cols.map(() => '?').join(', ')})`);
+    rows.forEach(r => ins.run(...r));
+  }
+  const sorted = rows => json(rows).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const run = sql => sorted(db.prepare(sql).all().map(r => Object.values(r)));
+  const app = loadApp();
+  app.document.getElementById('ddl').value = 'CREATE TABLE o (id INT, cid INT, d DATE, amount INT); CREATE TABLE c (id INT, city TEXT); CREATE TABLE p (pid INT, start DATE, stop DATE, rate INT);';
+  app.document.getElementById('btn-parse').listeners.click();
+  const schema = Object.fromEntries(Object.entries(data).map(([t, {cols, rows}]) => [t, {cols: cols.map(name => ({name})), rows}]));
+  const trip = (sql, dialect = 'postgres') => {
+    app.state.dialect = dialect;
+    graphFromSQL(app, sql);
+    const generated = app.buildSQL();
+    return generated;
+  };
+  const shapes = [
+    'SELECT o.id, c.id AS cid2, c.city FROM o FULL OUTER JOIN c ON o.cid = c.id',
+    'SELECT COALESCE(o.cid, c.id) AS k, o.amount, c.city FROM o FULL JOIN c ON o.cid = c.id',
+    'SELECT o.id, c.city FROM o FULL JOIN c ON o.cid = c.id WHERE c.city IS NULL',
+    'SELECT o.id, p.rate FROM o JOIN p ON o.d BETWEEN p.start AND p.stop',
+    'SELECT o.id, p.pid FROM o LEFT JOIN p ON o.d >= p.start AND o.d <= p.stop',
+    'SELECT o.id, p.pid FROM o JOIN p ON p.start > o.d',
+    'SELECT o.id, c.id AS other FROM o JOIN c ON o.cid <> c.id',
+    'SELECT o.id, p.pid FROM p RIGHT JOIN o ON o.d BETWEEN p.start AND p.stop',
+    'SELECT o.id, p.pid FROM o FULL JOIN p ON o.d BETWEEN p.start AND p.stop',
+  ];
+  for (const sql of shapes) {
+    const want = run(sql);
+    const generated = trip(sql);
+    assert.deepEqual(run(generated), want, generated);
+    graphFromSQL(app, generated);
+    assert.equal(app.buildSQL(), generated, `re-import of ${sql}`);
+    installGraph(app, {nodes: app.state.nodes, edges: app.state.edges}, schema);
+    assert.deepEqual(sorted(app.evalNode(app.state.nodes.find(n => n.type === 'output')).rows), want, `preview of ${sql}`);
+    if (/FULL/.test(sql)) {
+      app.state.schema = {};
+      app.document.getElementById('btn-parse').listeners.click();
+      const mysql = trip(sql, 'mysql');
+      assert.match(mysql, /LEFT JOIN[\s\S]*UNION ALL[\s\S]*FROM \w+ AS b\s+LEFT JOIN[\s\S]*IS NULL/);
+      assert.deepEqual(run(mysql), want, mysql);
+    }
+  }
+  /* the panel picks the operator and FULL the same way */
+  app.state.dialect = 'postgres';
+  const g = graphFromSQL(app, 'SELECT o.id, p.pid FROM o JOIN p ON o.d >= p.start');
+  app.state.sel = g.nodes.find(n => n.type === 'join').id;
+  const change = (dataset, value) => app.document.getElementById('inspector').listeners.change({target: {dataset, value}});
+  change({k: '0', f: 'op'}, '<');
+  change({f: 'joinType'}, 'FULL');
+  assert.match(app.buildSQL(), /FULL JOIN p AS b\s+ON a\.d < b\.start/);
+  change({k: '0', f: 'op'}, '=');
+  assert.match(app.buildSQL(), /ON a\.d = b\.start/);
+  assert.equal(g.nodes.find(n => n.type === 'join').keys[0].op, undefined, 'an equality key looks like it always did');
+  sqlError('SELECT o.id FROM o FULL JOIN c USING (id)');
+  assert.match(sqlError('SELECT o.id FROM o JOIN p ON o.d NOT BETWEEN p.start AND p.stop').msg, /NOT BETWEEN/);
+  assert.throws(() => graphFromSQL(app, 'SELECT o.id FROM o JOIN c ON o.id < o.cid'), e => e.sqlErr === true && /同一邊/.test(e.msg));
+  return `${shapes.length} shapes exact in SQLite, re-import and preview; FULL also as MySQL's LEFT UNION ALL RIGHT`;
 });
 
 test('regression: NULLS LAST is refused when ordering cannot preserve it', () => {

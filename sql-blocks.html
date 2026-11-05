@@ -722,8 +722,8 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
       </div>
       <div id="stmt-pick"></div>
       <div id="parse-out"></div>
-      <p class="supported">看得懂：<code>WITH</code> · <code>SELECT</code> · <code>DISTINCT</code> · <code>FROM</code> · 子查詢 · <code>JOIN … ON</code> · <code>WHERE</code>（AND / OR / 括號）· <code>BETWEEN</code> · <code>IN</code> · <code>IN (SELECT …)</code> · <code>EXISTS</code>（含 NOT；相關條件只支援內外欄位相等且以 AND 串接）· 純量子查詢（<code>x &gt; (SELECT AVG(x) FROM t)</code>、<code>SUM(x) / (SELECT SUM(x) FROM t)</code>）· <code>CROSS JOIN</code> · <code>LIKE</code> · <code>IS NULL</code> · <code>CASE</code>（含 AND / OR、<code>CASE x WHEN</code>）· 多層算式與函式（<code>price * qty * (1 - d)</code>、<code>UPPER(TRIM(x))</code>、<code>||</code>）· 條件裡的函式（<code>YEAR(d) = 2024</code>）· <code>CURRENT_DATE</code> / <code>INTERVAL</code> · 聚合函數（含 <code>ROUND(AVG(x), 2)</code>、<code>SUM(CASE …) / COUNT(*)</code>）· <code>GROUP BY</code> · <code>HAVING</code> · 視窗函數 <code>OVER</code>（排名、<code>NTILE</code>、<code>LAG / LEAD</code>、多個排序欄、框架 <code>ROWS BETWEEN</code>）· <code>UNION</code> · <code>ORDER BY</code> · <code>LIMIT</code> / <code>TOP</code> / <code>FETCH FIRST</code>。<br>
-      看不懂：相關子查詢（上述等值形式除外；純量子查詢要不相關、保證最多一列）、<code>ANY / ALL / SOME</code>、<code>PIVOT</code>、<code>FULL OUTER JOIN</code>、非等值 JOIN、<code>FIRST_VALUE</code> 之類其他視窗函數、<code>RANGE BETWEEN 7 PRECEDING</code>（照值差距的框架）。碰到會直接告訴你卡在第幾行第幾個字。</p>
+      <p class="supported">看得懂：<code>WITH</code> · <code>SELECT</code> · <code>DISTINCT</code> · <code>FROM</code> · 子查詢 · <code>JOIN … ON</code>（INNER / LEFT / RIGHT / FULL；等號、<code>&lt; &gt;= &lt;&gt;</code>、<code>BETWEEN</code>）· <code>WHERE</code>（AND / OR / 括號）· <code>BETWEEN</code> · <code>IN</code> · <code>IN (SELECT …)</code> · <code>EXISTS</code>（含 NOT；相關條件只支援內外欄位相等且以 AND 串接）· 純量子查詢（<code>x &gt; (SELECT AVG(x) FROM t)</code>、<code>SUM(x) / (SELECT SUM(x) FROM t)</code>）· <code>CROSS JOIN</code> · <code>LIKE</code> · <code>IS NULL</code> · <code>CASE</code>（含 AND / OR、<code>CASE x WHEN</code>）· 多層算式與函式（<code>price * qty * (1 - d)</code>、<code>UPPER(TRIM(x))</code>、<code>||</code>）· 條件裡的函式（<code>YEAR(d) = 2024</code>）· <code>CURRENT_DATE</code> / <code>INTERVAL</code> · 聚合函數（含 <code>ROUND(AVG(x), 2)</code>、<code>SUM(CASE …) / COUNT(*)</code>）· <code>GROUP BY</code> · <code>HAVING</code> · 視窗函數 <code>OVER</code>（排名、<code>NTILE</code>、<code>LAG / LEAD</code>、多個排序欄、框架 <code>ROWS BETWEEN</code>）· <code>UNION</code> · <code>ORDER BY</code> · <code>LIMIT</code> / <code>TOP</code> / <code>FETCH FIRST</code>。<br>
+      看不懂：相關子查詢（上述等值形式除外；純量子查詢要不相關、保證最多一列）、<code>ANY / ALL / SOME</code>、<code>PIVOT</code>、<code>FULL JOIN … USING</code>、JOIN 條件裡的 <code>OR</code> 或算式、<code>FIRST_VALUE</code> 之類其他視窗函數、<code>RANGE BETWEEN 7 PRECEDING</code>（照值差距的框架）。碰到會直接告訴你卡在第幾行第幾個字。</p>
     </div>
   </div>
 </div>
@@ -908,6 +908,31 @@ function joinKey(row, pairs, side){
 /* 右邊如果有跟左邊撞名的非 key 欄位，改名成 x_2、x_3。不改名的話 SQL Server
    的 CTE 會因為欄名重複直接報錯，而且下游的 WHERE 也分不出指的是哪一邊。
    逐步檢視和 SQL 共用這一份，才不會兩邊各算各的。 */
+/* JOIN 條件可以是等號，也可以是 < <= > >= <>（a.d >= b.start AND a.d <= b.end）。
+   只有等號的那一組，右邊那欄跟左邊一樣、可以只留左邊那份；FULL JOIN 右表獨有的列
+   左邊是 NULL，所以一欄都不能併 */
+const JOIN_OPS = ['=','<>','<','<=','>','>='];
+const FLIP_OP = {'=':'=', '<>':'<>', '<':'>', '>':'<', '<=':'>=', '>=':'<='};
+const keyOp = k => k.op && JOIN_OPS.indexOf(k.op) >= 0 ? k.op : '=';
+function joinDrop(n){
+  if(n.joinType === 'FULL') return new Set();
+  return new Set(joinKeys(n).filter(k=>k.left && k.right && keyOp(k) === '=').map(k=>k.right));
+}
+const equiJoin = n => joinKeys(n).every(k=>keyOp(k) === '=');
+/* 左右兩列配不配得上：每一組條件都要成立，NULL 跟什麼都配不上（跟資料庫一樣） */
+function joinMatcher(n, L, R){
+  const ks = joinKeys(n).map(k=>({l:L.cols.indexOf(k.left), r:R.cols.indexOf(k.right), op:keyOp(k),
+    lf:castRun(k.lfn || ''), rf:castRun(k.rfn || '')})).filter(p=>p.l >= 0 && p.r >= 0);
+  if(!ks.length) return n.cross && !joinKeys(n).length ? () => true : null;
+  return (l, r) => ks.every(p=>{
+    const a = p.lf(l[p.l]), b = p.rf(r[p.r]);
+    if(a == null || b == null) return false;
+    if(p.op === '=') return String(a) === String(b);
+    if(p.op === '<>') return String(a) !== String(b);
+    const c = cmpVal(a, b);
+    return p.op === '<' ? c < 0 : p.op === '<=' ? c <= 0 : p.op === '>' ? c > 0 : c >= 0;
+  });
+}
 function joinLayout(Lcols, Rcols, dropNames){
   const used = new Set(Lcols);
   const keep = [];
@@ -1001,22 +1026,21 @@ function evalNode(node, ctx){
   case 'join': {
     const L = evalNode(srcOf(node.id,0), ctx), R = evalNode(srcOf(node.id,1), ctx);
     if(!L.cols.length || !R.cols.length) return EMPTY;
-    const pairs = joinKeys(node)
-      .map(k=>({l:L.cols.indexOf(k.left), r:R.cols.indexOf(k.right), right:k.right, lfn:k.lfn || '', rfn:k.rfn || ''}))
-      .filter(p=>p.l >= 0 && p.r >= 0);
-    /* ON 1 = 1（純量子查詢接回來、CROSS JOIN）：每一列配右邊每一列 */
-    const cross = node.cross && !joinKeys(node).length;
-    if(!pairs.length && !cross) return EMPTY;
-    const lay = joinLayout(L.cols, R.cols, new Set(pairs.map(p=>p.right)));
+    /* ON 1 = 1（純量子查詢接回來、CROSS JOIN）時 match 永遠成立：每一列配右邊每一列 */
+    const match = joinMatcher(node, L, R);
+    if(!match) return EMPTY;
+    const lay = joinLayout(L.cols, R.cols, joinDrop(node));
     const cols = lay.cols, keep = lay.keep;
-    const key = (row, side) => joinKey(row, pairs, side);
-    const rows = [];
+    const rows = [], usedR = new Set();
+    const outer = node.joinType === 'LEFT' || node.joinType === 'FULL';
     L.rows.forEach(l=>{
-      const k = cross ? '' : key(l, 'l');
-      const hits = k === null ? [] : cross ? R.rows : R.rows.filter(r=>key(r, 'r') === k);
-      if(hits.length) hits.forEach(r=>rows.push(l.concat(keep.map(k=>r[k.i]))));
-      else if(node.joinType === 'LEFT') rows.push(l.concat(keep.map(()=>null)));
+      let hit = false;
+      R.rows.forEach((r, i)=>{ if(match(l, r)){ hit = true; usedR.add(i); rows.push(l.concat(keep.map(k=>r[k.i]))); } });
+      if(!hit && outer) rows.push(l.concat(keep.map(()=>null)));
     });
+    /* FULL JOIN：右表沒配到的列也留下，左邊的欄位補 NULL */
+    if(node.joinType === 'FULL')
+      R.rows.forEach((r, i)=>{ if(!usedR.has(i)) rows.push(L.cols.map(()=>null).concat(keep.map(k=>r[k.i]))); });
     return {cols:cols, rows:rows};
   }
 
@@ -1739,7 +1763,7 @@ function buildSQL(){
       const L = srcOf(n.id,0), R = srcOf(n.id,1);
       const Lc = evalNode(L).cols, Rc = evalNode(R).cols;
       const ks = joinKeys(n).filter(k=>k.left && k.right);
-      const lay = joinLayout(Lc, Rc, new Set(ks.map(k=>k.right)));
+      const lay = joinLayout(Lc, Rc, joinDrop(n));
       /* 左邊整批帶過去 —— 左邊的欄位不會被丟掉也不會改名，一欄一欄列出來的話，
          兩張寬表一 JOIN 就是七十行沒人讀得完的清單。
          右邊沒辦法這樣：key 欄要拿掉、撞名的要改名，只能一欄一欄寫。 */
@@ -1750,10 +1774,18 @@ function buildSQL(){
       const sel = [A+'.*'].concat(lay.keep.map(k=>
         B+'.'+q(k.src) + (k.name !== k.src ? ' AS '+q(k.name) : '')));
       const on = ks.length
-        ? ks.map(k=>castSQL(k.lfn, A+'.'+q(k.left))+' = '+castSQL(k.rfn, B+'.'+q(k.right))).join('\n   AND ')
+        ? ks.map(k=>castSQL(k.lfn, A+'.'+q(k.left))+' '+keyOp(k)+' '+castSQL(k.rfn, B+'.'+q(k.right))).join('\n   AND ')
         : n.cross ? '1 = 1' : '1 = 1 /* 還沒選 JOIN 條件 */';
-      sql = '  SELECT '+list(sel, 9)+
-            '\n  FROM '+ref(L)+tblAs+A+'\n  '+n.joinType+' JOIN '+ref(R)+tblAs+B+'\n    ON '+on;
+      const part = type => '  SELECT '+list(sel, 9)+
+            '\n  FROM '+ref(L)+tblAs+A+'\n  '+type+' JOIN '+ref(R)+tblAs+B+'\n    ON '+on;
+      /* MySQL 沒有 FULL JOIN：先 LEFT JOIN，再補上右表沒配到的列（右表 LEFT JOIN 左表、左邊是 NULL 的）。
+         配得到的列，左邊第一組條件的欄位一定不是 NULL（NULL 配不上任何東西），所以拿它分辨 */
+      if(n.joinType === 'FULL' && state.dialect === 'mysql')
+        sql = ks.length
+          ? part('LEFT')+'\n  UNION ALL\n  SELECT '+list(sel, 9)+'\n  FROM '+ref(R)+tblAs+B+'\n  LEFT JOIN '+ref(L)+tblAs+A+'\n    ON '+on+
+            '\n  WHERE '+castSQL(ks[0].lfn, A+'.'+q(ks[0].left))+' IS NULL'
+          : part('LEFT')+' /* MySQL 的 FULL JOIN 要有對照條件 */';
+      else sql = part(n.joinType);
 
     } else if(n.type === 'union'){
       const A = srcOf(n.id,0), B = srcOf(n.id,1);
@@ -2294,7 +2326,7 @@ function nodeSummary(n){
       const ks = joinKeys(n);
       if(!ks.length && n.cross) return n.joinType+'<br>每一列都配上右邊每一列';
       if(!ks.length) return n.joinType+'<br><span class="warn">還沒選條件</span>';
-      const one = k => (k.lfn ? CASTS[k.lfn].label+'(' : '')+k.left+(k.lfn ? ')' : '')+' = '+
+      const one = k => (k.lfn ? CASTS[k.lfn].label+'(' : '')+k.left+(k.lfn ? ')' : '')+' '+esc(keyOp(k))+' '+
                        (k.rfn ? CASTS[k.rfn].label+'(' : '')+k.right+(k.rfn ? ')' : '');
       if(ks.length === 1) return n.joinType+'<br><code>'+one(ks[0])+'</code>';
       return n.joinType+'<br><code>'+one(ks[0])+'</code><br>＋ 另 '+(ks.length-1)+' 個條件';
@@ -2421,13 +2453,10 @@ function renderNodes(){
    不能只比總列數 —— INNER JOIN 同時刷掉配不到的列，總數可能反而變少 */
 function joinFanout(n){
   const L = evalNode(srcOf(n.id, 0)), R = evalNode(srcOf(n.id, 1));
-  const pairs = joinKeys(n).map(k=>({l:L.cols.indexOf(k.left), r:R.cols.indexOf(k.right), lfn:k.lfn || '', rfn:k.rfn || ''}))
-    .filter(p=>p.l >= 0 && p.r >= 0);
-  if(!pairs.length) return 0;
-  const count = new Map();
-  R.rows.forEach(r=>{ const k = joinKey(r, pairs, 'r'); if(k !== null) count.set(k, (count.get(k) || 0) + 1); });
+  const match = joinMatcher(n, L, R);
+  if(!match || (n.cross && !joinKeys(n).length)) return 0;
   let most = 0;
-  L.rows.forEach(l=>{ const k = joinKey(l, pairs, 'l'); if(k !== null) most = Math.max(most, count.get(k) || 0); });
+  L.rows.forEach(l=>{ most = Math.max(most, R.rows.filter(r=>match(l, r)).length); });
   return most;
 }
 /* 每個步驟進來幾列、出去幾列（示意資料）。KNIME、Alteryx 都把筆數標在連線上：
@@ -2486,8 +2515,7 @@ function lintGraph(){
     /* 1. LEFT JOIN 之後在 WHERE 篩右表的欄位：沒配到的列那裡是 NULL，會被刷掉 */
     if(n.type === 'join' && n.joinType === 'LEFT'){
       const L = evalNode(srcOf(n.id, 0)).cols, R = evalNode(srcOf(n.id, 1)).cols;
-      const keys = new Set(joinKeys(n).filter(k=>k.left && k.right).map(k=>k.right));
-      let right = new Set(joinLayout(L, R, keys).keep.map(k=>k.name));
+      let right = new Set(joinLayout(L, R, joinDrop(n)).keep.map(k=>k.name));
       for(const step of downstreamOf(n)){
         const m = step.n;
         if(META[m.type].ins > 1 || m.type === 'groupby') break;
@@ -3099,9 +3127,10 @@ function renderInspector(){
   if(n.type === 'join'){
     const L = colsInto(n.id,0), R = colsInto(n.id,1);
     h += '<div class="rowf"><label>方式</label><select data-f="joinType">'+
-      opt('INNER', n.joinType, 'INNER（兩邊都有才留）')+opt('LEFT', n.joinType, 'LEFT（左邊全留）')+'</select></div>';
+      opt('INNER', n.joinType, 'INNER（兩邊都有才留）')+opt('LEFT', n.joinType, 'LEFT（左邊全留）')+
+      opt('FULL', n.joinType, 'FULL（兩邊全留）')+'</select></div>';
     const ks = joinKeys(n);
-    h += '<div class="sec">對照條件（全部都要相等）</div>';
+    h += '<div class="sec">對照條件（每一組都要成立）</div>';
     const castOpts = (cur, i, f) => '<select data-k="'+i+'" data-f="'+f+'" style="max-width:96px;flex:none">'+
       Object.keys(CASTS).map(k=>opt(k, cur || '', CASTS[k].label)).join('')+'</select>';
     ks.forEach((k,i)=>{
@@ -3109,14 +3138,21 @@ function renderInspector(){
            '<select data-k="'+i+'" data-f="left" style="min-width:110px">'+colChoices(L, k.left)+'</select>'+
            castOpts(k.lfn, i, 'lfn')+
            (ks.length > 1 ? '<button class="x" data-del-key="'+i+'" aria-label="刪掉">×</button>' : '')+
-           '<div style="width:100%;color:var(--ink-3);font-family:var(--mono);font-size:11px;padding-left:2px">=</div>'+
+           '<div style="width:100%"><select data-k="'+i+'" data-f="op" style="max-width:64px;font-family:var(--mono)">'+
+             JOIN_OPS.map(o=>'<option value="'+esc(o)+'"'+(o === keyOp(k) ? ' selected' : '')+'>'+esc(o)+'</option>').join('')+'</select></div>'+
            '<select data-k="'+i+'" data-f="right" style="min-width:110px">'+colChoices(R, k.right)+'</select>'+
            castOpts(k.rfn, i, 'rfn')+
            '</div>';
     });
     h += '<button class="btn ghost" data-add-key style="width:100%;margin-top:4px">＋ 多一個對照欄位</button>';
     if(!L.length || !R.length) h += '<p class="note">兩個左邊圓點都要接上來源，才會有欄位可選。</p>';
-    else if(ks.length > 1) h += '<p class="note">複合鍵：<b>每一組都相等</b>才算配對成功。少一組就會多配出很多列。</p>';
+    else if(ks.length > 1) h += '<p class="note">複合條件：<b>每一組都成立</b>才算配對成功。少一組就會多配出很多列。</p>';
+    if(!equiJoin(n))
+      h += '<p class="note">有不是等號的條件（像 <code>日期 &gt;= 起日</code>）：一列可能配到好幾列，範圍重疊時列數會變多。</p>';
+    if(n.joinType === 'FULL')
+      h += '<p class="note">FULL JOIN 兩邊沒配到的列都留下：左表沒配到的右邊補 NULL，右表沒配到的左邊補 NULL。'+
+           '右表的對照欄也會留著（撞名時改名成 <code>欄名_2</code>），合併成一欄要自己用 COALESCE。'+
+           (state.dialect === 'mysql' ? '<br>MySQL 沒有 FULL JOIN，SQL 會寫成 LEFT JOIN 再 UNION ALL 右表沒配到的列。' : '')+'</p>';
     if(ks.some(k=>k.lfn || k.rfn))
       h += '<p class="note">有套轉換。<b>注意：</b>欄位被函數包住後，資料庫多半用不到那個索引，大表會變慢。<br>可以的話在來源就存好對得上的欄位。</p>';
     else
@@ -3379,8 +3415,7 @@ function colType(node, col){
   if(node.type === 'join'){
     const L = srcOf(node.id, 0), R = srcOf(node.id, 1), Lc = evalNode(L).cols;
     if(Lc.indexOf(col) >= 0) return colType(L, col);
-    const keys = new Set(joinKeys(node).filter(k=>k.left && k.right).map(k=>k.right));
-    const k = joinLayout(Lc, evalNode(R).cols, keys).keep.find(k=>k.name === col);
+    const k = joinLayout(Lc, evalNode(R).cols, joinDrop(node)).keep.find(k=>k.name === col);
     return k ? colType(R, k.src) : '';
   }
   if(node.type === 'select' && node.outCols){
@@ -3454,8 +3489,10 @@ inspector.addEventListener('change', e=>{
   }
   else if(n.type === 'window' && winEdit(n, t, f, v)){ /* 視窗的數字和框架欄位 */ }
   else if(t.dataset.k !== undefined){
-    n.keys = joinKeys(n).map(x=>({left:x.left, right:x.right, lfn:x.lfn || '', rfn:x.rfn || ''}));
-    n.keys[Number(t.dataset.k)][f] = v;
+    n.keys = joinKeys(n).map(x=>Object.assign({left:x.left, right:x.right, lfn:x.lfn || '', rfn:x.rfn || ''}, x.op && x.op !== '=' ? {op:x.op} : {}));
+    const key = n.keys[Number(t.dataset.k)];
+    if(f === 'op'){ if(v === '=' || JOIN_OPS.indexOf(v) < 0) delete key.op; else key.op = v; }
+    else key[f] = v;
     delete n.leftCol; delete n.rightCol;
   }
   else if(t.dataset.ob !== undefined) quoteForText(n, n.any[Number(t.dataset.ob)][Number(t.dataset.oc)], f, v);
@@ -4121,29 +4158,34 @@ function buildSteps(){
     if(n.type === 'join'){
       const L = evalNode(srcOf(n.id,0)), R = evalNode(srcOf(n.id,1));
       const pairs = joinKeys(n)
-        .map(k=>({l:L.cols.indexOf(k.left), r:R.cols.indexOf(k.right), left:k.left, right:k.right, lfn:k.lfn, rfn:k.rfn}))
+        .map(k=>({l:L.cols.indexOf(k.left), r:R.cols.indexOf(k.right), left:k.left, right:k.right, lfn:k.lfn, rfn:k.rfn, op:keyOp(k)}))
         .filter(x=>x.l >= 0 && x.r >= 0);
-      if(!pairs.length) return;
+      const match = joinMatcher(n, L, R);
+      if(!pairs.length || !match) return;
+      /* 全是等號時同一個對照值同一個顏色；有範圍條件時一列會配到好幾種值，只標配不配得到 */
+      const equi = pairs.every(x=>x.op === '=');
       const keyL = row => joinKey(row, pairs, 'l');
       const keyR = row => joinKey(row, pairs, 'r');
       const keys = [];
-      L.rows.forEach(r=>{ const k = keyL(r); if(k !== null && keys.indexOf(k) < 0) keys.push(k); });
-      R.rows.forEach(r=>{ const k = keyR(r); if(k !== null && keys.indexOf(k) < 0) keys.push(k); });
+      if(equi){
+        L.rows.forEach(r=>{ const k = keyL(r); if(k !== null && keys.indexOf(k) < 0) keys.push(k); });
+        R.rows.forEach(r=>{ const k = keyR(r); if(k !== null && keys.indexOf(k) < 0) keys.push(k); });
+      }
       const col = new Map(keys.map((k,i)=>[k, TINTS[i % TINTS.length]]));
-      const lset = new Set(L.rows.map(keyL).filter(k=>k !== null));
-      const rset = new Set(R.rows.map(keyR).filter(k=>k !== null));
-      const label = pairs.map(x=>x.left === x.right ? x.left : x.left+'='+x.right).join(' + ');
+      const lHit = r => R.rows.some(x=>match(r, x)), rHit = r => L.rows.some(x=>match(x, r));
+      const label = pairs.map(x=>x.left === x.right && x.op === '=' ? x.left : x.left+' '+x.op+' '+x.right).join(' 且 ');
+      const keepL = n.joinType !== 'INNER', keepR = n.joinType === 'FULL';
       steps.push({
         title:'JOIN 配對',
-        cap:'用 <code>'+label+'</code> 當暗號，兩邊對號入座。<strong>同顏色就是同一個人</strong>。'+
-            (pairs.length > 1 ? '這是<strong>複合鍵</strong>：'+pairs.length+' 個欄位<strong>全部</strong>相等才算配對成功。' : '')+
-            '配不到的被畫掉 —— 因為選了 '+n.joinType+'。',
+        cap:'用 <code>'+esc(label)+'</code> 配對。'+(equi ? '<strong>同顏色就是同一個人</strong>。' : '<strong>範圍條件：一列可能配到好幾列</strong>。')+
+            (pairs.length > 1 ? '這是<strong>複合條件</strong>：'+pairs.length+' 組<strong>全部</strong>成立才算配對成功。' : '')+
+            (keepR ? '兩邊配不到的都留下 —— 因為選了 FULL。' : '配不到的被畫掉 —— 因為選了 '+n.joinType+'。'),
         render: box => {
-          box.appendChild(miniTable('左表', L, {tint:r=>col.get(keyL(r)), drop: n.joinType === 'INNER' ? (r=>!rset.has(keyL(r))) : (()=>false)}));
+          box.appendChild(miniTable('左表', L, {tint:equi ? r=>col.get(keyL(r)) : null, drop: keepL ? (()=>false) : (r=>!lHit(r))}));
           box.appendChild(mark('⨝'));
-          box.appendChild(miniTable('右表', R, {tint:r=>col.get(keyR(r)), drop:r=>!lset.has(keyR(r))}));
+          box.appendChild(miniTable('右表', R, {tint:equi ? r=>col.get(keyR(r)) : null, drop: keepR ? (()=>false) : (r=>!rHit(r))}));
           const d = document.createElement('div');
-          d.innerHTML = joinVenn(n, L, R, keyL, keyR);
+          d.innerHTML = joinVenn(n, L, R, match);
           box.appendChild(d);
         }
       });
@@ -4151,7 +4193,7 @@ function buildSteps(){
       steps.push({
         title:'JOIN 結果',
         cap:'配對成功的左右兩列，被<strong>黏成一列變寬</strong>。原本 '+L.rows.length+' + '+R.rows.length+' 列，現在 <strong>'+J.rows.length+' 列</strong>。',
-        render: box => box.appendChild(miniTable('合併後', J, {tint:r=>col.get(keyL(r))}))
+        render: box => box.appendChild(miniTable('合併後', J, {tint:equi ? r=>col.get(keyL(r)) : null}))
       });
     }
 
@@ -4483,22 +4525,23 @@ function andVenn(n, upToHere){
   });
 }
 /* JOIN 的文氏圖：左表、右表各一個圈，重疊 = 對得上 */
-function joinVenn(n, L, R, keyL, keyR){
-  const lset = new Set(L.rows.map(keyL).filter(k=>k !== null)), rset = new Set(R.rows.map(keyR).filter(k=>k !== null));
-  const lHit = L.rows.filter(r=>rset.has(keyL(r))).length, rHit = R.rows.filter(r=>lset.has(keyR(r))).length;
+function joinVenn(n, L, R, match){
+  const lHit = L.rows.filter(l=>R.rows.some(r=>match(l, r))).length, rHit = R.rows.filter(r=>L.rows.some(l=>match(l, r))).length;
   const count = {1:L.rows.length - lHit, 2:R.rows.length - rHit, 3:lHit};
-  const left = n.joinType === 'LEFT';
+  const left = n.joinType === 'LEFT', full = n.joinType === 'FULL';
   return vennHTML({
     sets:[0, 1].map(i=>{
       const src = srcOf(n.id, i);
       return {name:i ? '右表' : '左表', text:src && src.type === 'table' ? src.table : ''};
     }),
     count:m => count[m],
-    keep:m => m === 3 || (left && m === 1),
+    keep:m => m === 3 || ((left || full) && m === 1) || (full && m === 2),
     tip:m => m === 3 ? '對得上：左表 '+lHit+' 列、右表 '+rHit+' 列' :
-             m === 1 ? '左表對不上的 '+count[1]+' 列'+(left ? '：LEFT 照樣留下，右邊的欄位補 NULL' : '：INNER 會丟掉') :
+             m === 1 ? '左表對不上的 '+count[1]+' 列'+(left || full ? '：'+n.joinType+' 照樣留下，右邊的欄位補 NULL' : '：INNER 會丟掉') :
+             full    ? '右表對不上的 '+count[2]+' 列：FULL 照樣留下，左邊的欄位補 NULL' :
                        '右表對不上的 '+count[2]+' 列：不管 INNER 或 LEFT 都不會出現',
-    caption: left
+    caption: full ? 'FULL JOIN 兩個圈都留：對得上的接成一列，對不上的另一邊補 NULL。'
+      : left
       ? 'LEFT JOIN 留下整個左圈：對得上的接上右表，對不上的右邊補 NULL。'
       : 'INNER JOIN 只留兩圈重疊的地方（交集）：兩邊都對得上才留下。'
   });
@@ -4506,10 +4549,9 @@ function joinVenn(n, L, R, keyL, keyR){
 /* 屬性面板用：跟逐步檢視用同一套配對方式算 */
 function joinPairsVenn(n){
   const L = evalNode(srcOf(n.id,0)), R = evalNode(srcOf(n.id,1));
-  const pairs = joinKeys(n).map(k=>({l:L.cols.indexOf(k.left), r:R.cols.indexOf(k.right), lfn:k.lfn, rfn:k.rfn}))
-    .filter(x=>x.l >= 0 && x.r >= 0);
-  if(!pairs.length || !L.rows.length || !R.rows.length) return '';
-  return joinVenn(n, L, R, row=>joinKey(row, pairs, 'l'), row=>joinKey(row, pairs, 'r'));
+  const match = joinMatcher(n, L, R);
+  if(!match || !joinKeys(n).length || !L.rows.length || !R.rows.length) return '';
+  return joinVenn(n, L, R, match);
 }
 function mark(ch){
   const d = document.createElement('div');
@@ -5121,7 +5163,7 @@ function parseSQLText(text){
     if(eatKw('INNER')){}
     else if(eatKw('LEFT')){ type = 'LEFT'; eatKw('OUTER'); }
     else if(eatKw('RIGHT')){ type = 'RIGHT'; eatKw('OUTER'); }
-    else if(eatKw('FULL')) fail('FULL OUTER JOIN 目前做不出對應的步驟', T[save]);
+    else if(eatKw('FULL')){ type = 'FULL'; eatKw('OUTER'); }
     let cross = false;
     if(type === 'INNER' && eatKw('CROSS')) cross = true;       /* CROSS JOIN：沒有條件，寫回成 ON 1 = 1 */
     if(!eatKw('JOIN')){ p = save; return null; }
@@ -5132,21 +5174,37 @@ function parseSQLText(text){
        !isKw('AND',4) && !isKw('OR',4)){ p += 4; cross = true; }
     else if(cross){ /* CROSS JOIN 沒有 ON */ }
     else if(eatKw('ON')){
+      /* 對照欄只能是欄位，或包一層步驟做得出來的轉換 —— 其他函式不擋的話會被默默拿掉，
+         像 CONVERT(date, exam_time) 變成 exam_time，對到的列就完全不一樣了 */
+      const side = (e, t1) => {
+        if(e.kind === 'call' && !castOf(e))
+          fail('JOIN 條件裡的 '+e.fn+'(…) 目前做不出對應的步驟（只支援 CAST / CONVERT 轉日期、整數、文字，TRIM、UPPER）', t1);
+        if(e.kind !== 'call' && e.kind !== 'col')
+          fail('JOIN 條件兩邊目前只能是欄位，或包一層轉換', t1);
+        return e;
+      };
       do {
-        const t0 = at(), l = parseExpr();
-        if(!eatOp('=')) fail('JOIN 的 ON 只看得懂 a.x = b.y');
-        const t1 = at(), r = parseExpr();
-        /* 對照欄只能是欄位，或包一層步驟做得出來的轉換 —— 其他函式不擋的話會被默默拿掉，
-           像 CONVERT(date, exam_time) 變成 exam_time，對到的列就完全不一樣了 */
-        [[l, t0], [r, t1]].forEach(x=>{
-          if(x[0].kind === 'call' && !castOf(x[0]))
-            fail('JOIN 條件裡的 '+x[0].fn+'(…) 目前做不出對應的步驟（只支援 CAST / CONVERT 轉日期、整數、文字，TRIM、UPPER）', x[1]);
-          if(x[0].kind !== 'call' && x[0].kind !== 'col')
-            fail('JOIN 條件兩邊目前只能是欄位，或包一層轉換', x[1]);
-        });
-        on.push({left:l, right:r});
+        const t0 = at(), l = side(parseExpr(), t0);
+        /* a.d BETWEEN b.start AND b.end 就是 a.d >= b.start AND a.d <= b.end（NULL 的結果也一樣） */
+        if(isKw('NOT') && isKw('BETWEEN',1)) fail('JOIN 條件的 NOT BETWEEN 目前做不出對應的步驟', at());
+        if(eatKw('BETWEEN')){
+          const t1 = at(), lo = side(parseExpr(), t1);
+          needKw('AND');
+          const t2 = at(), hi = side(parseExpr(), t2);
+          on.push({left:l, right:lo, op:'>='}, {left:l, right:hi, op:'<='});
+          continue;
+        }
+        const ot = at();
+        if(!(ot.t === 'op' && ['=','<>','!=','<','<=','>','>='].indexOf(ot.v) >= 0))
+          fail('JOIN 的 ON 只看得懂 a.x = b.y、a.x < b.y 這種比較，或 a.x BETWEEN b.lo AND b.hi', ot);
+        p++;
+        const op = ot.v === '!=' ? '<>' : ot.v;
+        const t1 = at(), r = side(parseExpr(), t1);
+        on.push(op === '=' ? {left:l, right:r} : {left:l, right:r, op:op});
       } while(eatKw('AND'));
     } else if(isKw('USING')){
+      /* FULL JOIN … USING 把兩邊的對照欄合成一欄（右表獨有的列取右邊的值），步驟沒有這種欄 */
+      if(type === 'FULL') fail('FULL JOIN … USING 會把兩邊的對照欄合成一欄，目前做不出對應的步驟；請改寫成 ON a.x = b.x', at());
       p++; needOp('(');
       do { const c = nameTok(); on.push({left:{kind:'col', col:c}, right:{kind:'col', col:c}}); } while(eatOp(','));
       needOp(')');
@@ -5856,22 +5914,28 @@ function astToGraph(parsed){
       const jn = add('join', {
         joinType: flip ? 'LEFT' : j.type,
         keys: (j.on || []).map(k=>{
-          let left = k.left, rightExpr = k.right;
-          if(rightAliases.has(exprTable(left)) && leftAliases.has(exprTable(rightExpr))){
-            const swap = left; left = rightExpr; rightExpr = swap;
+          let left = k.left, rightExpr = k.right, op = k.op || '=';
+          const lt = exprTable(left), rt = exprTable(rightExpr);
+          /* 兩邊要各來自一邊：ON a.x < a.y 不是 JOIN 條件，畫成步驟會去比右表的同名欄 */
+          if(lt && rt && ((leftAliases.has(lt) && leftAliases.has(rt)) || (rightAliases.has(lt) && rightAliases.has(rt))))
+            throw {sqlErr:true, msg:'JOIN 條件 '+lt+'.'+exprName(left)+' 和 '+rt+'.'+exprName(rightExpr)+' 來自同一邊，目前做不出對應的步驟', pos:left.p || 0};
+          if(rightAliases.has(lt) && leftAliases.has(rt)){
+            const swap = left; left = rightExpr; rightExpr = swap; op = FLIP_OP[op];
           }
-          if(flip){ const swap = left; left = rightExpr; rightExpr = swap; }
-          return {
+          if(flip){ const swap = left; left = rightExpr; rightExpr = swap; op = FLIP_OP[op]; }
+          const key = {
             left:exprName(left),       lfn:castOf(left),
             right:exprName(rightExpr), rfn:castOf(rightExpr)
           };
+          if(op !== '=') key.op = op;
+          return key;
         })
       });
       if(j.cross) jn.cross = true;              /* CROSS JOIN、ON 1 = 1：沒有條件 */
       if(flip){ conn(right, jn, 0); conn(cur, jn, 1); }
       else    { conn(cur, jn, 0); conn(right, jn, 1); }
       cur = jn;
-      const dropSet = new Set(joinKeys(jn).map(k=>k.right));
+      const dropSet = joinDrop(jn);
       /* 新匯入的 CASE / DISTINCT 不能把右表已拿掉或改名的欄位誤認成左表同名欄 */
       const kept = flip ? rc : cols, moved = flip ? cols : rc;
       if(kept && moved) moved.forEach(name=>{
@@ -5883,6 +5947,7 @@ function astToGraph(parsed){
         const keptP = flip ? provR : prov, movedP = flip ? prov : provR;
         const lay = joinLayout(keptP.map(p=>p.name), movedP.map(p=>p.name), dropSet);
         joinKeys(jn).forEach(k=>{
+          if(!dropSet.has(k.right)) return;
           const gone = movedP.find(p=>p.name === k.right);
           if(gone && gone.alias) dropped.set(gone.alias+'.'+gone.src, {name:k.left, ok:jn.joinType === 'INNER' && !k.lfn && !k.rfn});
         });
