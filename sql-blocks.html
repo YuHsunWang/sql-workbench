@@ -683,7 +683,7 @@ table.grid th.gone,table.grid td.gone{opacity:.3;text-decoration:line-through;te
       <div id="stmt-pick"></div>
       <div id="parse-out"></div>
       <p class="supported">看得懂：<code>WITH</code> · <code>SELECT</code> · <code>DISTINCT</code> · <code>FROM</code> · 子查詢 · <code>JOIN … ON</code> · <code>WHERE</code>（AND / OR / 括號）· <code>BETWEEN</code> · <code>IN</code> · <code>IN (SELECT …)</code> · <code>EXISTS</code>（含 NOT；相關條件只支援內外欄位相等且以 AND 串接）· <code>LIKE</code> · <code>IS NULL</code> · <code>CASE WHEN</code> · 四則運算 · 聚合函數 · <code>GROUP BY</code> · <code>HAVING</code> · 視窗函數 <code>OVER</code> · <code>UNION</code> · <code>ORDER BY</code> · <code>LIMIT</code> / <code>TOP</code> / <code>FETCH FIRST</code>。<br>
-      看不懂：相關子查詢（上述等值形式除外）、純量子查詢、<code>ANY / ALL / SOME</code>、<code>PIVOT</code>。碰到會直接告訴你卡在第幾行第幾個字。</p>
+      看不懂：相關子查詢（上述等值形式除外）、純量子查詢、<code>ANY / ALL / SOME</code>、<code>PIVOT</code>、<code>LAG / LEAD / NTILE</code>、視窗框架 <code>ROWS BETWEEN</code>、函式包函式（像 <code>UPPER(TRIM(x))</code>、<code>ROUND(AVG(x), 2)</code>）。碰到會直接告訴你卡在第幾行第幾個字。</p>
     </div>
   </div>
 </div>
@@ -1007,6 +1007,8 @@ function evalNode(node, ctx){
     const s = S();
     if(Object.prototype.hasOwnProperty.call(node, 'literal'))
       return {cols:s.cols.concat([node.as]), rows:s.rows.map(r=>r.concat([node.literal]))};
+    if(node.fn && node.noArgs)
+      return {cols:s.cols.concat([node.as]), rows:s.rows.map(r=>r.concat(['（由資料庫計算）']))};
     const li = s.cols.indexOf(node.left);
     if(li < 0) return s;
     if(node.fn){
@@ -1640,6 +1642,7 @@ function list(items, pad){ return items.join(',\n' + ' '.repeat(pad)); }
 function selectItems(n){ return n.cols.map((c,i)=>q(c)+(n.outCols && n.outCols[i] !== c ? ' AS '+q(n.outCols[i]) : '')); }
 /* 來源欄位放回它原本的位置，其他參數照原文 */
 function fnCallSQL(n){
+  if(n.noArgs) return n.fn+'()';
   const col = n.left === '*' ? '*' : q(n.left);
   const inner = n.args ? n.args.map((a, i)=>i === (n.argAt || 0) ? col : a).join(', ') : col;
   return n.fn+'('+inner+(n.castAs && n.fn === 'CAST' ? ' AS '+n.castAs : '')+')';
@@ -3915,7 +3918,12 @@ function parseSQLText(text){
         if(!it) fail('ORDER BY 用到的 '+e.fn+'(…) 也要寫在 SELECT 裡，步驟才算得到它', t0);
         return it.alias || exprName(it.expr);
       }
-      return exprName(e);
+      if(e.kind === 'col') return e.col;
+      /* ORDER BY a*2、UPPER(b)：只有 SELECT 裡也算了同一個式子，才排得到那一欄。
+         以前會變成排一個不存在的 a_calc，或默默拿掉 UPPER */
+      const same = items.find(it=>it.kind === 'expr' && aggKey(it.expr) === aggKey(e));
+      if(same) return same.alias || exprName(same.expr);
+      fail('ORDER BY 的算式或函式也要寫在 SELECT 裡，步驟才算得到它', t0);
     };
     const t = {orderBy:null, dir:'ASC', limit:0, offset:0, limitZero:false};
     if(isKw('ORDER') && isKw('BY',1)){
@@ -4024,7 +4032,7 @@ function parseSQLText(text){
       if([left, b].some(e=>e.kind === 'case' || specialAgg(e))) fail('CASE 或不重複計數外面再接算式，目前做不出對應的步驟', t0);
       /* 計算步驟只有「左 運算 右」一層；兩層以上會算錯欄位，寧可擋下 */
       if(left.kind === 'arith' || b.kind === 'arith') fail('一個式子裡只能有一個 + - * /，多層運算目前畫不出來', t0);
-      left = {kind:'arith', op:op, a:left, b:b};
+      left = {kind:'arith', op:op, a:left, b:b, p:t0.p};
     }
     return left;
   }
@@ -4079,24 +4087,33 @@ function parseSQLText(text){
         if(eatKw('OVER')){
           if(distinct) fail('視窗函數不支援 COUNT(DISTINCT …)：PostgreSQL / SQL Server 不接受這種寫法', t);
           if(args.some(a=>a.kind === 'case')) fail('視窗函數裡的 CASE 目前做不出對應的步驟', t);
+          /* 視窗步驟只做得出排名三兄弟和五個彙總。LAG、NTILE 之類的以前會被
+             當成 ROW_NUMBER 匯入，算出來的完全是另一個數字 —— 一律擋下 */
+          if(WIN_FNS.indexOf(fn) < 0 && AGG_FNS.indexOf(fn) < 0)
+            fail('視窗函數 '+fn+'() 目前做不出對應的步驟（只支援 ROW_NUMBER / RANK / DENSE_RANK 與 SUM / COUNT / AVG / MIN / MAX）', t);
+          if(WIN_FNS.indexOf(fn) >= 0 && args.length) fail(fn+'() 不需要參數', t);
+          if(AGG_FNS.indexOf(fn) >= 0 && (args.length !== 1 || (args[0].kind !== 'col' && args[0].kind !== 'star')))
+            fail('視窗彙總 '+fn+'(…) 裡目前只能放單一欄位，不能放算式、函式或固定值', t);
           needOp('(');
           const w = {partitionBy:[], orderBy:null, dir:'ASC'};
-          if(isKw('PARTITION') && isKw('BY',1)){ p += 2; do { w.partitionBy.push(exprName(parseExpr())); } while(eatOp(',')); }
+          const winCol = what => { const t0 = at(), e = parseExpr();
+            if(e.kind !== 'col') fail('視窗的 '+what+' 目前只能是欄位，不能是算式或函式', t0);
+            return e.col; };
+          if(isKw('PARTITION') && isKw('BY',1)){ p += 2; do { w.partitionBy.push(winCol('PARTITION BY')); } while(eatOp(',')); }
           if(isKw('ORDER') && isKw('BY',1)){
             p += 2;
             /* ORDER BY NULL、ORDER BY (SELECT NULL) 是 Oracle / SQL Server「不排」的寫法 */
             if(isKw('NULL')) p++;
             else if(isOp('(') && isKw('SELECT',1) && isKw('NULL',2) && isOp(')',3)) p += 4;
             else {
-              w.orderBy = exprName(parseExpr());
+              w.orderBy = winCol('ORDER BY');
               if(eatKw('DESC')) w.dir = 'DESC'; else eatKw('ASC');
-              if(isOp(',')){ while(eatOp(',')){ parseExpr(); if(!eatKw('DESC')) eatKw('ASC'); }
-                warn.push('視窗的 ORDER BY 只畫第一個欄位，其他的忽略了 — 同分時名次可能不同'); }
+              /* 第二個排序欄決定同分時誰先誰後；丟掉它，名次和累加值都會變 */
+              if(isOp(',')) fail('視窗的 ORDER BY 目前只支援一個欄位');
             }
           }
-          let guard = 0;
-          while(!isOp(')') && at().t !== 'eof' && guard++ < 40) p++;   /* ROWS BETWEEN … 先跳過 */
-          if(guard > 1) warn.push('視窗的框架設定（ROWS/RANGE BETWEEN）被忽略，改用資料庫預設的範圍');
+          /* 框架改變的是「算到哪幾列」：7 日移動平均拿掉框架就變成累計加總 */
+          if(!isOp(')')) fail('視窗的框架設定（ROWS / RANGE BETWEEN …）目前做不出對應的步驟');
           needOp(')');
           return {kind:'window', fn:fn, args:args, w:w};
         }
@@ -4104,7 +4121,7 @@ function parseSQLText(text){
       }
       let tbl = null, col = keepQuoted(take());
       if(isOp('.')){ p++; tbl = col; col = nameTok(); }
-      return {kind:'col', tbl:tbl, col:col};
+      return {kind:'col', tbl:tbl, col:col, p:t.p};
     }
     fail('看不懂這裡的寫法');
   }
@@ -4557,7 +4574,7 @@ function astToGraph(parsed){
     });
 
     const newAggregate = c.items.some(it=>it.kind === 'expr' && it.expr.kind === 'call' &&
-      (it.expr.distinct || it.expr.args.some(a=>a.kind === 'case')));
+      (it.expr.distinct || it.expr.args.some(a=>a.kind === 'case' || a.kind === 'arith')));
     const columnCase = c.items.some(it=>it.kind === 'expr' && it.expr.kind === 'case');
     const columnFilter = c.where.some(function hasColumn(o){
       if(!o || typeof o !== 'object') return false;
@@ -4613,6 +4630,20 @@ function astToGraph(parsed){
       usedCols.add(alias.toLowerCase());
       caseNames.set(aggKey(e), alias);
     };
+    /* 「算欄位」只有「欄位 運算 欄位或數字」一層。兩邊包了函式（COALESCE(a,0)*b、
+       a*CAST(b AS INT)）以前會被換成不存在的 coalesce_a，或默默拿掉 CAST */
+    const appendDerive = (e, alias) => {
+      if(e.a.kind !== 'col' || (e.b.kind !== 'col' && !(e.b.kind === 'lit' && typeof e.b.v === 'number')))
+        throw {sqlErr:true, msg:'算式兩邊目前只能是欄位或數字，不能包函式、文字或 NULL', pos:e.p};
+      const n = add('derive', {
+        left: e.a.col, op: e.op,
+        right: (e.b.kind === 'lit' ? String(e.b.v) : e.b.col),
+        as: alias
+      });
+      conn(cur, n); cur = n;
+      cols = cols ? cols.concat([n.as]) : null;
+      usedCols.add(alias.toLowerCase());
+    };
     c.items.forEach(it=>{
       if(it.kind !== 'expr') return;
       const e = it.expr;
@@ -4627,16 +4658,17 @@ function astToGraph(parsed){
         while(usedCols.has(alias.toLowerCase())) alias = 'case_value_' + (suffix++);
         appendCase(e.args[0], alias);
         caseCols.set(it, alias);
+      } else if(e.kind === 'call' && AGG_FNS.indexOf(e.fn) >= 0 && e.args[0] && e.args[0].kind === 'arith'){
+        /* SUM(price * qty)：先算一欄，再彙總那一欄。以前會寫成 SUM(price_calc)，
+           引用一個根本不存在的欄位 */
+        let alias = 'calc_value', suffix = 2;
+        while(usedCols.has(alias.toLowerCase())) alias = 'calc_value_' + (suffix++);
+        appendDerive(e.args[0], alias);
+        caseCols.set(it, alias);
       } else if(e.kind === 'arith'){
         /* 算式步驟左邊只能是欄位；左邊放常值會被當成欄位名（`1` * amount） */
         if(e.a.kind === 'lit') throw {sqlErr:true, msg:'算式左邊目前只能是欄位，請把欄位寫在前面（例如 amount * -1）', pos:e.p};
-        const n = add('derive', {
-          left: exprName(e.a), op: e.op,
-          right: (e.b.kind === 'lit' ? String(e.b.v) : exprName(e.b)),
-          as: it.alias || exprName(e)
-        });
-        conn(cur, n); cur = n;
-        cols = cols ? cols.concat([n.as]) : null;
+        appendDerive(e, it.alias || exprName(e));
       } else if(e.kind === 'lit'){
         const n = add('derive', {literal:e.v, as:it.alias || exprName(e)});
         conn(cur, n); cur = n;
@@ -4649,11 +4681,17 @@ function astToGraph(parsed){
         const at0 = e.fn === 'CONVERT' ? 1 : 0, a0 = e.args[at0];
         /* 函式步驟的第一個參數會被當成欄位；放常值會變成欄位名（ABS(`-1`)） */
         if(a0 && a0.kind === 'lit') throw {sqlErr:true, msg:'函式 '+e.fn+' 的參數目前只能是欄位，不能是固定值', pos:e.p};
+        /* UPPER(TRIM(a))、ROUND(AVG(x), 2)、COALESCE(a*b, 0)：步驟只記得一個來源欄位，
+           裡面那層會被丟掉或變成不存在的欄名 */
+        if(a0 && a0.kind !== 'col' && a0.kind !== 'star')
+          throw {sqlErr:true, msg:'函式 '+e.fn+' 裡面目前只能直接放欄位，不能再包函式、彙總或算式', pos:e.p};
         const n = add('derive', {
           fn: e.fn,
           left: (!a0 || a0.kind === 'star') ? '*' : exprName(a0),
           as: it.alias || exprName(e)
         });
+        /* NOW() 沒有參數，不能寫回成 NOW(*) */
+        if(!e.args.length) n.noArgs = true;
         /* 其他參數（COALESCE 的預設值、CONVERT 的型別和樣式、CAST 的型別）要帶著走 */
         if(e.raws.length > 1){ n.args = e.raws.slice(); n.argAt = at0; }
         if(e.castRaw) n.castAs = e.castRaw;
@@ -4666,12 +4704,29 @@ function astToGraph(parsed){
     c.items.forEach(it=>{
       if(it.kind === 'expr' && it.expr.kind === 'call' && AGG_FNS.indexOf(it.expr.fn) >= 0){
         const a0 = it.expr.args[0];
-        aggs.push({fn:it.expr.distinct ? 'COUNT_DISTINCT' : it.expr.fn, col:caseCols.get(it) || ((!a0 || a0.kind === 'star') ? '*' : exprName(a0)), as:it.alias || exprName(it.expr)});
+        let col = caseCols.get(it);
+        if(!col){
+          if(!a0 || a0.kind === 'star') col = '*';
+          else if(a0.kind === 'col') col = a0.col;
+          /* COUNT(1)、COUNT('x') 跟 COUNT(*) 一樣數每一列；COUNT(NULL) 永遠是 0，不一樣 */
+          else if(it.expr.fn === 'COUNT' && a0.kind === 'lit' && a0.v !== null) col = '*';
+          /* SUM(COALESCE(x,0))、MAX(UPPER(s))、SUM(CAST(x AS INT))：以前函式被丟掉或變成不存在的欄名 */
+          else throw {sqlErr:true, msg:it.expr.fn+'(…) 裡目前只能放欄位、* 、單層算式或 CASE，不能再包函式', pos:it.expr.p};
+          if(it.expr.args.length > 1) throw {sqlErr:true, msg:it.expr.fn+'(…) 只能有一個參數', pos:it.expr.p};
+        }
+        aggs.push({fn:it.expr.distinct ? 'COUNT_DISTINCT' : it.expr.fn, col:col, as:it.alias || exprName(it.expr)});
       }
     });
     if(c.groupBy.length || aggs.length){
       const keys = c.groupBy.map(g=>{
-        if(g.kind !== 'case') return exprName(g);
+        if(g.kind === 'col') return g.col;
+        if(g.kind !== 'case'){
+          /* GROUP BY YEAR(d)：SELECT 裡同一個式子已經算成一欄，就分那一欄；
+             以前會變成分一個不存在的 year_d */
+          const same = c.items.find(it=>it.kind === 'expr' && AGG_FNS.indexOf(it.expr.fn) < 0 && aggKey(it.expr) === aggKey(g));
+          if(same && same.expr.kind !== 'window' && same.expr.kind !== 'lit') return same.alias || exprName(same.expr);
+          throw {sqlErr:true, msg:'GROUP BY 的算式或函式也要原樣寫在 SELECT 裡，步驟才分得出那一欄', pos:Number.isInteger(g.p) ? g.p : 0};
+        }
         const name = caseNames.get(aggKey(g));
         if(!name) throw {sqlErr:true, msg:'GROUP BY 的 CASE 必須與 SELECT 的 CASE 或彙總內的 CASE 相同，目前無法建立對應的分組欄位', pos:g.p};
         return name;
@@ -4694,17 +4749,15 @@ function astToGraph(parsed){
 
     windows.forEach(it=>{
       const e = it.expr;
-      const rankish = WIN_FNS.indexOf(e.fn) >= 0;
       const a0 = e.args[0];
       const n = add('window', {
-        fn: rankish || AGG_FNS.indexOf(e.fn) >= 0 ? e.fn : 'ROW_NUMBER',
+        fn: e.fn,                       /* 其他函式在解析時就擋掉了 */
         col: (!a0 || a0.kind === 'star') ? '*' : exprName(a0),
         partitionBy: e.w.partitionBy.slice(),
         orderBy: e.w.orderBy || '',
         dir: e.w.dir,
         as: it.alias || exprName(e)
       });
-      if(!rankish && AGG_FNS.indexOf(e.fn) < 0) warn.push('視窗函數 '+e.fn+'() 沒有對應的步驟，先當成 ROW_NUMBER');
       conn(cur, n); cur = n;
       cols = cols ? cols.concat([n.as]) : null;
     });

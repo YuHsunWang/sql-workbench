@@ -224,8 +224,50 @@ test('regression: every ORDER BY key is kept, in order', () => {
   app.state.schema = {t:{label:'', cols:[{name:'x', type:'INT'}, {name:'y', type:'INT'}], rows:[[1, 1], [2, 0], [1, 2]]}};
   const out = app.evalNode(graph.nodes.find(n => n.type === 'output'));
   assert.deepEqual(json(out.rows), [[1, 2], [1, 1], [2, 0]]);
-  assert.match(graphFromSQL(app, 'SELECT ROW_NUMBER() OVER (ORDER BY x, y) AS r FROM t').warn.join(), /視窗的 ORDER BY/);
-  return 'SQL keeps both keys; ties on x broken by y DESC; window extra keys warned';
+  assert.match(sqlError('SELECT ROW_NUMBER() OVER (ORDER BY x, y) AS r FROM t').msg, /視窗的 ORDER BY/);
+  return 'SQL keeps both keys; ties on x broken by y DESC; window extra keys refused';
+});
+
+/* Common AI-written shapes imported "successfully" as a different query: LAG and
+   NTILE became ROW_NUMBER, a window frame was dropped, SUM(price*qty) referenced a
+   non-existent price_calc, UPPER(TRIM(s)) lost TRIM, GROUP BY YEAR(d) grouped a
+   non-existent year_d, NOW() came back as NOW(*). Each is now refused or exact. */
+test('regression: imports never swap a function, drop a layer or invent a column', () => {
+  const refused = [
+    'SELECT id, LAG(amount) OVER (ORDER BY id) AS prev FROM orders',
+    'SELECT id, NTILE(4) OVER (ORDER BY amount) AS q FROM orders',
+    'SELECT id, SUM(amount) OVER (ORDER BY id ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS ma FROM orders',
+    'SELECT ROW_NUMBER() OVER (PARTITION BY YEAR(d) ORDER BY a) AS r FROM t',
+    'SELECT SUM(a * 2) OVER () AS s FROM t',
+  ];
+  for (const sql of refused) sqlError(sql);
+  const refusedAtBuild = [
+    'SELECT c, SUM(COALESCE(a, 0)) AS s FROM t GROUP BY c',
+    'SELECT c, SUM(CAST(a AS INT)) AS s FROM t GROUP BY c',
+    'SELECT ROUND(AVG(a), 2) AS s FROM t',
+    'SELECT UPPER(TRIM(a)) AS s FROM t',
+    'SELECT COALESCE(a, 0) * b AS s FROM t',
+    'SELECT a + NULL AS s FROM t',
+    'SELECT a, COUNT(*) AS n FROM t GROUP BY a, YEAR(d)',
+    'SELECT a FROM t ORDER BY UPPER(a)',
+  ];
+  for (const sql of refusedAtBuild) {
+    const app = loadApp();
+    assert.throws(() => graphFromSQL(app, sql), e => e.sqlErr === true && Number.isInteger(e.pos), sql);
+  }
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE o(c TEXT, price INTEGER, qty INTEGER, s TEXT);
+           INSERT INTO o VALUES ('x',2,3,'A'),('x',5,NULL,'a'),('y',1,1,NULL),('y',4,2,'B');`);
+  const same = sql => {
+    const generated = roundTrip(sql);
+    assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()), generated);
+    return generated;
+  };
+  assert.match(same('SELECT c, SUM(price * qty) AS rev FROM o GROUP BY c ORDER BY c'), /price \* qty AS calc_value[\s\S]*SUM\(calc_value\)/);
+  assert.match(same('SELECT LOWER(s) AS k, COUNT(*) AS n FROM o GROUP BY LOWER(s) ORDER BY k'), /GROUP BY k/);
+  assert.match(same('SELECT c, COUNT(1) AS n FROM o GROUP BY c ORDER BY c'), /COUNT\(\*\)/);
+  assert.match(roundTrip('SELECT NOW() AS t FROM o'), /NOW\(\) AS t/);
+  return `${refused.length + refusedAtBuild.length} shapes refused; SUM(a*b), GROUP BY expr, COUNT(1), NOW() exact in SQLite`;
 });
 
 test('security: pasted DDL column names are plain identifiers only', () => {
@@ -2135,7 +2177,9 @@ test('review: HTML inside pasted values is shown as text', () => {
   assert.doesNotMatch(api.buildSteps().find(s => s.title === 'WHERE').cap, /<img/);
   graphFromSQL(api, "SELECT CASE WHEN qq = 5 THEN '<img src=x onerror=alert(2)>' ELSE 'b' END AS lbl FROM fresh");
   assert.doesNotMatch(api.buildSteps().find(s => s.title === 'CASE WHEN').cap, /<img/);
-  graph = graphFromSQL(api, "SELECT x + '<b>hi</b>' AS y FROM t");
+  /* x + 'text' is refused at import now; the operand can still be typed in the inspector */
+  graph = graphFromSQL(api, "SELECT x + 1 AS y FROM t");
+  graph.nodes.find(n => n.type === 'derive').right = '<b>hi</b>';
   assert.doesNotMatch(api.nodeSummary(graph.nodes.find(n => n.type === 'derive')), /<b>/);
   graphFromSQL(api, "SELECT '<img src=x onerror=alert(3)>' AS k FROM t");
   assert.doesNotMatch(api.buildSteps().find(s => s.title === '固定值欄位').cap, /<img/);

@@ -84,6 +84,16 @@ count_distinct_unaliased: i => `SELECT COUNT(DISTINCT amount), COUNT(DISTINCT ${
 // Unsupported expressions and colliding outputs must fail explicitly, never emit broken SQL or lose a column.
 unsupported_aggregate_order: i => `SELECT customer_id FROM orders GROUP BY customer_id ORDER BY ${i%2?'customer_id, ':''}${pick(['COUNT(DISTINCT amount)','SUM(amount)','SUM(CASE WHEN qty > 0 THEN amount END)'])}`,
 unsupported_case_group: i => `SELECT SUM(CASE WHEN qty > ${i%3} THEN amount ELSE 0 END) AS n FROM orders GROUP BY CASE WHEN qty = 0 THEN amount ELSE 0 END`,
+// SUM(price*qty) became SUM(price_calc), a column that does not exist; the helper column must be built first.
+agg_arith: i => `SELECT customer_id, ${pick(['SUM','AVG','MAX','MIN','COUNT'])}(amount ${pick(['*','+','-'])} ${i%2?'qty':pick([1,2])}) AS n FROM orders GROUP BY customer_id${i%3?' ORDER BY n DESC, customer_id ASC':''}`,
+// GROUP BY YEAR(d) grouped by a non-existent year_d; an expression repeated from SELECT groups by that column.
+group_expression: i => { const e = i%2 ? 'LOWER(status)' : `amount * ${pick([1,2,3])}`; return `SELECT ${e} AS g, ${pick(['COUNT(*)','SUM(qty)'])} AS n FROM orders GROUP BY ${e}`; },
+// COUNT(1) was written back as COUNT("1"), a column reference.
+count_literal: i => `SELECT ${i%2?'customer_id, ':''}COUNT(${pick(['1',"'x'"])}) AS n FROM orders${i%2?' GROUP BY customer_id':''}`,
+// LAG / NTILE were imported as ROW_NUMBER, frames and extra window keys were dropped with only a warning.
+unsupported_window: i => `SELECT id, ${pick(['LAG(amount) OVER (ORDER BY id)','NTILE(3) OVER (ORDER BY id)','SUM(amount) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)','ROW_NUMBER() OVER (ORDER BY qty, id)','SUM(amount * qty) OVER (PARTITION BY customer_id)'])} AS w FROM orders`,
+// A function or aggregate wrapped in another lost the inner layer (UPPER(TRIM(s)) became UPPER(s)).
+unsupported_nested: i => pick([`SELECT customer_id, SUM(COALESCE(amount, ${i%3})) AS n FROM orders GROUP BY customer_id`, `SELECT ROUND(AVG(amount), 1) AS n FROM orders`, `SELECT UPPER(TRIM(status)) AS s FROM orders`, `SELECT COALESCE(amount, 0) * qty AS v FROM orders`, `SELECT customer_id, MAX(UPPER(status)) AS s FROM orders GROUP BY customer_id`]),
 unsupported_aggregate_collision: i => `SELECT SUM(CASE WHEN qty > ${i%3} THEN amount END)${i%2?' AS n':''}, SUM(CASE WHEN qty = 0 THEN amount END)${i%2?' AS n':''} FROM orders`,
 };
 const stable = JSON.stringify;
@@ -104,11 +114,13 @@ function diff(a,b) {
 const norm = sql => sql.replace(/\s+/g,' ').trim().replace(/;$/,'');
 const counts = {total:0,identical_result:0,different_result:0,regenerated_sql_fails:0,parse_unsupported:0,textual_identical:0};
 const unsupported = {}, classes = new Map(), inputs = new Set();
-const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_')));
+const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_') || ['agg_arith','group_expression','count_literal'].includes(k)));
 const mustRefuse = {
   unsupported_aggregate_order:/ORDER BY.*SELECT/,
   unsupported_case_group:/GROUP BY.*CASE/,
   unsupported_aggregate_collision:/彙總.*同名/,
+  unsupported_window:/視窗/,
+  unsupported_nested:/只能/,
 };
 for (const [category, make] of Object.entries(families)) for (let i=0;i<16;i++) {
   const base=make(i);
