@@ -84,6 +84,55 @@ count_distinct_unaliased: i => `SELECT COUNT(DISTINCT amount), COUNT(DISTINCT ${
 // Unsupported expressions and colliding outputs must fail explicitly, never emit broken SQL or lose a column.
 unsupported_aggregate_order: i => `SELECT customer_id FROM orders GROUP BY customer_id ORDER BY ${i%2?'customer_id, ':''}${pick(['COUNT(DISTINCT amount)','SUM(amount)','SUM(CASE WHEN qty > 0 THEN amount END)'])}`,
 unsupported_case_group: i => `SELECT SUM(CASE WHEN qty > ${i%3} THEN amount ELSE 0 END) AS n FROM orders GROUP BY CASE WHEN qty = 0 THEN amount ELSE 0 END`,
+// SUM(price*qty) became SUM(price_calc), a column that does not exist; the helper column must be built first.
+agg_arith: i => `SELECT customer_id, ${pick(['SUM','AVG','MAX','MIN','COUNT'])}(amount ${pick(['*','+','-'])} ${i%2?'qty':pick([1,2])}) AS n FROM orders GROUP BY customer_id${i%3?' ORDER BY n DESC, customer_id ASC':''}`,
+// GROUP BY YEAR(d) grouped by a non-existent year_d; an expression repeated from SELECT groups by that column.
+group_expression: i => { const e = i%2 ? 'LOWER(status)' : `amount * ${pick([1,2,3])}`; return `SELECT ${e} AS g, ${pick(['COUNT(*)','SUM(qty)'])} AS n FROM orders GROUP BY ${e}`; },
+// COUNT(1) was written back as COUNT("1"), a column reference.
+count_literal: i => `SELECT ${i%2?'customer_id, ':''}COUNT(${pick(['1',"'x'"])}) AS n FROM orders${i%2?' GROUP BY customer_id':''}`,
+// LAG / NTILE were imported as ROW_NUMBER, frames and extra window keys were dropped with only a warning.
+unsupported_window: i => `SELECT id, ${pick(['LAG(amount) OVER (ORDER BY id)','NTILE(3) OVER (ORDER BY id)','SUM(amount) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)','ROW_NUMBER() OVER (ORDER BY qty, id)','SUM(amount * qty) OVER (PARTITION BY customer_id)'])} AS w FROM orders`,
+// A function wrapped in another lost the inner layer (UPPER(TRIM(s)) became UPPER(s)); multi-level
+// arithmetic was refused; COALESCE(o.a, o.b) copied "o.b" into a CTE with no alias o. All exact now.
+expr_nested: i => `SELECT id, ${pick([
+  'UPPER(TRIM(status))', `COALESCE(amount, ${i%3}) * qty`, 'amount * qty * (1 - qty)', 'amount + qty * 2', '(amount + qty) * 2',
+  "status || '-' || COALESCE(note, 'x')", 'COALESCE(o.amount, o.qty)', 'ROUND(amount * 1.0 / qty, 2)', 'LENGTH(status) + 1',
+  '-1 * amount', 'ABS(-3)', 'amount - qty - 1', 'amount / 2 / 2', `NULLIF(qty, ${i%2}) * 10`, 'REPLACE(LOWER(status), \'a\', \'@\')'])} AS v FROM orders o${i%2?' WHERE o.id > 2':''}`,
+// qty / 2.0 was written back as qty / 2 — integer division in SQLite, PostgreSQL and SQL Server.
+decimal_division: i => `SELECT id, ${pick(['qty / 2.0','amount / 4.0','qty * 1.0 / 3','(qty + 1) / 2.0'])} AS v FROM orders`,
+// SUM(COALESCE(x,0)) once dropped COALESCE; aggregates over any expression go through a helper column.
+agg_expr: i => `SELECT customer_id, ${pick(['SUM(COALESCE(amount, 0))','MAX(UPPER(status))','SUM(amount * qty * 2 - 1)','AVG(COALESCE(qty, 0) + 1)','MIN(LENGTH(note))','COUNT(COALESCE(note, status))'])} AS n FROM orders GROUP BY customer_id${i%2?' ORDER BY customer_id':''}`,
+// ROUND(AVG(x), 1), SUM(a) * 1.0 / COUNT(*): aggregates first (hidden columns), then the expression, then drop the helpers.
+agg_post: i => `SELECT ${i%2?'customer_id, ':''}${pick([`ROUND(AVG(amount), ${i%3})`, 'SUM(amount) * 1.0 / COUNT(*)', 'MAX(amount) - MIN(amount)', 'COALESCE(SUM(amount), 0)',
+  '100.0 * SUM(qty) / SUM(amount)', 'ROUND(AVG(amount * qty), 1)', 'COUNT(*) * 2 + 1'])} AS v${i%3?', COUNT(*) AS n':''} FROM orders${i%2?' GROUP BY customer_id':''}${i%4===1?' HAVING SUM(amount) > 10':''}${i%2?' ORDER BY customer_id':''}`,
+// An aggregate used only in HAVING was refused; it is counted in a hidden column, filtered, then dropped.
+having_only: i => `SELECT customer_id FROM orders GROUP BY customer_id HAVING ${pick(['COUNT(*) > 1','SUM(amount) >= 30','MAX(qty) < 3','COUNT(DISTINCT status) > 1','AVG(amount) > 15 OR COUNT(*) = 1'])}`,
+// UPPER(x) = 'A' and a + b > 3 were refused (UPPER used to be dropped); a helper column is computed, filtered on, dropped.
+where_expr: i => `SELECT id, status FROM orders WHERE ${pick(["COALESCE(status, 'new') = 'new'", 'amount + qty > 20', "LOWER(status) LIKE 'p%'", 'amount * 2 >= qty * 10',
+  'LENGTH(note) IS NULL', "UPPER(COALESCE(note, '')) <> 'RUSH'", 'amount > qty * 5 OR COALESCE(qty, 0) = 0', 'id <= amount / 10.0', '(amount - qty >= 10)'])}${i%2?' ORDER BY id':''}`,
+// SELECT * keeps exactly the table's columns: the helper is dropped by an explicit column list.
+where_star_expr: i => `SELECT *${i%2?', amount * 2 AS d':''} FROM orders WHERE ${pick(['amount + qty > 20', "COALESCE(status, 'x') <> 'void'", 'qty * 10 < amount'])}`,
+// HAVING over an expression of aggregates.
+having_expr: i => `SELECT customer_id${i%2?', COUNT(*) AS n':''} FROM orders GROUP BY customer_id HAVING ${pick(['MAX(amount) - MIN(amount) > 5','SUM(amount) * 1.0 / COUNT(*) >= 20','COALESCE(SUM(qty), 0) > 2','COUNT(*) > AVG(qty)'])}`,
+// CASE with AND / OR, several columns, CASE x WHEN, IN / BETWEEN / LIKE / IS NULL, or expressions in THEN was refused.
+case_general: i => `SELECT id, ${pick([
+  "CASE WHEN amount > 10 AND qty > 1 THEN 'big' ELSE 'small' END",
+  "CASE status WHEN 'new' THEN 1 WHEN 'paid' THEN 2 ELSE 0 END",
+  "CASE WHEN status IN ('new', 'paid') OR note IS NULL THEN amount * 2 END",
+  'CASE WHEN amount BETWEEN 10 AND 30 THEN qty ELSE 0 - qty END',
+  "CASE WHEN note LIKE 'r%' THEN UPPER(note) ELSE status END",
+  "CASE WHEN amount > qty * 10 THEN 'x' END",
+  'CASE WHEN amount IS NULL THEN 0 ELSE amount END + qty',
+  "CASE WHEN status NOT IN ('void') AND (qty > 2 OR amount < 15) THEN 1 ELSE 0 END"])} AS v FROM orders${i%2?' WHERE id > 3':''}`,
+// CASE inside aggregates inside expressions: conversion rates, conditional sums.
+agg_case_expr: i => `SELECT customer_id, ${pick([
+  "ROUND(100.0 * SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) / COUNT(*), 1)",
+  'COUNT(DISTINCT status) * 1.0 / COUNT(*)',
+  'SUM(CASE WHEN qty > 1 AND amount > 10 THEN amount END)',
+  "COALESCE(SUM(CASE status WHEN 'new' THEN qty END), 0)"])} AS v FROM orders GROUP BY customer_id${i%2?' ORDER BY customer_id':''}`,
+case_general_group: i => { const e = `CASE WHEN amount > ${pick([10,20])} OR qty > 2 THEN 'hi' ELSE 'lo' END`; return `SELECT ${e} AS b, COUNT(*) AS n FROM orders GROUP BY ${e}`; },
+// A column that is neither grouped nor aggregated inside such an expression cannot be rebuilt and must be refused.
+unsupported_post_stray: i => `SELECT customer_id, COUNT(*) + ${pick(['qty','amount'])} AS n FROM orders GROUP BY customer_id`,
 unsupported_aggregate_collision: i => `SELECT SUM(CASE WHEN qty > ${i%3} THEN amount END)${i%2?' AS n':''}, SUM(CASE WHEN qty = 0 THEN amount END)${i%2?' AS n':''} FROM orders`,
 };
 const stable = JSON.stringify;
@@ -104,11 +153,13 @@ function diff(a,b) {
 const norm = sql => sql.replace(/\s+/g,' ').trim().replace(/;$/,'');
 const counts = {total:0,identical_result:0,different_result:0,regenerated_sql_fails:0,parse_unsupported:0,textual_identical:0};
 const unsupported = {}, classes = new Map(), inputs = new Set();
-const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_')));
+const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_') || ['agg_arith','group_expression','count_literal','expr_nested','agg_expr','decimal_division','agg_post','having_only','where_expr','where_star_expr','having_expr','case_general','agg_case_expr','case_general_group'].includes(k)));
 const mustRefuse = {
   unsupported_aggregate_order:/ORDER BY.*SELECT/,
   unsupported_case_group:/GROUP BY.*CASE/,
   unsupported_aggregate_collision:/彙總.*同名/,
+  unsupported_window:/視窗/,
+  unsupported_post_stray:/不在 GROUP BY/,
 };
 for (const [category, make] of Object.entries(families)) for (let i=0;i<16;i++) {
   const base=make(i);

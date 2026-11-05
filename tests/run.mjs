@@ -160,11 +160,12 @@ test('reverse parse: plain AND conditions share a block, an OR group gets its ow
 test('regression: SQL the steps would silently change is refused', () => {
   const refused = {
     'SELECT COUNT(DISTINCT x, y) AS n FROM t': 'multiple distinct columns cannot fit one aggregate',
-    'SELECT a + b * c AS v FROM t': 'became a_calc * c',
-    'SELECT (a + b) * c AS v FROM t': 'nested arithmetic',
     'SELECT TOP 10 PERCENT * FROM t': 'became LIMIT 10',
   };
   for (const sql of Object.keys(refused)) sqlError(sql);
+  /* a + b * c once became a_calc * c; it now keeps SQL's precedence */
+  assert.match(roundTrip('SELECT a + b * c AS v FROM t'), /a \+ \(b \* c\) AS v/);
+  assert.match(roundTrip('SELECT (a + b) * c AS v FROM t'), /\(a \+ b\) \* c AS v/);
   /* the shapes that do fit still import */
   graphFromSQL(api, 'SELECT a * 2 AS v FROM t WHERE x = 5 AND y = \'k\'');
   graphFromSQL(api, 'SELECT TOP 10 * FROM t');
@@ -224,8 +225,46 @@ test('regression: every ORDER BY key is kept, in order', () => {
   app.state.schema = {t:{label:'', cols:[{name:'x', type:'INT'}, {name:'y', type:'INT'}], rows:[[1, 1], [2, 0], [1, 2]]}};
   const out = app.evalNode(graph.nodes.find(n => n.type === 'output'));
   assert.deepEqual(json(out.rows), [[1, 2], [1, 1], [2, 0]]);
-  assert.match(graphFromSQL(app, 'SELECT ROW_NUMBER() OVER (ORDER BY x, y) AS r FROM t').warn.join(), /視窗的 ORDER BY/);
-  return 'SQL keeps both keys; ties on x broken by y DESC; window extra keys warned';
+  assert.match(sqlError('SELECT ROW_NUMBER() OVER (ORDER BY x, y) AS r FROM t').msg, /視窗的 ORDER BY/);
+  return 'SQL keeps both keys; ties on x broken by y DESC; window extra keys refused';
+});
+
+/* Common AI-written shapes imported "successfully" as a different query: LAG and
+   NTILE became ROW_NUMBER, a window frame was dropped, SUM(price*qty) referenced a
+   non-existent price_calc, UPPER(TRIM(s)) lost TRIM, GROUP BY YEAR(d) grouped a
+   non-existent year_d, NOW() came back as NOW(*). Each is now refused or exact. */
+test('regression: imports never swap a function, drop a layer or invent a column', () => {
+  const refused = [
+    'SELECT id, LAG(amount) OVER (ORDER BY id) AS prev FROM orders',
+    'SELECT id, NTILE(4) OVER (ORDER BY amount) AS q FROM orders',
+    'SELECT id, SUM(amount) OVER (ORDER BY id ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS ma FROM orders',
+    'SELECT ROW_NUMBER() OVER (PARTITION BY YEAR(d) ORDER BY a) AS r FROM t',
+    'SELECT SUM(a * 2) OVER () AS s FROM t',
+  ];
+  for (const sql of refused) sqlError(sql);
+  /* the inner layer is kept now (SUM(COALESCE(a,0)), UPPER(TRIM(a)) … are exact in
+     'expressions' below); what still cannot be built must keep being refused */
+  const refusedAtBuild = [
+    'SELECT a, COUNT(*) AS n FROM t GROUP BY a, YEAR(d)',
+    'SELECT a FROM t ORDER BY UPPER(a)',
+  ];
+  for (const sql of refusedAtBuild) {
+    const app = loadApp();
+    assert.throws(() => graphFromSQL(app, sql), e => e.sqlErr === true && Number.isInteger(e.pos), sql);
+  }
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE o(c TEXT, price INTEGER, qty INTEGER, s TEXT);
+           INSERT INTO o VALUES ('x',2,3,'A'),('x',5,NULL,'a'),('y',1,1,NULL),('y',4,2,'B');`);
+  const same = sql => {
+    const generated = roundTrip(sql);
+    assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()), generated);
+    return generated;
+  };
+  assert.match(same('SELECT c, SUM(price * qty) AS rev FROM o GROUP BY c ORDER BY c'), /price \* qty AS calc_value[\s\S]*SUM\(calc_value\)/);
+  assert.match(same('SELECT LOWER(s) AS k, COUNT(*) AS n FROM o GROUP BY LOWER(s) ORDER BY k'), /GROUP BY k/);
+  assert.match(same('SELECT c, COUNT(1) AS n FROM o GROUP BY c ORDER BY c'), /COUNT\(\*\)/);
+  assert.match(roundTrip('SELECT NOW() AS t FROM o'), /NOW\(\) AS t/);
+  return `${refused.length + refusedAtBuild.length} shapes refused; SUM(a*b), GROUP BY expr, COUNT(1), NOW() exact in SQLite`;
 });
 
 test('security: pasted DDL column names are plain identifiers only', () => {
@@ -257,6 +296,10 @@ test('security: a pasted value carrying HTML is text in every block, step and pa
     `SELECT '${bad}' AS k FROM t`,
     `SELECT COALESCE(city, '${bad}') AS c FROM t`,
     `SELECT city, COUNT(*) AS n FROM t GROUP BY city HAVING city <> '${bad}'`,
+    `SELECT UPPER(COALESCE(city, '${bad}')) || 'x' AS k FROM t`,
+    `SELECT * FROM t WHERE UPPER(city) = '${bad}'`,
+    `SELECT CASE WHEN qq = 5 AND city = '${bad}' THEN 1 ELSE 0 END AS flag FROM t`,
+    `SELECT city, ROUND(AVG(qq), 1) AS a FROM t GROUP BY city HAVING MAX(qq) > 1 OR city = '${bad}'`,
   ];
   for (const sql of positions) {
     const graph = graphFromSQL(api, sql);
@@ -268,6 +311,9 @@ test('security: a pasted value carrying HTML is text in every block, step and pa
       api.renderInspector();
       outputs.push(['panel ' + n.type, api.inspector.innerHTML]);
     }
+    api.state.lint = api.lintGraph();
+    api.renderLint();
+    outputs.push(['lint panel', api.document.getElementById('lint').innerHTML], ['SQL view', api.sqlHTML(api.buildSQL())]);
     for (const [where, html] of outputs) assert.doesNotMatch(String(html), /<img/, `${where} for ${sql}`);
   }
   return `${positions.length} positions × every block, step and panel`;
@@ -1992,16 +2038,31 @@ test('review: CASE without ELSE gives NULL, not the text NULL', () => {
 
 test('review: SQL whose meaning the steps would change is refused, not imported', () => {
   const parseRefused = [
-    "SELECT CASE WHEN x = 1 THEN y * 2 ELSE 'n' END AS t FROM t", /* an expression cannot fit a branch */
-    "SELECT CASE WHEN x > amt THEN 'a' ELSE 'b' END AS t FROM t",  /* x > amt became x > 0 */
-    "SELECT * FROM t WHERE UPPER(name) = 'A'",                     /* UPPER was dropped */
-    'SELECT * FROM t WHERE a + b > 3',                             /* became a_calc > 3 */
     'SELECT city, amt FROM t ORDER BY 3',                          /* no third item */
   ];
   parseRefused.forEach(sqlError);
-  /* only in HAVING, so the steps have no count_all column to filter */
-  graphError('SELECT city FROM t GROUP BY city HAVING COUNT(*) > 1');
-  return `${parseRefused.length + 1} lossy shapes refused`;
+  /* UPPER was dropped and a + b > 3 became a_calc > 3; both are now a helper column
+     computed before the filter and dropped after it */
+  {
+    const db = new DatabaseSync(':memory:');
+    db.exec("CREATE TABLE w(name TEXT, a INTEGER, b INTEGER); INSERT INTO w VALUES ('a',1,1),('A',2,5),(NULL,4,0);");
+    /* the two CASEs were refused (x > amt once became x > 0); they are expression blocks now */
+    for (const sql of ["SELECT name, a FROM w WHERE UPPER(name) = 'A'", 'SELECT name FROM w WHERE a + b > 3',
+                       "SELECT CASE WHEN a = 1 THEN b * 2 ELSE -1 END AS t FROM w", "SELECT CASE WHEN a > b THEN 'a' ELSE 'b' END AS t FROM w"]) {
+      const generated = roundTrip(sql);
+      assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()), sql);
+    }
+    db.close();
+  }
+  /* once refused because the count existed only in HAVING; now counted in a hidden
+     column, filtered, and dropped again — the result has only city */
+  const db = new DatabaseSync(':memory:');
+  db.exec("CREATE TABLE t(city TEXT, amt INTEGER); INSERT INTO t VALUES ('tp',1),('tp',2),('tc',3);");
+  const sql = 'SELECT city FROM t GROUP BY city HAVING COUNT(*) > 1';
+  const generated = roundTrip(sql);
+  assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()));
+  db.close();
+  return `${parseRefused.length} lossy shapes refused; HAVING-only COUNT(*) exact`;
 });
 
 test('review: HAVING on an aggregate filters the aliased column', () => {
@@ -2135,7 +2196,9 @@ test('review: HTML inside pasted values is shown as text', () => {
   assert.doesNotMatch(api.buildSteps().find(s => s.title === 'WHERE').cap, /<img/);
   graphFromSQL(api, "SELECT CASE WHEN qq = 5 THEN '<img src=x onerror=alert(2)>' ELSE 'b' END AS lbl FROM fresh");
   assert.doesNotMatch(api.buildSteps().find(s => s.title === 'CASE WHEN').cap, /<img/);
-  graph = graphFromSQL(api, "SELECT x + '<b>hi</b>' AS y FROM t");
+  /* x + 'text' is refused at import now; the operand can still be typed in the inspector */
+  graph = graphFromSQL(api, "SELECT x + 1 AS y FROM t");
+  graph.nodes.find(n => n.type === 'derive').right = '<b>hi</b>';
   assert.doesNotMatch(api.nodeSummary(graph.nodes.find(n => n.type === 'derive')), /<b>/);
   graphFromSQL(api, "SELECT '<img src=x onerror=alert(3)>' AS k FROM t");
   assert.doesNotMatch(api.buildSteps().find(s => s.title === '固定值欄位').cap, /<img/);
@@ -2240,6 +2303,9 @@ test('CASE: column branches, fixed values and NULL remain editable and round-tri
 test('aggregate: unsupported CASE expressions and windowed DISTINCT fail clearly', () => {
   const window = sqlError('SELECT COUNT(DISTINCT amt) OVER (PARTITION BY city) AS n FROM t');
   assert.match(window.msg, /視窗.*PostgreSQL.*SQL Server/);
+  /* these were refused; CASE inside expressions and aggregates is built exactly now */
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE t(qty INTEGER, amt INTEGER); INSERT INTO t VALUES (1,10),(0,20),(2,NULL),(NULL,5),(3,-1);');
   for (const sql of [
     'SELECT SUM(CASE WHEN qty > 0 THEN amt END) * 2 AS n FROM t',
     'SELECT SUM(CASE WHEN qty > 0 THEN amt * 2 END) AS n FROM t',
@@ -2248,11 +2314,15 @@ test('aggregate: unsupported CASE expressions and windowed DISTINCT fail clearly
     'SELECT CASE WHEN qty > 0 THEN amt END * 2 AS n FROM t',
     'SELECT COALESCE(SUM(CASE WHEN qty > 0 THEN amt END), 0) AS n FROM t',
     'SELECT SUM(CASE WHEN qty > 0 THEN amt WHEN amt > 0 THEN qty END) AS n FROM t',
-  ]) assert.match(sqlError(sql).msg, /CASE/);
+  ]) {
+    const generated = roundTrip(sql);
+    assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()), sql);
+  }
+  db.close();
   assert.match(graphError('SELECT CASE WHEN qty > 0 THEN amt END AS amt FROM t').msg, /同名/);
   assert.match(graphError('SELECT COUNT(DISTINCT b.amt) AS n FROM a JOIN b ON a.id = b.id WHERE a.amt > 0').msg, /JOIN/);
   assert.match(graphError('SELECT 1 AS v, COUNT(DISTINCT amt) AS n FROM t').msg, /彙總後/);
-  return 'window DISTINCT, aggregate arithmetic, branch arithmetic, wrapper and mixed WHEN columns refused';
+  return 'window DISTINCT refused; 7 CASE-in-expression / aggregate shapes exact in SQLite';
 });
 
 /* A HAVING lookup based only on sum_label or count_x confuses different CASEs,
@@ -2432,14 +2502,31 @@ test('filter inspector: column, fixed value and date modes survive grouping', ()
 /* Dynamic dates and expressions cannot be represented faithfully by either new
    operand mode. Invalid calendar dates and nontrivial lists must fail explicitly. */
 test('filter refusal: dynamic dates, arithmetic and nontrivial date lists', () => {
-  for(const rhs of ['CURRENT_DATE','NOW()','GETDATE()','SYSDATE','amt * 2','UPPER(cost)',"DATE '2026-01-01' + 1", "CAST(cost AS DATE)"])
-    assert.match(sqlError('SELECT * FROM t WHERE sale_date >= '+rhs).msg, /函式|日期|算式/);
+  /* a computed right side (today, amt * 2) is now a helper column the filter compares
+     against, then dropped; SELECT * needs the table's columns to drop it exactly */
+  const known = {t:{label:'', cols:['sale_date','amt','cost'].map(name=>({name})), rows:[]}};
+  const db = new DatabaseSync(':memory:');
+  db.exec("CREATE TABLE t(sale_date TEXT, amt INTEGER, cost TEXT); INSERT INTO t VALUES ('2000-01-01', 3, '5'), ('2999-01-01', 1, 'x'), (NULL, 2, '2');");
+  for(const rhs of ['CURRENT_DATE','NOW()','GETDATE()','SYSDATE','amt * 2','UPPER(cost)','CAST(cost AS DATE)']){
+    const app = loadApp(); app.state.dialect = 'postgres'; app.state.schema = known;
+    const sql = 'SELECT * FROM t WHERE sale_date >= '+rhs;
+    graphFromSQL(app, sql);
+    const generated = app.buildSQL();
+    assert.match(generated, /AS cond_value[\s\S]*WHERE sale_date >= cond_value[\s\S]*SELECT sale_date,\s*amt,\s*cost/, rhs);
+    if(['CURRENT_DATE','amt * 2','UPPER(cost)'].includes(rhs))
+      assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()), rhs);
+  }
+  assert.match(graphError("SELECT * FROM nowhere WHERE d >= CURRENT_DATE").msg, /CREATE TABLE/);
+  { const one = loadApp(); one.state.dialect = 'postgres'; one.state.schema = known;
+    graphFromSQL(one, "SELECT * FROM t WHERE sale_date >= DATE '2026-01-01' + 1");
+    assert.match(one.buildSQL(), /DATE '2026-01-01' \+ 1 AS cond_value/); }
+  db.close();
   for(const bad of ['2026-02-30','2025-02-29','2026-1-01','0000-01-01','2026-13-01','not-a-date']){
     assert.match(sqlError("SELECT * FROM t WHERE sale_date = DATE '"+bad+"'").msg, /YYYY-MM-DD/);
     assert.match(sqlError("SELECT * FROM t WHERE sale_date = CAST('"+bad+"' AS DATE)").msg, /YYYY-MM-DD/);
   }
   graphFromSQL(api, "SELECT * FROM t WHERE sale_date = DATE '2024-02-29'");
-  for(const condition of ["sale_date IN (DATE '2026-01-01', '2026-02-01')", "sale_date IN (DATE '2026-01-01', NULL)", 'sale_date IN (cost)', 'sale_date BETWEEN cost AND amt', 'sale_date IN (amt * 2)', "sale_date BETWEEN DATE '2026-01-01' AND NULL", "UPPER(sale_date) = DATE '2026-01-01'", "amt * 2 > cost"])
+  for(const condition of ["sale_date IN (DATE '2026-01-01', '2026-02-01')", "sale_date IN (DATE '2026-01-01', NULL)", 'sale_date IN (cost)', 'sale_date BETWEEN cost AND amt', 'sale_date IN (amt * 2)', "sale_date BETWEEN DATE '2026-01-01' AND NULL"])
     sqlError('SELECT * FROM t WHERE '+condition);
   const app = loadApp();
   app.state.schema = {a:{cols:['id','price'].map(name=>({name})),rows:[]},b:{cols:['id','cost'].map(name=>({name})),rows:[]}};
@@ -2566,14 +2653,22 @@ test('DEV-239: same table name in two schemas keeps the schema in each source he
   return 'headings show s1.t and s2.t';
 });
 
-test('DEV-242: a literal where a column is expected is refused, not turned into an identifier', () => {
-  // 算式左邊和函式參數會被當成欄位名；常值放那裡會產生 "-1" 這種錯欄位
-  for (const sql of ['SELECT -1 * amount AS n FROM t', 'SELECT 1 * amount AS n FROM t',
-    'SELECT ABS(-1) AS n FROM t', 'SELECT ABS(1) AS n FROM t']) {
-    assert.throws(() => graphFromSQL(loadApp(), sql), e => e.sqlErr === true && /只能是欄位/.test(e.msg), sql);
+test('DEV-242: a literal where a column is expected stays a literal, never an identifier', () => {
+  // 算式左邊和函式參數以前會被當成欄位名，產生 "-1" 這種錯欄位；現在存成算式樹裡的常值
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE t(amount REAL); INSERT INTO t VALUES (10),(-3),(NULL);');
+  for (const [sql, want] of [['SELECT -1 * amount AS n FROM t', /-1 \* amount/], ['SELECT 1 * amount AS n FROM t', /1 \* amount/],
+    ['SELECT ABS(-1) AS n FROM t', /ABS\(-1\)/], ['SELECT ABS(1) AS n FROM t', /ABS\(1\)/]]) {
+    const app = loadApp(); app.state.dialect = 'postgres';
+    graphFromSQL(app, sql);
+    const generated = app.buildSQL();
+    assert.match(generated, want, sql);
+    assert.doesNotMatch(generated, /"-?1"/, sql);
+    assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()), sql);
   }
   graphFromSQL(loadApp(), 'SELECT amount * -1 AS n FROM t');
-  return 'literal on the left / as argument refused; amount * -1 still imports';
+  db.close();
+  return 'literal on the left / as argument stays a literal and runs; amount * -1 still imports';
 });
 
 test('DEV-240: failed SQL imports leave the graph and quoting unchanged', () => {
@@ -2585,7 +2680,7 @@ test('DEV-240: failed SQL imports leave the graph and quoting unchanged', () => 
   };
   paste('SELECT "CamelCol" FROM "MyTable"');
   const before = app.buildSQL(), canvas = JSON.stringify(app.state.nodes);
-  for (const sql of ['SELECT FROM', "SELECT 'unfinished", 'SELECT x FROM t GROUP BY x HAVING SUM(x) > 1']) {
+  for (const sql of ['SELECT FROM', "SELECT 'unfinished", 'SELECT x, LAG(x) OVER (ORDER BY x) AS p FROM t']) {
     paste(sql);
     assert.match(app.document.getElementById('parse-out').innerHTML, /class="perr"/);
     assert.equal(app.buildSQL(), before, sql);
@@ -2755,14 +2850,509 @@ test('semi-join review: JOIN-renamed keys, text codes, UNION lookups, table name
   return 'joined-table key refused; text codes, UNION lookup and matched table agree with SQLite';
 });
 
+/* Canvas, SQL and step-by-step view link up: every step must belong to exactly one
+   SQL segment (absorbed filters/selects included, or clicking it highlights nothing),
+   splitting the SQL into segments must not change a character of it, clicking a
+   block must jump the step view to that block, and a JOIN that multiplies rows must
+   say so on the block. */
+test('linking: every block maps to its SQL segment and its step; JOIN fan-out is flagged', () => {
+  const app = loadApp();
+  app.state.dialect = 'postgres';
+  const graph = graphFromSQL(app, 'SELECT o.id, o.amt, c.city FROM o INNER JOIN c ON o.cid = c.id WHERE o.amt > 1 AND c.city IS NOT NULL ORDER BY o.amt DESC LIMIT 3');
+  installGraph(app, graph, {
+    o:{label:'', cols:[{name:'id'}, {name:'cid'}, {name:'amt'}], rows:[[1, 1, 5], [2, 2, 7], [3, 1, 2]]},
+    c:{label:'', cols:[{name:'id'}, {name:'city'}], rows:[[1, 'A'], [1, 'B'], [2, 'C']]},
+  });
+  const sql = app.buildSQL();
+  const owners = {};
+  Object.entries(app.state.sqlSegs).forEach(([seg, ids]) => ids.forEach(id => { assert.equal(owners[id], undefined, id + ' in two segments'); owners[id] = seg; }));
+  app.chainOrder().forEach(n => assert.notEqual(owners[n.id], undefined, n.type + ' has no SQL segment'));
+  const html = app.sqlHTML(sql);
+  assert.match(html, /class="seg" data-seg="joined"/);
+  const text = html.replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  assert.equal(text, sql);
+  app.state.steps = app.buildSteps();
+  app.chainOrder().forEach(n => assert.ok(app.stepIndexFor(n.id) >= 0, n.type + ' has no step'));
+  const join = graph.nodes.find(n => n.type === 'join');
+  app.select(join.id);
+  assert.equal(app.state.steps[app.state.step].node, join.id);
+  assert.equal(app.stepIndexFor(graph.nodes.find(n => n.type === 'table').id), 0);
+  const flow = app.rowFlow(join);
+  assert.equal(flow.grew, true);
+  assert.match(flow.text, /3 → 5 列/);
+  return 'segments cover every block once, text unchanged, click jumps to step, 3 → 5 rows flagged';
+});
+
+/* Reloading the page used to throw the whole canvas away. Autosave must bring back
+   every graph an import can produce — including values with < and " in them, which
+   are escaped wherever they are drawn — or a reload silently loses the user's work. */
+test('autosave: every imported graph survives a reload, byte for byte', () => {
+  const bad = `"><img src=x onerror=alert(1)>`;
+  const shapes = [
+    `SELECT * FROM t WHERE city = '${bad}'`,
+    `SELECT * FROM t WHERE city IN ('a', '${bad}') OR qq BETWEEN 1 AND 5`,
+    `SELECT CASE WHEN qq = 5 THEN '${bad}' ELSE city END AS lbl FROM t`,
+    `SELECT '${bad}' AS k FROM t`,
+    'SELECT o.id, c.city FROM o LEFT JOIN c ON o.cid = c.id WHERE c.city IS NULL ORDER BY o.id DESC LIMIT 3',
+    'SELECT o.id FROM o WHERE NOT EXISTS (SELECT 1 FROM p WHERE p.oid = o.id)',
+    'SELECT cid, SUM(price * qty) AS rev, COUNT(DISTINCT sku) AS n FROM o GROUP BY cid HAVING SUM(price * qty) > 10',
+    'SELECT id, RANK() OVER (PARTITION BY cid ORDER BY amt DESC) AS r FROM o',
+    'SELECT "Mixed" FROM t UNION ALL SELECT x FROM u',
+    `SELECT price * qty * (1 - disc) AS net, UPPER(TRIM(name)) || ' ${bad}' AS label, DATEADD(day, 1, d) AS nxt FROM t`,
+  ];
+  for (const sql of shapes) {
+    const app = loadApp();
+    graphFromSQL(app, sql);
+    const saved = JSON.stringify(app.snapshot());
+    assert.equal(app.validSnapshot(JSON.parse(saved)), true, sql);
+    const stored = {'sqlblocks.graph': saved};
+    const back = loadApp(stored);
+    assert.equal(JSON.stringify({n:back.state.nodes, e:back.state.edges, s:back.state.schema}),
+                 JSON.stringify({n:app.state.nodes, e:app.state.edges, s:app.state.schema}), sql);
+    assert.equal(back.buildSQL(), app.buildSQL(), sql);
+  }
+  /* corrupt storage never stops the page from starting */
+  for (const junk of ['{', 'null', '{"v":1}', JSON.stringify({v:1, schema:{}, nodes:[{id:'n1', type:'nope', x:0, y:0}], edges:[], uid:1})]) {
+    const app = loadApp({'sqlblocks.graph': junk});
+    assert.ok(app.state.nodes.some(n => n.type === 'output'), junk);
+  }
+  return `${shapes.length} imported graphs reload identically; 4 corrupt saves fall back to the sample`;
+});
+
+/* A share link is a URL anyone can craft. Names (tables, columns, aliases) are drawn
+   into HTML, so a link carrying markup in a name, an unknown operator or a dangling
+   edge must be refused as a whole, not partly loaded. */
+test('share link: crafted canvases are refused; real ones round-trip through the URL code', async () => {
+  const app = loadApp();
+  graphFromSQL(app, 'SELECT o.id, c.city FROM o INNER JOIN c ON o.cid = c.id WHERE o.amt >= 10');
+  const good = JSON.parse(JSON.stringify(app.snapshot()));
+  const evil = [
+    s => { s.nodes.find(n => n.type === 'table').table = '<img src=x onerror=alert(1)>'; },
+    s => { s.schema.o.cols[0].name = 'id" onmouseover="alert(1)'; },
+    s => { s.schema['<b>x</b>'] = {label:'', cols:[], rows:[]}; },
+    s => { s.nodes.find(n => n.type === 'filter').op = '<script>'; },
+    s => { const f = s.nodes.find(n => n.type === 'filter'); f.valCol = true; f.val = '<img>'; },
+    s => { s.edges.push({from:'ghost', to:s.nodes[0].id, port:0}); },
+    s => { s.nodes.push({id:'zz', type:'output', x:0, y:0}); },
+    s => { s.nodes[0].x = 'left:0;background:url(x)'; },
+  ];
+  for (const harm of evil) {
+    const s = JSON.parse(JSON.stringify(good));
+    harm(s);
+    assert.equal(app.validSnapshot(s), false, harm.toString());
+  }
+  const code = await app.encodeShare(JSON.stringify(good));
+  assert.match(code, /^[zj][A-Za-z0-9_-]+$/);
+  assert.deepEqual(JSON.parse(await app.decodeShare(code)), good);
+  return `${evil.length} crafted canvases refused; link code ${code.length} chars round-trips`;
+});
+
+/* Undo has to cover every edit, because every edit ends in refresh(); typing in the
+   step panel refreshes on each key and must collapse into one undo step. */
+test('undo / redo: steps back and forth through edits; typing collapses into one step', () => {
+  const app = loadApp();
+  const start = app.state.nodes.length;
+  app.addNode('distinct', {});
+  app.addNode('sort', {by:'course_id', dir:'DESC', limit:0, offset:0});
+  assert.equal(app.state.nodes.length, start + 2);
+  app.undo();
+  assert.equal(app.state.nodes.length, start + 1);
+  app.undo();
+  assert.equal(app.state.nodes.length, start);
+  app.undo();
+  assert.equal(app.state.nodes.length, start, 'nothing before the first state');
+  app.redo(); app.redo();
+  assert.equal(app.state.nodes.length, start + 2);
+  const sort = app.state.nodes.find(n => n.type === 'sort');
+  const depth = app.hist.past.length;
+  for (const lim of [1, 12, 123]) { sort.limit = lim; app.recordHistory(true); }
+  assert.equal(app.hist.past.length, depth + 1, 'three keystrokes are one undo step');
+  app.undo();
+  assert.equal(app.state.nodes.find(n => n.type === 'sort').limit, 0);
+  app.addNode('distinct', {});
+  assert.equal(app.hist.future.length, 0, 'a new edit clears redo');
+  return 'add/add/undo/undo/redo/redo; 3 keystrokes = 1 step; new edit clears redo';
+});
+
+/* The six invented rows have no NULLs, no repeated join values, no orphans and no
+   ties, so LEFT vs INNER JOIN, RANK vs ROW_NUMBER and NOT IN vs NOT EXISTS all look
+   the same on them. Edge rows must add exactly those cases — but never repeat a
+   primary key, or every JOIN would turn one-to-many and every warning would be noise. */
+test('edge data: adds NULL / repeated / orphan rows; primary keys stay unique', () => {
+  const app = loadApp();
+  app.state.schema = app.demoSchema();
+  const node = name => ({type:'table', table:name});
+  const students = app.state.schema.students, scores = app.state.schema.scores;
+  const st = app.edgeRows(node('students'), students), sc = app.edgeRows(node('scores'), scores);
+  assert.equal(st.length, 3);
+  const ids = students.rows.concat(st).map(r => r[0]);
+  assert.equal(new Set(ids).size, ids.length, 'students.student_id stays unique');
+  assert.equal(sc[0].every(v => v === null), true, 'scores has no primary key: the NULL row is all NULL');
+  assert.deepEqual(json(sc[1].slice(0, 3)), json(scores.rows[0].slice(0, 3)), 'repeat row shares keys and score with row 1');
+  assert.equal(sc[2][0], 999, 'orphan row has a key no other table has');
+  /* with edge rows on, LEFT and INNER JOIN differ, and NOT IN keeps nothing */
+  graphFromSQL(app, 'SELECT s.name FROM students s LEFT JOIN scores sc ON s.student_id = sc.student_id');
+  app.state.schema = app.demoSchema();
+  app.state.edge = true;
+  const left = app.evalNode(app.state.nodes.find(n => n.type === 'output')).rows.length;
+  app.state.nodes.find(n => n.type === 'join').joinType = 'INNER';
+  const inner = app.evalNode(app.state.nodes.find(n => n.type === 'output')).rows.length;
+  assert.ok(left > inner, `LEFT ${left} vs INNER ${inner}`);
+  /* edge rows are never written into the saved schema */
+  assert.equal(app.state.schema.students.rows.length, 6);
+  return `LEFT ${left} vs INNER ${inner} rows; student ids unique; schema untouched`;
+});
+
+/* Each check targets a mistake AI-written SQL makes that is valid SQL and runs
+   without error. Each must fire on the bad shape and stay quiet on its correct
+   neighbour, or users learn to ignore the panel. */
+test('AI SQL check: each trap fires on the wrong query and stays quiet on the right one', () => {
+  const lint = (sql, {edge = true, dialect = 'postgres', schema} = {}) => {
+    const app = loadApp();
+    app.state.dialect = dialect; app.state.edge = edge;
+    app.state.schema = schema || app.demoSchema();
+    const g = app.astToGraph(app.parseSQLText(sql));
+    installGraph(app, g, g.schema);
+    return app.lintGraph().map(f => f.level + ':' + f.msg.replace(/<[^>]+>/g, ''));
+  };
+  const pairs = [
+    ['LEFT JOIN undone by WHERE', /變成 INNER JOIN/,
+      'SELECT s.name, sc.score FROM students s LEFT JOIN scores sc ON s.student_id = sc.student_id WHERE sc.score >= 60',
+      'SELECT s.name, sc.score FROM students s LEFT JOIN scores sc ON s.student_id = sc.student_id WHERE s.gender = \'女\' OR sc.score IS NULL'],
+    ['one-to-many JOIN double counts the duplicated side', /一對多/,
+      'SELECT t.name, SUM(c.teacher_id) AS bad FROM courses c JOIN scores sc ON c.course_id = sc.course_id JOIN teachers t ON c.teacher_id = t.teacher_id GROUP BY t.name',
+      'SELECT c.course_name, SUM(sc.score) AS total FROM courses c JOIN scores sc ON c.course_id = sc.course_id GROUP BY c.course_name'],
+    ['COUNT(*) after LEFT JOIN', /COUNT\(\*\) 接在 LEFT JOIN/,
+      'SELECT t.name, COUNT(*) AS n FROM teachers t LEFT JOIN courses c ON t.teacher_id = c.teacher_id GROUP BY t.name',
+      'SELECT t.name, COUNT(c.course_id) AS n FROM teachers t LEFT JOIN courses c ON t.teacher_id = c.teacher_id GROUP BY t.name'],
+    ['NOT IN with a NULL in the lookup', /^warn:NOT IN/,
+      'SELECT s.name FROM students s WHERE s.student_id NOT IN (SELECT sc.student_id FROM scores sc)',
+      'SELECT s.name FROM students s WHERE NOT EXISTS (SELECT 1 FROM scores sc WHERE sc.student_id = s.student_id)'],
+    ['integer division', /捨去小數/,
+      'SELECT student_id / 3 AS third FROM scores',
+      'SELECT score / 3 AS third FROM scores'],
+    ['LIMIT without ORDER BY', /沒有排序就取前幾筆/,
+      'SELECT * FROM scores LIMIT 3',
+      'SELECT * FROM scores ORDER BY score DESC LIMIT 3'],
+    ['ROW_NUMBER over ties', /同分/,
+      'SELECT course_id, ROW_NUMBER() OVER (PARTITION BY course_id ORDER BY score DESC) AS rk FROM scores',
+      'SELECT course_id, RANK() OVER (PARTITION BY course_id ORDER BY score DESC) AS rk FROM scores'],
+  ];
+  for (const [name, re, bad, good] of pairs) {
+    assert.ok(lint(bad).some(m => re.test(m)), `${name} should fire: ${lint(bad).join(' | ')}`);
+    assert.ok(!lint(good).some(m => re.test(m)), `${name} should stay quiet: ${lint(good).join(' | ')}`);
+  }
+  /* integer division truncates only where the database does it */
+  assert.equal(lint('SELECT student_id / 3 AS third FROM scores', {dialect:'mysql'}).length, 0);
+  /* data-backed checks never claim evidence the clean sample does not have */
+  assert.equal(lint('SELECT course_id, ROW_NUMBER() OVER (PARTITION BY course_id ORDER BY score DESC) AS rk FROM scores', {edge:false}).length, 0);
+  assert.ok(lint(pairs[3][2], {edge:false}).every(m => m.startsWith('info:')), 'NOT IN without a NULL in sight is a heads-up, not a warning');
+  return `${pairs.length} traps × fire / quiet; dialect- and evidence-aware`;
+});
+
+/* Review of PR #1 (five findings). Each case reproduces the reported sequence. */
+
+/* COALESCE(city, '<unknown>') imported fine, but its saved snapshot was rejected
+   because the kept SQL argument contains <, so a reload replaced the canvas with
+   the sample and the share link would not open. */
+test('review #1: a quoted literal with < in a function argument survives reload and sharing', async () => {
+  const app = loadApp();
+  graphFromSQL(app, "SELECT COALESCE(city, '<unknown>') AS c FROM t");
+  const saved = JSON.stringify(app.snapshot());
+  assert.equal(app.validSnapshot(JSON.parse(saved)), true);
+  const back = loadApp({'sqlblocks.graph': saved});
+  assert.equal(back.buildSQL(), app.buildSQL());
+  /* an argument that is not a quoted literal still may not carry markup */
+  const evil = JSON.parse(saved);
+  evil.nodes.find(n => n.type === 'derive').args[1] = '<img src=x onerror=alert(1)>';
+  assert.equal(app.validSnapshot(evil), false);
+  const code = await app.encodeShare(saved);
+  assert.equal(app.validSnapshot(JSON.parse(await app.decodeShare(code))), true);
+  return "'<unknown>' kept across reload and share; bare markup still refused";
+});
+
+/* Undo, then edit again within 1.2 s: the new keystroke was merged into the restored
+   entry, so the next undo removed the whole block instead of the new edit. */
+test('review #2: typing right after an undo is a new undo step', () => {
+  const app = loadApp();
+  app.addNode('sort', {by:'course_id', dir:'DESC', limit:0, offset:0});
+  const sort = () => app.state.nodes.find(n => n.type === 'sort');
+  sort().limit = 5; app.recordHistory(true);
+  app.undo();
+  assert.equal(sort().limit, 0);
+  sort().limit = 7; app.recordHistory(true);
+  app.undo();
+  assert.ok(sort(), 'the sort block is still there');
+  assert.equal(sort().limit, 0);
+  return 'undo after re-editing reverts only the new limit';
+});
+
+/* NOW() keeps a "no arguments" flag; after switching the function to ABS and picking
+   score in the panel, the SQL still said ABS() — which does not run. */
+test('review #3: picking a function or its column in the panel drops the no-argument flag', () => {
+  const app = loadApp();
+  const g = graphFromSQL(app, 'SELECT NOW() AS ts FROM scores');
+  const d = g.nodes.find(n => n.type === 'derive');
+  app.state.sel = d.id;
+  const change = (f, value) => app.inspector.listeners.change({target:{dataset:{f}, value}});
+  change('fn', 'ABS');
+  change('left', 'score');
+  assert.match(app.buildSQL(), /ABS\(score\) AS ts/);
+  return 'NOW() → ABS(score) after two panel edits';
+});
+
+/* A DISTINCT between the one-to-many JOIN and the SUM removes the copies; the check
+   still claimed SUM double-counts. It now looks at what the aggregate receives. */
+test('review #4: no double-counting warning once DISTINCT has removed the copies', () => {
+  const schema = {
+    orders:{label:'', cols:[{name:'id'}, {name:'amount'}], rows:[[1, 10], [2, 20]]},
+    items:{label:'', cols:[{name:'order_id'}, {name:'sku'}], rows:[[1, 'a'], [1, 'b'], [2, 'c']]},
+  };
+  const lint = sql => { const app = loadApp(); const g = graphFromSQL(app, sql); installGraph(app, g, schema); return app.lintGraph().map(f => f.msg); };
+  assert.ok(!lint('SELECT SUM(d.amount) AS total FROM (SELECT DISTINCT o.id, o.amount FROM orders o JOIN items i ON o.id = i.order_id) d').some(m => /一對多/.test(m)));
+  assert.ok(lint('SELECT SUM(o.amount) AS total FROM orders o JOIN items i ON o.id = i.order_id').some(m => /一對多/.test(m)));
+  /* DISTINCT that keeps a right-side column does not remove the copies */
+  assert.ok(lint('SELECT SUM(d.amount) AS total FROM (SELECT DISTINCT o.id, o.amount, i.sku FROM orders o JOIN items i ON o.id = i.order_id) d').some(m => /一對多/.test(m)));
+  return 'quiet after DISTINCT o.id, o.amount; fires without it and when DISTINCT keeps i.sku';
+});
+
+/* Following the integer-division advice (divisor 2.0) produced student_id / '2.0':
+   a string, which PostgreSQL rejects. A decimal operand is written as typed. */
+test('review #5: a decimal divisor typed in the panel is written as a number', () => {
+  const app = loadApp(); app.state.dialect = 'postgres';
+  const g = graphFromSQL(app, 'SELECT student_id / 2 AS half FROM scores');
+  installGraph(app, g, app.demoSchema());
+  assert.ok(app.lintGraph().some(f => /捨去小數/.test(f.msg)));
+  g.nodes.find(n => n.type === 'derive').right = '2.0';
+  assert.match(app.buildSQL(), /student_id \/ 2\.0 AS half/);
+  assert.ok(!app.lintGraph().some(f => /捨去小數/.test(f.msg)));
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE scores(student_id INTEGER); INSERT INTO scores VALUES (3);');
+  assert.deepEqual(json(db.prepare(app.buildSQL().replace(/^\/\*.*\*\/\n/, '')).all().map(r => r.half)), [1.5]);
+  db.close();
+  return 'warning clears and student_id / 2.0 = 1.5 in SQLite';
+});
+
+/* Multi-level expressions used to be refused (or, for COALESCE(o.a, o.b), copied
+   "o.b" verbatim into a CTE where no alias o exists). They are stored as a clean
+   tree now, so: the SQL is rewritten from the tree per dialect (|| is OR in MySQL
+   and does not exist in SQL Server), the preview computes what it can exactly as
+   the database would and says "由資料庫計算" for the rest, and a column the tree
+   needs going missing upstream is reported, not silently emitted. */
+test('expressions: tree rewritten per dialect, preview agrees with SQLite, missing columns caught', () => {
+  const concat = "SELECT first || ' ' || last AS full_name FROM p";
+  const out = d => { const app = loadApp(); app.state.dialect = d; graphFromSQL(app, concat); return app.buildSQL(); };
+  assert.match(out('postgres'), /first \|\| ' ' \|\| last AS full_name/);
+  assert.match(out('oracle'), /first \|\| ' ' \|\| last AS full_name/);
+  assert.match(out('mysql'), /CONCAT\(first, ' ', last\) AS full_name/);
+  assert.match(out('mssql'), /CAST\(first AS NVARCHAR\(MAX\)\) \+ ' ' \+ CAST\(last AS NVARCHAR\(MAX\)\) AS full_name/);
+  roundTrip(concat);
+
+  const app = loadApp(); app.state.dialect = 'postgres';
+  graphFromSQL(app, 'SELECT COALESCE(o.amount, o.qty) AS v FROM orders o');
+  assert.match(app.buildSQL(), /COALESCE\(amount, qty\) AS v/);
+  assert.doesNotMatch(app.buildSQL(), /o\.qty/);
+  assert.match(roundTrip("SELECT DATEADD(day, 7, d) AS due, DATE_TRUNC('month', d) AS m FROM t"), /DATEADD\(day, 7, d\)[\s\S]*DATE_TRUNC\('month', d\)/);
+
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE r(s TEXT, n REAL, m REAL);
+           INSERT INTO r VALUES ('  Ab ', 2, 4), (NULL, 3, NULL), ('x', NULL, 0), ('aaa', 1.25, 2);`);
+  const rows = db.prepare('SELECT s, n, m FROM r').all().map(o => [o.s, o.n, o.m]);
+  for (const e of ['UPPER(TRIM(s))', "COALESCE(s, 'none') || '!'", 'n * m + 1', '(n + 1) * (m - 1)', 'NULLIF(m, 0) * 2',
+                   'ROUND(n / 3.0, 2)', 'LENGTH(s) - 1', "REPLACE(s, 'a', 'b')", 'ABS(n - m)', 'COALESCE(m, n, 0) / 2.0',
+                   /* CASE follows SQL's three-valued logic: UNKNOWN never takes a branch */
+                   "CASE WHEN n > 1 AND m IS NOT NULL THEN s ELSE '-' END", "CASE WHEN s IN ('x', NULL) THEN 1 ELSE 0 END",
+                   "CASE WHEN s NOT IN ('x', NULL) THEN 1 ELSE 0 END", 'CASE WHEN n BETWEEN 1 AND 2 OR m = 0 THEN n * 10 END',
+                   "CASE s WHEN 'x' THEN 'X' WHEN 'aaa' THEN 'A' END", "CASE WHEN s LIKE '%b%' THEN 1 WHEN s IS NULL THEN 2 ELSE 3 END"]) {
+    const one = loadApp(); one.state.dialect = 'postgres';
+    const g = graphFromSQL(one, `SELECT ${e} AS v FROM r`);
+    installGraph(one, g, {r:{label:'', cols:[{name:'s'}, {name:'n'}, {name:'m'}], rows}});
+    const preview = one.evalNode(g.nodes.find(n => n.type === 'derive')).rows.map(x => x[x.length - 1]);
+    const real = db.prepare(`SELECT ${e} AS v FROM r`).all().map(o => o.v);
+    assert.deepEqual(json(preview), json(real), e);
+    assert.deepEqual(json(db.prepare(one.buildSQL()).all().map(o => o.v)), json(real), e);
+  }
+  db.close();
+  /* a function the preview cannot run is labelled, not invented */
+  const one = loadApp();
+  const g = graphFromSQL(one, "SELECT DATE_TRUNC('month', d) AS m FROM t");
+  installGraph(one, g, {t:{label:'', cols:[{name:'d'}], rows:[['2024-03-05']]}});
+  assert.equal(one.evalNode(g.nodes.find(n => n.type === 'derive')).rows[0][1], '（由資料庫計算）');
+  /* the tree needs qty; once an upstream 選欄位 drops it, the SQL says so */
+  const gone = loadApp();
+  const g2 = graphFromSQL(gone, 'SELECT price * qty * (1 - disc) AS net FROM (SELECT price, qty, disc FROM t) AS x');
+  assert.doesNotMatch(gone.buildSQL(), /無法產生/);
+  const pick = g2.nodes.find(n => n.type === 'select' && n.cols.includes('qty'));
+  pick.cols = pick.cols.filter(c => c !== 'qty');
+  assert.match(gone.buildSQL(), /無法產生 SQL：.*qty/);
+  return '|| per dialect; alias stripped; 10 expressions match SQLite in preview and SQL; unknown fn labelled; missing column reported';
+});
+
+/* ROUND(AVG(x), 2) and SUM(a) * 1.0 / COUNT(*) were refused: an aggregate inside an
+   expression. They become GROUP BY (hidden agg_value columns) → expression → 選欄位
+   that drops the helpers, so the result has exactly the pasted columns in order. An
+   aggregate already selected on its own is reused, not counted twice. */
+test('post-aggregate expressions: hidden aggregates, exact columns, no double counting', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE o(c TEXT, amt INTEGER, qty INTEGER);
+           INSERT INTO o VALUES ('x',10,1),('x',25,2),('y',7,NULL),('y',NULL,3),('z',40,4);`);
+  for (const sql of [
+    'SELECT c, ROUND(AVG(amt), 1) AS a FROM o GROUP BY c ORDER BY c',
+    'SELECT c, SUM(amt) * 1.0 / COUNT(*) AS per, COUNT(*) AS n FROM o GROUP BY c ORDER BY per DESC, c',
+    'SELECT MAX(amt) - MIN(amt) AS spread FROM o',
+    'SELECT c, COALESCE(SUM(qty), 0) AS q FROM o GROUP BY c HAVING SUM(amt) > 10 ORDER BY c',
+  ]) {
+    const generated = roundTrip(sql);
+    assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()), sql);
+  }
+  const twice = roundTrip('SELECT c, SUM(amt) * 1.0 / COUNT(*) AS per, COUNT(*) AS n FROM o GROUP BY c');
+  assert.equal((twice.match(/COUNT\(\*\)/g) || []).length, 1, 'COUNT(*) computed once and reused');
+  assert.doesNotMatch(twice.split('picked AS')[1], /agg_value/, 'helpers are dropped before the result');
+  db.close();
+  return '4 shapes exact in SQLite and round-trip; shared COUNT(*); helpers dropped';
+});
+
+/* order_date >= CURRENT_DATE - INTERVAL '30 days' was refused. It imports now, but
+   the sample cannot know today's date: the preview must not pretend to filter (rule 4)
+   — rows it cannot judge stay, and the step says why. */
+test('today / INTERVAL: kept as written; the preview admits it cannot judge', () => {
+  const app = loadApp(); app.state.dialect = 'postgres';
+  const sql = "SELECT id FROM o WHERE order_date >= CURRENT_DATE - INTERVAL '30 days'";
+  const g = graphFromSQL(app, sql);
+  installGraph(app, g, {o:{label:'', cols:[{name:'id'}, {name:'order_date'}], rows:[[1, '2020-01-01'], [2, '2099-01-01']]}});
+  assert.match(app.buildSQL(), /CURRENT_DATE - INTERVAL '30 days' AS cond_value[\s\S]*WHERE order_date >= cond_value/);
+  roundTrip(sql);
+  roundTrip("SELECT id FROM o WHERE d < SYSDATE - INTERVAL '7' DAY");
+  assert.equal(app.evalNode(g.nodes.find(n => n.type === 'output')).rows.length, 2, 'nothing dropped on a guess');
+  app.state.steps = app.buildSteps();
+  assert.match(app.state.steps.find(s => s.title === 'WHERE').cap, /算不出要比的值/);
+  return 'SQL kept; both sample rows kept; step explains';
+});
+
+/* Review of the import-coverage commits (seven findings). Each case reproduces the
+   reported input. */
+
+/* id || code was written for SQL Server as id + code. With two numbers that adds
+   (1 + 2 = 3, not '12'); a number next to text is a conversion error (rule 1). */
+test('stage-4 review #1: SQL Server concatenation joins text, never adds numbers', () => {
+  const app = loadApp(); app.state.dialect = 'mssql';
+  graphFromSQL(app, "SELECT id || '-' || code AS k FROM t");
+  assert.match(app.buildSQL(), /CAST\(id AS NVARCHAR\(MAX\)\) \+ '-' \+ CAST\(code AS NVARCHAR\(MAX\)\) AS k/);
+  return "id || '-' || code -> CAST(id …) + '-' + CAST(code …)";
+});
+
+/* The function name in the panel is free text, but the saved snapshot only accepts
+   identifiers. Clearing the field (or typing dbo.fmt) and reloading replaced the
+   whole canvas with the sample, and a share link made then would not open. */
+test('stage-4 review #2: a function name typed in the panel never makes the save unloadable', () => {
+  const app = loadApp();
+  const fn = graphFromSQL(app, 'SELECT UPPER(name) AS u FROM t').nodes.find(n => n.type === 'derive');
+  app.state.sel = fn.id;
+  const change = v => app.document.getElementById('inspector').listeners.change({target: {dataset: {f: 'fn'}, value: v}});
+  const reloads = () => app.validSnapshot(JSON.parse(JSON.stringify(app.snapshot())));
+  change('');
+  assert.equal(fn.fn, 'UPPER', 'an empty name is not taken');
+  change('LOWER(');
+  assert.equal(fn.fn, 'UPPER', 'a name SQL cannot use is not taken');
+  assert.equal(reloads(), true);
+  change(' dbo.fmt ');
+  assert.equal(fn.fn, 'dbo.fmt');
+  assert.equal(reloads(), true);
+  assert.match(app.buildSQL(), /dbo\.fmt\(name\) AS u/);
+  return "'' and 'LOWER(' ignored; dbo.fmt kept and reloadable";
+});
+
+/* SUM(CASE … THEN 1 ELSE 0 END) / COUNT(*) is integer division in PostgreSQL and
+   SQL Server (and SQLite): 2 of 3 is 0. The preview showed 0.67 — hiding exactly the
+   bug the AI check warns about (rule 4). MySQL and Oracle really do give a fraction. */
+test('stage-4 review #3: the preview truncates integer division where the database does', () => {
+  const schema = {scores:{label:'', cols:[{name:'course_id', type:'INT'}, {name:'score', type:'INT'}],
+                          rows:[[1, 70], [1, 50], [1, 80]]}};
+  const preview = (sql, dialect) => {
+    const app = loadApp(); app.state.dialect = dialect;
+    const g = graphFromSQL(app, sql); installGraph(app, g, schema);
+    return {app, rows: app.evalNode(g.nodes.find(n => n.type === 'output')).rows};
+  };
+  const ratio = 'SELECT course_id, SUM(CASE WHEN score >= 60 THEN 1 ELSE 0 END) / COUNT(*) AS r FROM scores GROUP BY course_id';
+  const pg = preview(ratio, 'postgres');
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE scores(course_id INTEGER, score INTEGER); INSERT INTO scores VALUES (1,70),(1,50),(1,80);');
+  assert.deepEqual(json(pg.rows), [[1, db.prepare(pg.app.buildSQL().replace(/^\/\*.*\*\/\n/, '')).all()[0].r]]);
+  assert.deepEqual(json(pg.rows), [[1, 0]]);
+  assert.deepEqual(json(preview(ratio, 'mssql').rows), [[1, 0]]);
+  assert.deepEqual(json(preview(ratio, 'mysql').rows), [[1, 0.667]]);
+  assert.deepEqual(json(preview('SELECT score / 7 AS s FROM scores', 'postgres').rows), [[10], [7], [11]]);
+  assert.deepEqual(json(preview('SELECT (score + 0) / 7 AS s FROM scores', 'postgres').rows), [[10], [7], [11]]);
+  assert.deepEqual(json(preview('SELECT score / 7.0 AS s FROM scores', 'postgres').rows), [[10], [7.143], [11.429]]);
+  db.close();
+  return '2/3 -> 0 in PostgreSQL / SQL Server (= SQLite), 0.667 in MySQL; 7.0 keeps the fraction';
+});
+
+/* Oracle treats NULL as '' in ||: 'Ann' || NULL is 'Ann'. The preview said NULL. */
+test('stage-4 review #4: the Oracle preview of || skips NULLs like Oracle does', () => {
+  const run = dialect => {
+    const app = loadApp(); app.state.dialect = dialect;
+    const g = graphFromSQL(app, 'SELECT first_name || middle AS n FROM p');
+    installGraph(app, g, {p:{label:'', cols:[{name:'first_name'}, {name:'middle'}], rows:[['Ann', null], [null, null]]}});
+    return json(app.evalNode(g.nodes.find(n => n.type === 'output')).rows);
+  };
+  assert.deepEqual(run('oracle'), [['Ann'], [null]]);
+  assert.deepEqual(run('postgres'), [[null], [null]]);
+  return "Oracle: 'Ann' || NULL = 'Ann', NULL || NULL = NULL; PostgreSQL: NULL";
+});
+
+/* DATENAME(month, '2024-03-01') became a function step whose source column was
+   "month", written back quoted — SQL Server then looks for a column named month. */
+test('stage-4 review #5: a date-part keyword is never turned into a source column', () => {
+  const app = loadApp(); app.state.dialect = 'mssql'; app.state.quoteAll = true;
+  graphFromSQL(app, "SELECT DATENAME(month, '2024-03-01') AS m, DATEADD(day, 1, '2024-03-01') AS d FROM t");
+  const sql = app.buildSQL();
+  assert.match(sql, /DATENAME\(month, '2024-03-01'\) AS \[m\]/);
+  assert.match(sql, /DATEADD\(day, 1, '2024-03-01'\) AS \[d\]/);
+  roundTrip("SELECT DATENAME(month, '2024-03-01') AS m, DATEADD(day, 1, '2024-03-01') AS d FROM t", 'mssql');
+  return 'month / day stay bare keywords';
+});
+
+/* MySQL DATEDIFF(end_d, start_d) and CONVERT(x, CHAR) take a column first. It was
+   written as a bare keyword: never quoted, and invisible to the missing-column check. */
+test('stage-4 review #6: a column in the first argument of DATEDIFF stays a column', () => {
+  const app = loadApp(); app.state.dialect = 'mysql'; app.state.quoteAll = true;
+  const g = graphFromSQL(app, 'SELECT DATEDIFF(end_d, start_d) AS days FROM t');
+  assert.match(app.buildSQL(), /DATEDIFF\(`end_d`, `start_d`\) AS `days`/);
+  assert.deepEqual(json(g.nodes.find(n => n.type === 'derive').expr.args.map(a => a.kind)), ['col', 'col']);
+  const ms = loadApp(); ms.state.dialect = 'mssql';
+  graphFromSQL(ms, 'SELECT DATEDIFF(day, start_d, end_d) AS days, CONVERT(INT, code) AS c FROM t');
+  assert.match(ms.buildSQL(), /DATEDIFF\(day, start_d, end_d\) AS days/);
+  assert.match(ms.buildSQL(), /CONVERT\(INT, code\) AS c/);
+  roundTrip('SELECT DATEDIFF(end_d, start_d) AS days, CONVERT(x, CHAR) AS t FROM t', 'mysql');
+  roundTrip('SELECT DATEDIFF(day, start_d, end_d) AS days, CONVERT(INT, code) AS c FROM t', 'mssql');
+  return 'MySQL end_d quoted as a column; SQL Server day / INT stay keywords';
+});
+
+/* ROUND(-2.5) is -3 in every database (half away from zero); Math.round gave -2.
+   SUBSTR(s, 0, 2) differs between databases; the preview picked one answer. */
+test('stage-4 review #7: ROUND and SUBSTR previews never show a value the database would not', () => {
+  const app = loadApp(); app.state.dialect = 'postgres';
+  const g = graphFromSQL(app, 'SELECT ROUND(x) AS r, ROUND(x, 1) AS r1, SUBSTR(s, 0, 2) AS p FROM t');
+  installGraph(app, g, {t:{label:'', cols:[{name:'x'}, {name:'s'}], rows:[[-2.5, 'abc'], [-0.25, 'abc']]}});
+  const rows = json(app.evalNode(g.nodes.find(n => n.type === 'output')).rows);
+  const db = new DatabaseSync(':memory:');
+  const lite = db.prepare('SELECT ROUND(-2.5) AS a, ROUND(-0.25, 1) AS b').get();
+  db.close();
+  assert.equal(rows[0][0], lite.a);
+  assert.equal(rows[1][1], lite.b);
+  assert.equal(rows[0][2], '（由資料庫計算）');
+  return `ROUND(-2.5) = ${lite.a}, ROUND(-0.25, 1) = ${lite.b} like SQLite; SUBSTR from 0 left to the database`;
+});
+
 let passed = 0;
 for (const item of cases) {
   try {
-    const detail = item.fn();
+    const detail = await item.fn();
     passed++;
     console.log(`PASS ${item.name} — ${detail}`);
   } catch (error) {
-    console.log(`FAIL ${item.name} — ${error?.stack || error}`);
+    console.log(`FAIL ${item.name} — ${error?.stack || (error?.sqlErr ? 'sqlErr: ' + error.msg : error)}`);
   }
 }
 console.log(`TOTAL ${passed}/${cases.length} passed`);
