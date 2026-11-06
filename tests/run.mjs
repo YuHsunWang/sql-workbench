@@ -86,9 +86,77 @@ test('regression: HAVING uses the aggregate output alias', () => {
   return 'COUNT(*) HAVING threshold returns the aliased count';
 });
 
-test('regression: FULL OUTER JOIN is refused when the graph cannot represent it', () => {
-  sqlError('SELECT a.id FROM a FULL OUTER JOIN b ON a.id=b.id');
-  return 'FULL OUTER JOIN raises sqlErr';
+/* FULL OUTER JOIN and non-equi conditions (BETWEEN, <, >=, <>) were refused (issue #5).
+   FULL keeps both sides' unmatched rows and the right key column — a right-only row's
+   key exists only there; MySQL, which has no FULL JOIN, gets LEFT JOIN UNION ALL the
+   unmatched right rows (written as right LEFT JOIN left: SQLite 3.53 pushes an outer
+   WHERE wrongly into a RIGHT JOIN inside UNION ALL). BETWEEN is its two comparisons. */
+test('join: FULL OUTER and non-equi conditions are exact in SQL and preview', () => {
+  const db = new DatabaseSync(':memory:');
+  const data = {
+    o: {cols: ['id', 'cid', 'd', 'amount'], rows: [[1, 1, '2024-01-05', 10], [2, 2, '2024-02-10', 20], [3, 9, '2024-03-01', null], [4, null, null, 40], [5, 1, '2023-12-31', 5]]},
+    c: {cols: ['id', 'city'], rows: [[1, 'A'], [2, null], [3, 'C'], [null, 'D']]},
+    p: {cols: ['pid', 'start', 'stop', 'rate'], rows: [[1, '2024-01-01', '2024-01-31', 3], [2, '2024-02-01', '2024-02-29', 4], [3, '2024-01-15', '2024-02-15', 5]]},
+  };
+  for (const [t, {cols, rows}] of Object.entries(data)) {
+    db.exec(`CREATE TABLE ${t}(${cols.join(', ')})`);
+    const ins = db.prepare(`INSERT INTO ${t} VALUES (${cols.map(() => '?').join(', ')})`);
+    rows.forEach(r => ins.run(...r));
+  }
+  const sorted = rows => json(rows).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const run = sql => sorted(db.prepare(sql).all().map(r => Object.values(r)));
+  const app = loadApp();
+  app.document.getElementById('ddl').value = 'CREATE TABLE o (id INT, cid INT, d DATE, amount INT); CREATE TABLE c (id INT, city TEXT); CREATE TABLE p (pid INT, start DATE, stop DATE, rate INT);';
+  app.document.getElementById('btn-parse').listeners.click();
+  const schema = Object.fromEntries(Object.entries(data).map(([t, {cols, rows}]) => [t, {cols: cols.map(name => ({name})), rows}]));
+  const trip = (sql, dialect = 'postgres') => {
+    app.state.dialect = dialect;
+    graphFromSQL(app, sql);
+    const generated = app.buildSQL();
+    return generated;
+  };
+  const shapes = [
+    'SELECT o.id, c.id AS cid2, c.city FROM o FULL OUTER JOIN c ON o.cid = c.id',
+    'SELECT COALESCE(o.cid, c.id) AS k, o.amount, c.city FROM o FULL JOIN c ON o.cid = c.id',
+    'SELECT o.id, c.city FROM o FULL JOIN c ON o.cid = c.id WHERE c.city IS NULL',
+    'SELECT o.id, p.rate FROM o JOIN p ON o.d BETWEEN p.start AND p.stop',
+    'SELECT o.id, p.pid FROM o LEFT JOIN p ON o.d >= p.start AND o.d <= p.stop',
+    'SELECT o.id, p.pid FROM o JOIN p ON p.start > o.d',
+    'SELECT o.id, c.id AS other FROM o JOIN c ON o.cid <> c.id',
+    'SELECT o.id, p.pid FROM p RIGHT JOIN o ON o.d BETWEEN p.start AND p.stop',
+    'SELECT o.id, p.pid FROM o FULL JOIN p ON o.d BETWEEN p.start AND p.stop',
+  ];
+  for (const sql of shapes) {
+    const want = run(sql);
+    const generated = trip(sql);
+    assert.deepEqual(run(generated), want, generated);
+    graphFromSQL(app, generated);
+    assert.equal(app.buildSQL(), generated, `re-import of ${sql}`);
+    installGraph(app, {nodes: app.state.nodes, edges: app.state.edges}, schema);
+    assert.deepEqual(sorted(app.evalNode(app.state.nodes.find(n => n.type === 'output')).rows), want, `preview of ${sql}`);
+    if (/FULL/.test(sql)) {
+      app.state.schema = {};
+      app.document.getElementById('btn-parse').listeners.click();
+      const mysql = trip(sql, 'mysql');
+      assert.match(mysql, /LEFT JOIN[\s\S]*UNION ALL[\s\S]*FROM \w+ AS b\s+LEFT JOIN[\s\S]*IS NULL/);
+      assert.deepEqual(run(mysql), want, mysql);
+    }
+  }
+  /* the panel picks the operator and FULL the same way */
+  app.state.dialect = 'postgres';
+  const g = graphFromSQL(app, 'SELECT o.id, p.pid FROM o JOIN p ON o.d >= p.start');
+  app.state.sel = g.nodes.find(n => n.type === 'join').id;
+  const change = (dataset, value) => app.document.getElementById('inspector').listeners.change({target: {dataset, value}});
+  change({k: '0', f: 'op'}, '<');
+  change({f: 'joinType'}, 'FULL');
+  assert.match(app.buildSQL(), /FULL JOIN p AS b\s+ON a\.d < b\.start/);
+  change({k: '0', f: 'op'}, '=');
+  assert.match(app.buildSQL(), /ON a\.d = b\.start/);
+  assert.equal(g.nodes.find(n => n.type === 'join').keys[0].op, undefined, 'an equality key looks like it always did');
+  sqlError('SELECT o.id FROM o FULL JOIN c USING (id)');
+  assert.match(sqlError('SELECT o.id FROM o JOIN p ON o.d NOT BETWEEN p.start AND p.stop').msg, /NOT BETWEEN/);
+  assert.throws(() => graphFromSQL(app, 'SELECT o.id FROM o JOIN c ON o.id < o.cid'), e => e.sqlErr === true && /同一邊/.test(e.msg));
+  return `${shapes.length} shapes exact in SQLite, re-import and preview; FULL also as MySQL's LEFT UNION ALL RIGHT`;
 });
 
 test('regression: NULLS LAST is refused when ordering cannot preserve it', () => {
@@ -225,8 +293,8 @@ test('regression: every ORDER BY key is kept, in order', () => {
   app.state.schema = {t:{label:'', cols:[{name:'x', type:'INT'}, {name:'y', type:'INT'}], rows:[[1, 1], [2, 0], [1, 2]]}};
   const out = app.evalNode(graph.nodes.find(n => n.type === 'output'));
   assert.deepEqual(json(out.rows), [[1, 2], [1, 1], [2, 0]]);
-  assert.match(sqlError('SELECT ROW_NUMBER() OVER (ORDER BY x, y) AS r FROM t').msg, /視窗的 ORDER BY/);
-  return 'SQL keeps both keys; ties on x broken by y DESC; window extra keys refused';
+  assert.match(roundTrip('SELECT ROW_NUMBER() OVER (ORDER BY x, y DESC) AS r FROM t'), /OVER \(ORDER BY x ASC, y DESC\)/);
+  return 'SQL keeps both keys; ties on x broken by y DESC; window keys kept too';
 });
 
 /* Common AI-written shapes imported "successfully" as a different query: LAG and
@@ -235,9 +303,9 @@ test('regression: every ORDER BY key is kept, in order', () => {
    non-existent year_d, NOW() came back as NOW(*). Each is now refused or exact. */
 test('regression: imports never swap a function, drop a layer or invent a column', () => {
   const refused = [
-    'SELECT id, LAG(amount) OVER (ORDER BY id) AS prev FROM orders',
-    'SELECT id, NTILE(4) OVER (ORDER BY amount) AS q FROM orders',
-    'SELECT id, SUM(amount) OVER (ORDER BY id ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS ma FROM orders',
+    'SELECT id, FIRST_VALUE(amount) OVER (ORDER BY id) AS first FROM orders',
+    'SELECT id, LAG(amount) IGNORE NULLS OVER (ORDER BY id) AS prev FROM orders',
+    'SELECT id, SUM(amount) OVER (ORDER BY id RANGE BETWEEN 6 PRECEDING AND CURRENT ROW) AS ma FROM orders',
     'SELECT ROW_NUMBER() OVER (PARTITION BY YEAR(d) ORDER BY a) AS r FROM t',
     'SELECT SUM(a * 2) OVER () AS s FROM t',
   ];
@@ -265,6 +333,323 @@ test('regression: imports never swap a function, drop a layer or invent a column
   assert.match(same('SELECT c, COUNT(1) AS n FROM o GROUP BY c ORDER BY c'), /COUNT\(\*\)/);
   assert.match(roundTrip('SELECT NOW() AS t FROM o'), /NOW\(\) AS t/);
   return `${refused.length + refusedAtBuild.length} shapes refused; SUM(a*b), GROUP BY expr, COUNT(1), NOW() exact in SQLite`;
+});
+
+/* sql.js in the browser; Node's own SQLite here, behind the same exec / run interface */
+const nodeEngine = () => {
+  const db = new DatabaseSync(':memory:');
+  return {
+    exec(sql) { const st = db.prepare(sql); const cols = st.columns().map(c => c.name); return {cols, rows: st.all().map(r => cols.map(c => r[c]))}; },
+    run(sql, params) { db.prepare(sql).run(...(params || [])); },
+    close() { db.close(); },
+  };
+};
+
+/* The preview imitated SQL in JavaScript: what it did not know became 「由資料庫計算」,
+   and every new shape needed another imitation (issue #2). With the engine on, each
+   step's preview is that step's SQL really run by SQLite; the page says SQLite ran it,
+   not the chosen database; a step SQLite cannot run falls back and is counted. */
+test('engine: each step is really run, labelled, and falls back step by step', () => {
+  const app = loadApp();
+  app.useEngine(nodeEngine);
+  app.state.engineOn = true;
+  app.state.dialect = 'mssql';
+  app.document.getElementById('sqlin').value = "SELECT name, INSTR(name, '小') AS pos FROM students WHERE gender = '女' ORDER BY name";
+  app.document.getElementById('do-parse').listeners.click();
+  const out = app.state.nodes.find(n => n.type === 'output');
+  const rows = json(app.evalNode(out).rows);
+  /* the simulation knows no INSTR; SQLite does, on the same sample rows */
+  const db = nodeEngine();
+  const t = app.state.schema.students;
+  db.run(`CREATE TABLE students (${t.cols.map(c => c.name).join(', ')})`);
+  t.rows.forEach(r => db.run(`INSERT INTO students VALUES (${r.map(() => '?').join(', ')})`, r));
+  assert.deepEqual(rows, json(db.exec("SELECT name, INSTR(name, '小') AS pos FROM students WHERE gender = '女' ORDER BY name").rows));
+  assert.ok(rows.length > 0 && rows.every(r => typeof r[1] === 'number'));
+  app.renderStage();
+  assert.match(app.document.getElementById('foot').textContent, /SQLite 真的跑出來的[\s\S]*不是 SQL Server 的結果/);
+  /* SQLite has no DATE_TRUNC: that step and the column pick after it (whose SQL includes
+     it) fall back to the imitation and are counted; the step before still really runs */
+  app.document.getElementById('sqlin').value = "SELECT name, DATE_TRUNC('month', birth_date) AS m FROM students WHERE gender = '女'";
+  app.document.getElementById('do-parse').listeners.click();
+  assert.deepEqual(json([...app.engine.failed.keys()].map(id => app.state.nodes.find(n => n.id === id).type)), ['derive', 'select']);
+  assert.ok(app.engine.cache.has(app.state.nodes.find(n => n.type === 'filter').id));
+  assert.equal(app.evalNode(app.state.nodes.find(n => n.type === 'output')).rows[0][1], '（由資料庫計算）');
+  assert.match(app.document.getElementById('engine-msg').textContent, /跑不動 2 步/);
+  /* off again: back to the imitation, and the page stops saying SQLite ran it */
+  app.state.engineOn = false;
+  app.document.getElementById('do-parse').listeners.click();
+  app.renderStage();
+  assert.doesNotMatch(app.document.getElementById('foot').textContent, /SQLite/);
+  return 'INSTR computed by SQLite and labelled; DATE_TRUNC and the step after fall back, counted; the filter before still runs';
+});
+
+/* Changing a step can change the result without anyone noticing. The pasted SQL and
+   the current steps run on the same rows, edge rows included (NULLs are where NOT IN
+   and NOT EXISTS part ways), and a difference is said plainly (issue #2). */
+test('engine: the pasted SQL and the current steps are run side by side', () => {
+  const app = loadApp();
+  app.useEngine(nodeEngine);
+  app.state.engineOn = true;
+  app.state.dialect = 'postgres';
+  app.document.getElementById('sqlin').value = 'SELECT name FROM students WHERE student_id NOT IN (SELECT student_id FROM scores)';
+  app.document.getElementById('do-parse').listeners.click();
+  let r = app.sameCheck();
+  assert.equal(r.kind, 'ok', r.msg);
+  assert.match(app.document.getElementById('same').innerHTML, /結果一樣[\s\S]*不是 PostgreSQL/);
+  /* NOT IN → NOT EXISTS: same on clean rows, different once the lookup has a NULL */
+  const semi = app.state.nodes.find(n => n.type === 'semijoin');
+  app.state.sel = semi.id;
+  app.document.getElementById('inspector').listeners.change({target: {dataset: {f: 'form'}, value: 'NOT EXISTS'}});
+  r = app.sameCheck();
+  assert.equal(r.kind, 'bad', r.msg);
+  assert.match(r.msg, /原本 0 列/);
+  /* SQL SQLite cannot run is not compared, and says why */
+  app.document.getElementById('sqlin').value = 'SELECT TOP 3 name FROM students';
+  app.document.getElementById('do-parse').listeners.click();
+  assert.equal(app.sameCheck().kind, 'na');
+  return 'unchanged: same; NOT IN → NOT EXISTS differs on the NULL edge row; TOP not comparable';
+});
+
+/* One CTE per step is easy to match against the canvas but too long to paste back
+   into a project (issue #3). The compact format folds steps into one SELECT, but must
+   never fold across what changes the meaning: a filter after a window function, after
+   GROUP BY or after LIMIT stays a separate level. Each level still maps to its steps. */
+test('format: compact folds what it can and keeps every step linked', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE t(id INTEGER, g TEXT, v INTEGER); INSERT INTO t VALUES (1,'a',5),(2,'a',7),(3,'b',2),(4,'b',9),(5,'c',NULL);`);
+  const rows = sql => json(db.prepare(sql).all().map(r => Object.values(r)));
+  const app = loadApp();
+  app.document.getElementById('ddl').value = 'CREATE TABLE t (id INT, g TEXT, v INT);';
+  app.document.getElementById('btn-parse').listeners.click();
+  const compact = (sql, dialect = 'postgres') => { app.state.dialect = dialect; graphFromSQL(app, sql); return app.buildCompactSQL(); };
+  /* filter + new column + pick + sort + limit: one SELECT, no WITH */
+  const one = compact("SELECT id, v * 2 AS d FROM t WHERE g <> 'c' AND v > 1 ORDER BY d DESC LIMIT 3");
+  assert.doesNotMatch(one, /WITH/);
+  assert.match(one, /SELECT id,\s+v \* 2 AS d\s+FROM t\s+WHERE g <> 'c'\s+AND v > 1\s+ORDER BY \(v \* 2\) DESC\s+LIMIT 3;/);
+  assert.deepEqual(rows(one), rows("SELECT id, v * 2 AS d FROM t WHERE g <> 'c' AND v > 1 ORDER BY d DESC LIMIT 3"));
+  /* every step is in exactly one level */
+  const linked = Object.values(app.state.sqlSegs).flat();
+  for (const n of app.state.nodes.filter(n => n.type !== 'table')) assert.ok(linked.includes(n.id), n.type);
+  /* a filter on a window result, after GROUP BY and after LIMIT is never folded into the WHERE before it */
+  for (const sql of [
+    'SELECT * FROM (SELECT id, g, ROW_NUMBER() OVER (PARTITION BY g ORDER BY v DESC) AS rk FROM t) x WHERE rk = 1',
+    'SELECT * FROM (SELECT id, g, v, RANK() OVER (ORDER BY v) AS r FROM t) x WHERE g = \'a\'',
+    'SELECT * FROM (SELECT g, SUM(v) AS s FROM t GROUP BY g) x WHERE s > 7',
+    'SELECT * FROM (SELECT id, v FROM t ORDER BY v DESC LIMIT 3) x WHERE v > 5',
+  ]) {
+    const out = compact(sql);
+    assert.match(out, /WITH /, sql);
+    assert.deepEqual(rows(out).sort(), rows(sql).sort(), out);
+  }
+  /* dialects: TOP for SQL Server, FETCH FIRST and an alias for SELECT src.* in Oracle */
+  assert.match(compact('SELECT * FROM t ORDER BY v DESC LIMIT 2', 'mssql'), /SELECT TOP 2 \*\s+FROM t\s+ORDER BY v DESC;/);
+  assert.match(compact('SELECT id, v + 1 AS w FROM t ORDER BY id LIMIT 2', 'oracle'), /FROM t src[\s\S]*FETCH FIRST 2 ROWS ONLY;/);
+  assert.match(compact('SELECT *, v + 1 AS w FROM t', 'oracle'), /SELECT src\.\*,\s+v \+ 1 AS w\s+FROM t src;/);
+  /* the format picker switches what the SQL panel shows and copies */
+  app.state.dialect = 'postgres';
+  graphFromSQL(app, "SELECT id FROM t WHERE g = 'a' ORDER BY id");
+  const pick = app.document.getElementById('sqlfmt');
+  pick.value = 'compact'; pick.listeners.change();
+  assert.doesNotMatch(app.document.getElementById('sql').innerHTML, /WITH/);
+  assert.match(app.document.getElementById('fmt-note').innerHTML, /摺成同一層/);
+  pick.value = 'cte'; pick.listeners.change();
+  assert.match(app.document.getElementById('sql').innerHTML, /WITH/);
+  return 'one-level fold exact in SQLite; window, GROUP BY and LIMIT boundaries kept; TOP / FETCH / src.*';
+});
+
+/* Pipe syntax (BigQuery) is one step per line, so each line links to its step. The
+   fuzz suite checks it by turning each operator back into a nested SELECT; here the
+   shape: a projection that drops the sort key comes after ORDER BY / LIMIT, and a
+   LEFT JOIN with no condition (a scalar subquery) is ON TRUE, never CROSS JOIN. */
+test('format: pipe syntax is one step per line', () => {
+  const app = loadApp();
+  app.state.dialect = 'postgres';
+  graphFromSQL(app, "SELECT o.id, c.city FROM orders o JOIN customers c ON o.cid = c.id WHERE o.amount > 10 ORDER BY c.id DESC LIMIT 3");
+  const pipe = app.buildPipeSQL();
+  assert.match(pipe, /^FROM orders\n\|> AS a\n\|> INNER JOIN customers AS b ON a\.cid = b\.id\n\|> SELECT a\.\*, b\.city\n\|> WHERE amount > 10\n\|> ORDER BY cid DESC\n\|> LIMIT 3\n\|> SELECT id, city;$/m);
+  assert.equal(app.state.dialect, 'postgres', 'the chosen dialect is left alone');
+  app.state.fmt = 'pipe';
+  const html = app.sqlHTML(app.shownSQL());
+  const lines = [...html.matchAll(/data-seg="(@\d+)"/g)].map(m => app.state.sqlSegs[m[1]][0]);
+  for (const n of app.state.nodes.filter(n => !['table', 'output'].includes(n.type))) assert.ok(lines.includes(n.id), n.type);
+  graphFromSQL(app, 'SELECT id, (SELECT MAX(v) FROM t WHERE v > 100) AS m FROM orders');
+  assert.match(app.buildPipeSQL(), /LEFT JOIN \(\n[\s\S]*\) AS b ON TRUE/);
+  assert.match(app.buildPipeSQL(), /\|> AGGREGATE MAX\(v\) AS sub_value/);
+  return 'JOIN, WHERE, ORDER BY, LIMIT then SELECT; every step on a line; scalar subquery ON TRUE';
+});
+
+/* After editing the steps the user could not tell what changed against the SQL the
+   AI wrote (issue #3). Both versions are written in the compact format, one clause
+   per line, and compared line by line; each changed line names the step it came from.
+   The pasted SQL is shown too — escaped, it is pasted text. */
+test('diff: an edit shows as changed lines credited to its step', () => {
+  const app = loadApp();
+  app.state.dialect = 'postgres';
+  app.document.getElementById('sqlin').value = "SELECT id, amount FROM orders WHERE status = 'paid' ORDER BY amount DESC";
+  app.document.getElementById('do-parse').listeners.click();
+  let r = app.diffReport();
+  assert.equal(r.changed, 0);
+  assert.equal(app.document.getElementById('diffbox').hidden, false);
+  assert.match(app.document.getElementById('diff').innerHTML, /意思沒變/);
+  const filter = app.state.nodes.find(n => n.type === 'filter');
+  filter.note = '只看付款';
+  app.state.sel = filter.id;
+  app.document.getElementById('inspector').listeners.change({target: {dataset: {f: 'val'}, value: 'new'}});
+  r = app.diffReport();
+  assert.ok(r.ops.some(o => o.op === '-' && /'paid'/.test(o.text)) && r.ops.some(o => o.op === '+' && /'new'/.test(o.text)));
+  assert.deepEqual(json(r.steps.map(n => n.id)), [filter.id]);
+  assert.match(app.document.getElementById('diff').innerHTML, /WHERE「只看付款」/);
+  /* the pasted text and the lines are escaped */
+  app.document.getElementById('sqlin').value = `SELECT id FROM orders WHERE status = '"><img src=x onerror=alert(1)>'`;
+  app.document.getElementById('do-parse').listeners.click();
+  assert.doesNotMatch(app.document.getElementById('diff').innerHTML, /<img/);
+  return 'unchanged says so; edited value shows -/+ lines credited to WHERE「只看付款」 only; pasted SQL escaped';
+});
+
+/* Column descriptions were thrown away: users saw stu_nm, not 學生姓名 (issue #4).
+   MySQL COMMENT, PostgreSQL COMMENT ON and SQL Server sp_addextendedproperty all
+   become the column's label — shown beside the name, never written into the SQL.
+   A comma, bracket or semicolon inside a comment must not split the column list. */
+test('schema: DDL comments become column and table labels in three dialects', () => {
+  const load = ddl => {
+    const app = loadApp();
+    app.document.getElementById('ddl').value = ddl;
+    app.document.getElementById('btn-parse').listeners.click();
+    return app;
+  };
+  const labels = (app, t) => json(app.state.schema[t].cols.map(c => [c.name, c.ch]));
+  let app = load(`CREATE TABLE students (
+      stu_id INT PRIMARY KEY COMMENT '學號',
+      stu_nm VARCHAR(20) NOT NULL COMMENT '姓名, 全名 (含括號); 有分號',
+      note TEXT COMMENT 'it''s',
+      grade INT
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='學生';`);
+  assert.deepEqual(labels(app, 'students'), [['stu_id', '學號'], ['stu_nm', '姓名, 全名 (含括號); 有分號'], ['note', "it's"], ['grade', '']]);
+  assert.equal(app.state.schema.students.label, '學生');
+  app = load(`CREATE TABLE public."scores" (sid INT, "score" NUMERIC(5,1));
+    COMMENT ON TABLE public.scores IS '成績';
+    COMMENT ON COLUMN public."scores"."score" IS '分數（0–100）';
+    COMMENT ON COLUMN scores.sid IS '學號';`);
+  assert.deepEqual(labels(app, 'public.scores'), [['sid', '學號'], ['score', '分數（0–100）']]);
+  assert.equal(app.state.schema['public.scores'].label, '成績');
+  app = load(`CREATE TABLE dbo.teachers ([tid] INT, [name] NVARCHAR(50));
+    EXEC sp_addextendedproperty 'MS_Description', N'老師姓名', 'SCHEMA', 'dbo', 'TABLE', 'teachers', 'COLUMN', 'name';
+    EXEC sys.sp_addextendedproperty @name = N'MS_Description', @value = N'老師編號', @level0type = N'SCHEMA', @level0name = N'dbo',
+      @level1type = N'TABLE', @level1name = N'teachers', @level2type = N'COLUMN', @level2name = N'tid';
+    EXEC sp_addextendedproperty @name = N'MS_Description', @value = N'老師', @level0type = N'SCHEMA', @level0name = N'dbo', @level1type = N'TABLE', @level1name = N'teachers';
+    EXEC sp_addextendedproperty 'Other', N'不是說明', 'SCHEMA', 'dbo', 'TABLE', 'teachers', 'COLUMN', 'tid';`);
+  assert.deepEqual(labels(app, 'dbo.teachers'), [['tid', '老師編號'], ['name', '老師姓名']]);
+  assert.equal(app.state.schema['dbo.teachers'].label, '老師');
+  /* the label is shown next to the name; the SQL keeps the real name */
+  app = load("CREATE TABLE s (stu_nm VARCHAR(20) COMMENT '學生姓名', grade INT);");
+  graphFromSQL(app, 'SELECT stu_nm FROM s WHERE grade > 1');
+  app.state.sel = app.state.nodes.find(n => n.type === 'filter').id;
+  app.state.inspOpen = true;
+  app.renderInspector();
+  assert.match(app.inspector.innerHTML, /stu_nm\s+—\s+學生姓名/);
+  assert.doesNotMatch(app.buildSQL(), /學生姓名/);
+  const box = app.document.createElement('div');
+  app.buildSteps()[0].render(box);
+  assert.match(box.children.map(c => c.innerHTML).join(''), /stu_nm<small>學生姓名<\/small>/);
+  return 'MySQL inline + table COMMENT, COMMENT ON, sp_addextendedproperty (positional and named); shown, not in SQL';
+});
+
+/* Pasting the result of one catalog query builds every table at once (issue #4).
+   Database tools copy grids as tab-separated text, psql prints | columns with a rule
+   line and a row count; names that are not plain identifiers are skipped and said so. */
+test('schema: a pasted column list builds known tables with labels', () => {
+  const app = loadApp();
+  const paste = text => {
+    app.document.getElementById('ddl').value = text;
+    app.document.getElementById('btn-parse').listeners.click();
+  };
+  paste('table_name\tcolumn_name\tdata_type\tcolumn_comment\norders\tid\tint\t訂單編號\norders\tamount\tdecimal(10,2)\tNULL\norders\tstatus\tvarchar\t\ncustomers\tid\tint\t\ncustomers\tcity\ttext\t城市\nbad-name\tx\tint\t\n');
+  assert.deepEqual(json(Object.keys(app.state.schema).sort()), ['customers', 'orders']);
+  assert.deepEqual(json(app.state.schema.orders.cols), [{name: 'id', ch: '訂單編號', type: 'INT'}, {name: 'amount', ch: '', type: 'DECIMAL'}, {name: 'status', ch: '', type: 'VARCHAR'}]);
+  assert.match(app.document.getElementById('parse-msg').innerHTML, /跳過 1 個/);
+  /* these are real column lists, so SELECT * may be expanded with them */
+  graphFromSQL(app, "SELECT * FROM orders WHERE UPPER(status) = 'X'");
+  assert.match(app.buildSQL(), /SELECT id,\s+amount,\s+status\s/);
+  paste(' table_name | column_name | data_type\n------------+-------------+-----------\n t1         | a           | integer\n t1         | b           | text\n(2 rows)\n');
+  assert.deepEqual(json(app.state.schema.t1.cols.map(c => c.name)), ['a', 'b']);
+  paste('t2,x,int,"說明, 有逗號"\nt2,y,text,\n');
+  assert.deepEqual(json(app.state.schema.t2.cols.map(c => [c.name, c.ch])), [['x', '說明, 有逗號'], ['y', '']]);
+  /* the query to run is there for each dialect */
+  for (const d of ['mysql', 'postgres', 'mssql', 'oracle']) {
+    app.state.dialect = d;
+    app.renderInfoSQL();
+    assert.match(app.document.getElementById('info-sql').textContent, /column_name|COLUMN_NAME/i, d);
+  }
+  return 'tab, psql and CSV results; header detected; bad names skipped; known schema';
+});
+
+/* A CSV is the user's own data (issue #4): its rows are the preview, never replaced
+   by invented ones — not when SQL is pasted later, not by edge rows — and every
+   place that says the rows are invented says so only for the other tables. */
+test('schema: a pasted CSV becomes a table of the user\'s own rows', () => {
+  const app = loadApp();
+  const add = (name, text) => {
+    app.document.getElementById('csv-name').value = name;
+    app.document.getElementById('csv-text').value = text;
+    app.document.getElementById('btn-csv').listeners.click();
+    return app.document.getElementById('csv-msg').innerHTML;
+  };
+  assert.match(add('orders', 'id,code,amount,paid_on,note\n1,007,12.5,2024-01-02,"a, b"\n2,010,3,2024-02-30,\n3,,7,,NULL\n'), /加入了/);
+  const t = app.state.schema.orders;
+  assert.equal(t.source, 'csv');
+  assert.deepEqual(json(t.cols.map(c => c.type)), ['INT', 'TEXT', 'DECIMAL', 'TEXT', 'TEXT']);
+  assert.deepEqual(json(t.rows), [[1, '007', 12.5, '2024-01-02', 'a, b'], [2, '010', 3, '2024-02-30', null], [3, null, 7, null, null]]);
+  /* pasting SQL afterwards keeps the rows; edge rows are not mixed in */
+  app.state.edge = true;
+  app.document.getElementById('sqlin').value = 'SELECT id, amount FROM orders WHERE amount > 5';
+  app.document.getElementById('do-parse').listeners.click();
+  assert.deepEqual(json(app.evalNode(app.state.nodes.find(n => n.type === 'output')).rows), [[1, 12.5], [3, 7]]);
+  const steps = app.buildSteps();
+  assert.match(steps[0].cap, /你貼上的 CSV/);
+  assert.doesNotMatch(steps[0].cap, /編出來/);
+  assert.match(steps[steps.length - 1].cap, /不是資料庫跑出來的結果/);
+  app.renderStage();
+  assert.match(app.document.getElementById('foot').textContent, /你貼上的 CSV/);
+  /* it is saved and shared with the canvas, and an old save without source still opens */
+  const saved = JSON.parse(JSON.stringify(app.snapshot()));
+  assert.equal(app.validSnapshot(saved), true);
+  assert.equal(saved.schema.orders.source, 'csv');
+  delete saved.schema.orders.source;
+  assert.equal(app.validSnapshot(saved), true);
+  /* what cannot be a table is refused with the reason */
+  assert.match(add('t', '姓名,amount\n1,2'), /欄名只能用英文/);
+  assert.match(add('t', 'a,b\n1,2,3'), /第 2 列有 3 格/);
+  assert.match(add('9t', 'a\n1'), /表名/);
+  assert.match(add('t', 'a,A\n1,2'), /重複/);
+  return '5 columns typed; zero-padded code kept as text; rows survive a SQL paste; captions and save honest';
+});
+
+/* Labels now come from pasted text (COMMENT, a column list, a CSV) and are drawn in
+   the table list, the panel's dropdowns and chips, the step-through headers and the
+   step titles. Every one of those must escape them, and a save carrying one opens. */
+test('security: a pasted column or table label carrying HTML is text everywhere', () => {
+  const bad = '"><img src=x onerror=alert(1)>';
+  const app = loadApp();
+  app.document.getElementById('ddl').value = `CREATE TABLE t (city TEXT COMMENT '${bad}', qq INT) COMMENT='${bad}';`;
+  app.document.getElementById('btn-parse').listeners.click();
+  assert.equal(app.state.schema.t.cols[0].ch, bad.slice(0, 60));
+  graphFromSQL(app, "SELECT city, qq FROM t WHERE city = 'x'");
+  const outputs = [app.document.getElementById('schema-list').innerHTML];
+  for (const n of app.state.nodes) {
+    app.state.sel = n.id; app.state.inspOpen = true;
+    app.renderInspector();
+    outputs.push(app.inspector.innerHTML, app.nodeSummary(n));
+  }
+  for (const s of app.buildSteps()) {
+    const box = app.document.createElement('div');
+    try { s.render(box); } catch (e) { /* steps that need a real DOM */ }
+    outputs.push(s.cap, box.children.map(c => c.innerHTML).join(''));
+  }
+  app.renderNodes();
+  outputs.push(app.document.getElementById('surface').children.map(c => c.innerHTML).join(''));
+  for (const html of outputs) assert.doesNotMatch(String(html), /<img/);
+  assert.equal(app.validSnapshot(JSON.parse(JSON.stringify(app.snapshot()))), true);
+  return `${outputs.length} outputs escaped; save with the label still valid`;
 });
 
 test('security: pasted DDL column names are plain identifiers only', () => {
@@ -297,7 +682,9 @@ test('security: a pasted value carrying HTML is text in every block, step and pa
     `SELECT COALESCE(city, '${bad}') AS c FROM t`,
     `SELECT city, COUNT(*) AS n FROM t GROUP BY city HAVING city <> '${bad}'`,
     `SELECT UPPER(COALESCE(city, '${bad}')) || 'x' AS k FROM t`,
-    `SELECT * FROM t WHERE UPPER(city) = '${bad}'`,
+    `SELECT city, LAG(city, 1, '${bad}') OVER (ORDER BY qq) AS prev FROM t`,
+    `SELECT city, qq FROM t WHERE UPPER(city) = '${bad}'`,
+    `SELECT city FROM t WHERE qq > (SELECT MAX(qq) FROM t WHERE city = '${bad}')`,
     `SELECT CASE WHEN qq = 5 AND city = '${bad}' THEN 1 ELSE 0 END AS flag FROM t`,
     `SELECT city, ROUND(AVG(qq), 1) AS a FROM t GROUP BY city HAVING MAX(qq) > 1 OR city = '${bad}'`,
   ];
@@ -2113,6 +2500,238 @@ test('review: SQL Server and Oracle ranking always gets an ORDER BY', () => {
   return 'mssql (SELECT NULL), oracle NULL, postgres none — all re-import unordered';
 });
 
+/* LAG / LEAD, NTILE, frames and a second window ORDER BY key were refused — and
+   before that imported as ROW_NUMBER or a running total, a different number (issue #5).
+   Each now round-trips, the regenerated SQL gives SQLite's result, and the preview
+   computes the same numbers on the same rows. */
+test('window: LAG / LEAD / NTILE, frames and extra keys are exact in SQL and preview', () => {
+  const data = [['A', 1, 10, 1], ['A', 2, null, 2], ['A', 3, 30, 3], ['A', 4, 40, 4],
+                ['B', 1, 5, 5], ['B', 2, 15, 6], ['B', 3, null, 7], ['A', 5, 7, 8]];
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE w(p TEXT, o INTEGER, v INTEGER, k INTEGER);');
+  const ins = db.prepare('INSERT INTO w VALUES (?, ?, ?, ?)');
+  data.forEach(r => ins.run(...r));
+  const schema = {w: {cols: ['p', 'o', 'v', 'k'].map(name => ({name, type: name === 'p' ? 'TEXT' : 'INT'})), rows: data}};
+  /* AVG is a float in SQLite and rounded in the preview */
+  const norm = rows => rows.map(r => r.map(v => typeof v === 'number' ? Math.round(v * 100) / 100 : v))
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const shapes = [
+    'SELECT p, o, LAG(v) OVER (PARTITION BY p ORDER BY o) AS x FROM w',
+    'SELECT p, o, LEAD(v, 2, 0) OVER (PARTITION BY p ORDER BY o) AS x FROM w',
+    'SELECT p, o, LAG(v, 1, -1) OVER (ORDER BY p, o DESC) AS x FROM w',
+    "SELECT p, o, LEAD(p, 1, 'none') OVER (PARTITION BY p ORDER BY o DESC) AS x FROM w",
+    'SELECT p, o, LAG(v, 0) OVER (ORDER BY k) AS x FROM w',
+    'SELECT p, o, NTILE(3) OVER (ORDER BY o, k) AS x FROM w',
+    'SELECT p, o, NTILE(2) OVER (PARTITION BY p ORDER BY o) AS x FROM w',
+    'SELECT p, o, NTILE(10) OVER (ORDER BY k DESC) AS x FROM w',
+    'SELECT p, o, SUM(v) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS x FROM w',
+    'SELECT p, o, AVG(v) OVER (ORDER BY o, k ROWS 2 PRECEDING) AS x FROM w',
+    'SELECT p, o, COUNT(*) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS x FROM w',
+    'SELECT p, o, MAX(v) OVER (ORDER BY o RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS x FROM w',
+    'SELECT p, o, MIN(v) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) AS x FROM w',
+    'SELECT p, o, SUM(v) OVER (ORDER BY o RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS x FROM w',
+    'SELECT p, o, COUNT(v) OVER (ORDER BY o, k ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING) AS x FROM w',
+    'SELECT p, o, RANK() OVER (ORDER BY p, o DESC) AS x FROM w',
+    'SELECT p, o, DENSE_RANK() OVER (ORDER BY o, p) AS x FROM w',
+  ];
+  for (const sql of shapes) {
+    const want = norm(db.prepare(sql).all().map(r => [r.p, r.o, r.x]));
+    const generated = roundTrip(sql);
+    assert.deepEqual(norm(db.prepare(generated).all().map(r => [r.p, r.o, r.x])), want, generated);
+    installGraph(api, {nodes: api.state.nodes, edges: api.state.edges}, schema);
+    assert.deepEqual(norm(outRows()), want, `preview of ${sql}`);
+  }
+  /* what still has no exact step is refused, never approximated */
+  const refused = [
+    ['SELECT LAG(v, o) OVER (ORDER BY o) AS x FROM w', /位移/],
+    ['SELECT LAG(v, 1, o) OVER (ORDER BY o) AS x FROM w', /預設值/],
+    ['SELECT LAG(v * 2) OVER (ORDER BY o) AS x FROM w', /單一欄位/],
+    ['SELECT NTILE(o) OVER (ORDER BY o) AS x FROM w', /NTILE/],
+    ['SELECT SUM(v) OVER (ROWS 2 PRECEDING) AS x FROM w', /ORDER BY/],
+    ['SELECT ROW_NUMBER() OVER (ORDER BY o ROWS 2 PRECEDING) AS x FROM w', /框架/],
+    ['SELECT SUM(v) OVER (ORDER BY o RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) AS x FROM w', /RANGE/],
+    ['SELECT SUM(v) OVER (ORDER BY o ROWS BETWEEN CURRENT ROW AND 1 PRECEDING) AS x FROM w', /起點/],
+    ['SELECT SUM(v) OVER (ORDER BY o ROWS BETWEEN UNBOUNDED FOLLOWING AND CURRENT ROW) AS x FROM w', /起點/],
+    ['SELECT SUM(v) OVER (ORDER BY o GROUPS 1 PRECEDING) AS x FROM w', /視窗/],
+    ['SELECT SUM(v) OVER (ORDER BY o NULLS LAST) AS x FROM w', /NULLS/],
+    ['SELECT LAG(v) IGNORE NULLS OVER (ORDER BY o) AS x FROM w', /IGNORE/],
+  ];
+  for (const [sql, re] of refused) assert.match(sqlError(sql).msg, re, sql);
+  /* SQL Server and Oracle require an order for LAG / LEAD / NTILE too */
+  assert.match(roundTrip('SELECT LAG(v) OVER (PARTITION BY p) AS x FROM w', 'mssql'), /LAG\(v\) OVER \(PARTITION BY p ORDER BY \(SELECT NULL\)\)/);
+  assert.match(roundTrip('SELECT NTILE(4) OVER () AS x FROM w', 'oracle'), /NTILE\(4\) OVER \(ORDER BY NULL\)/);
+  return `${shapes.length} shapes exact in SQLite and preview; ${refused.length} refused`;
+});
+
+/* The panel is the other way in: a LAG step built or edited there has to write the
+   same SQL the import would, and a frame must never outlive the ORDER BY it needs. */
+test('window: the panel edits offset, default, buckets, extra keys and frames', () => {
+  const app = loadApp();
+  app.state.dialect = 'postgres';
+  const graph = graphFromSQL(app, 'SELECT p, o, k, SUM(v) OVER (PARTITION BY p ORDER BY o) AS x FROM w');
+  const win = graph.nodes.find(n => n.type === 'window');
+  app.state.sel = win.id;
+  const change = (dataset, value) => app.document.getElementById('inspector').listeners.change({target: {dataset, value}});
+  const click = attr => app.document.getElementById('inspector').listeners.click({target: {closest: () => ({hasAttribute: a => a === attr, dataset: {}})}});
+  const winSQL = () => /\n\s+(\S.* OVER \(.*\)) AS x/.exec(app.buildSQL())[1];
+  change({f: 'frameMode'}, 'custom');
+  change({f: 'fromKind'}, 'NP');
+  change({f: 'fromN'}, '6');
+  assert.equal(winSQL(), 'SUM(v) OVER (PARTITION BY p ORDER BY o ASC ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)');
+  change({f: 'frameRows'}, 'range');
+  assert.match(winSQL(), /ROWS BETWEEN 6 PRECEDING/, 'RANGE never takes a numeric bound');
+  change({f: 'toKind'}, 'NP');
+  assert.match(winSQL(), /ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING/);
+  change({f: 'fromKind'}, 'NF');
+  assert.match(winSQL(), /ROWS BETWEEN 6 FOLLOWING AND UNBOUNDED FOLLOWING/, 'a start after the end moves the end');
+  click('data-add-tb');
+  change({tb: '0', f: 'col'}, 'k');
+  change({tb: '0', f: 'dir'}, 'DESC');
+  assert.match(winSQL(), /ORDER BY o ASC, k DESC ROWS/);
+  change({f: 'orderBy'}, '');
+  assert.equal(winSQL(), 'SUM(v) OVER (PARTITION BY p)', 'no order, no frame');
+  change({f: 'fn'}, 'LAG');
+  change({f: 'orderBy'}, 'o');
+  change({f: 'offset'}, '2');
+  change({f: 'offset'}, '-1');
+  change({f: 'defType'}, 'number');
+  change({f: 'defVal'}, '0');
+  assert.equal(winSQL(), 'LAG(v, 2, 0) OVER (PARTITION BY p ORDER BY o ASC)');
+  change({f: 'defType'}, 'text');
+  change({f: 'defVal'}, "it's");
+  assert.equal(winSQL(), "LAG(v, 2, 'it''s') OVER (PARTITION BY p ORDER BY o ASC)");
+  change({f: 'fn'}, 'NTILE');
+  change({f: 'tiles'}, '5');
+  assert.equal(winSQL(), 'NTILE(5) OVER (PARTITION BY p ORDER BY o ASC)');
+  assert.equal(win.def, undefined, 'a default does not linger on NTILE');
+  /* what the panel built re-imports to the same step */
+  const again = graphFromSQL(loadApp(), app.buildSQL()).nodes.find(n => n.type === 'window');
+  assert.deepEqual(json({fn: again.fn, tiles: again.tiles, orderBy: again.orderBy}), {fn: 'NTILE', tiles: 5, orderBy: 'o'});
+  return 'frame, extra key, LAG offset/default and NTILE buckets written as edited';
+});
+
+/* (SELECT AVG(x) FROM t) was refused everywhere (issue #5). An uncorrelated one that
+   returns at most one row becomes its own steps, LEFT JOINed ON 1 = 1 to every row —
+   an empty subquery gives NULL, like the database. One that can return several rows,
+   or reads the outer row, is still refused: a JOIN would multiply or mis-match rows. */
+test('scalar subquery: uncorrelated, at most one row, exact in SQLite', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE orders(id INTEGER, customer_id INTEGER, amount INTEGER, status TEXT);
+           CREATE TABLE prices(id INTEGER, d TEXT, price INTEGER);
+           INSERT INTO orders VALUES (1,1,10,'new'),(2,1,20,'paid'),(3,2,20,'paid'),(4,3,40,'new'),(5,4,NULL,'void'),(6,9,60,'paid');
+           INSERT INTO prices VALUES (1,'2024-01-01',5),(2,'2024-02-01',7),(3,'2023-12-01',9);`);
+  const rows = sql => json(db.prepare(sql).all().map(r => Object.values(r))).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  /* the subquery's own table comes first in the regenerated WITH chain, so the steps are
+     built in another order; what must hold is that re-importing writes the same SQL again */
+  const trip = sql => {
+    const app = loadApp();
+    app.state.dialect = 'postgres';
+    graphFromSQL(app, sql);
+    const generated = app.buildSQL();
+    graphFromSQL(app, generated);
+    assert.equal(app.buildSQL(), generated, sql);
+    return generated;
+  };
+  const shapes = [
+    'SELECT id, amount FROM orders WHERE amount > (SELECT AVG(amount) FROM orders)',
+    'SELECT id, amount - (SELECT AVG(amount) FROM orders) AS diff FROM orders',
+    'SELECT id, (SELECT MAX(amount) FROM orders) AS top FROM orders',
+    'SELECT customer_id, SUM(amount) * 100.0 / (SELECT SUM(amount) FROM orders) AS share FROM orders GROUP BY customer_id',
+    'SELECT customer_id, SUM(amount) AS s FROM orders GROUP BY customer_id HAVING SUM(amount) > (SELECT AVG(amount) FROM orders)',
+    'SELECT customer_id, SUM(amount - (SELECT MIN(amount) FROM orders)) AS s FROM orders GROUP BY customer_id',
+    'SELECT id, (SELECT price FROM prices ORDER BY d DESC LIMIT 1) AS latest FROM orders',
+    "SELECT id FROM orders WHERE amount > (SELECT AVG(amount) FROM orders WHERE status = 'nothing') OR id = 1",
+    "SELECT id, COALESCE((SELECT MAX(price) FROM prices WHERE d > '2030-01-01'), 0) AS p FROM orders",
+    'SELECT id, (SELECT COUNT(*) FROM prices WHERE price > 100) AS n FROM orders',
+    'SELECT id FROM orders WHERE amount >= (SELECT price FROM prices WHERE price > 100 LIMIT 1)',
+    'SELECT id FROM orders WHERE amount = (SELECT MAX(amount) FROM orders) OR amount < (SELECT MIN(amount) + 15 FROM orders)',
+    'SELECT o.id, p.price FROM orders o CROSS JOIN prices p',
+  ];
+  for (const sql of shapes) assert.deepEqual(rows(trip(sql)), rows(sql), sql);
+  /* the preview computes the subquery on the same rows */
+  const app = loadApp();
+  const graph = graphFromSQL(app, 'SELECT id, amount FROM orders WHERE amount > (SELECT AVG(amount) FROM orders)');
+  installGraph(app, graph, {orders: {cols: ['id', 'customer_id', 'amount', 'status'].map(name => ({name})),
+    rows: db.prepare('SELECT * FROM orders').all().map(r => Object.values(r))}});
+  assert.deepEqual(json(app.evalNode(graph.nodes.find(n => n.type === 'output')).rows), [[4, 40], [6, 60]]);
+  const refused = [
+    ['SELECT id, (SELECT amount FROM orders) AS a FROM orders', /最多一列/],
+    ['SELECT id, (SELECT MAX(amount) FROM orders GROUP BY customer_id) AS a FROM orders', /最多一列/],
+    ['SELECT o.id, (SELECT MAX(p.price) FROM prices p WHERE p.id = o.id) AS a FROM orders o', /相關/],
+    ['SELECT id, (SELECT MAX(price) FROM prices UNION SELECT MIN(price) FROM prices) AS a FROM orders', /UNION/],
+    ['SELECT id, (SELECT id, price FROM prices LIMIT 1) AS a FROM orders', /一個值/],
+  ];
+  for (const [sql, re] of refused)
+    assert.throws(() => graphFromSQL(loadApp(), sql), e => e.sqlErr === true && Number.isInteger(e.pos) && re.test(e.msg), sql);
+  /* with the table's real columns known, an unqualified outer column is caught too */
+  const known = loadApp();
+  known.document.getElementById('ddl').value = 'CREATE TABLE prices (id INT, d DATE, price INT);';
+  known.document.getElementById('btn-parse').listeners.click();
+  assert.throws(() => graphFromSQL(known, 'SELECT id, (SELECT MAX(price) FROM prices WHERE id = customer_id) AS m FROM orders'),
+    e => e.sqlErr === true && /外層/.test(e.msg));
+  return `${shapes.length} shapes exact in SQLite and re-import; ${refused.length + 1} refused`;
+});
+
+/* JOIN renames a colliding right-table column (amount → amount_2) and folds the
+   right key into the left one. Once the table name was dropped, c.amount and c.id
+   silently pointed at the LEFT table's amount and id — in WHERE, SELECT, ORDER BY
+   and a later JOIN's ON. They now resolve to the column the JOIN really produced. */
+test('regression: a table-qualified column keeps pointing at its own table after a JOIN', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE o(id INTEGER, cid INTEGER, amount INTEGER); CREATE TABLE c(id INTEGER, amount INTEGER, city TEXT);
+           INSERT INTO o VALUES (1,2,10),(2,3,20),(3,9,30),(4,2,40);
+           INSERT INTO c VALUES (1,99,'A'),(2,15,'B'),(3,20,NULL);`);
+  const rows = sql => json(db.prepare(sql).all().map(r => Object.values(r))).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const app = loadApp();
+  app.document.getElementById('ddl').value = 'CREATE TABLE o (id INT, cid INT, amount INT); CREATE TABLE c (id INT, amount INT, city TEXT);';
+  app.document.getElementById('btn-parse').listeners.click();
+  const trip = sql => {
+    graphFromSQL(app, sql);
+    const generated = app.buildSQL();
+    graphFromSQL(app, generated);
+    assert.equal(app.buildSQL(), generated, sql);
+    return generated;
+  };
+  for (const sql of [
+    'SELECT o.id, c.amount FROM o JOIN c ON o.cid = c.id WHERE c.amount = 20',
+    'SELECT o.id FROM o JOIN c ON o.cid = c.id WHERE c.id = 2',
+    'SELECT o.id, c.amount FROM o JOIN c ON o.cid = c.id ORDER BY c.amount DESC, o.id LIMIT 2',
+    'SELECT o.id, c.amount AS ca FROM o JOIN c ON o.cid = c.id WHERE c.amount > o.amount',
+    'SELECT a.id, c.city FROM o a JOIN o b ON a.id = b.id JOIN c ON b.cid = c.id',
+  ]) {
+    const generated = trip(sql);
+    assert.deepEqual(rows(generated), rows(sql), generated);
+  }
+  /* SELECT c.amount without an alias is still called amount */
+  assert.match(trip('SELECT o.id, c.amount FROM o JOIN c ON o.cid = c.id'), /amount_2 AS amount/);
+  /* a LEFT JOIN key differs on unmatched rows: NULL on the right, a value on the left */
+  assert.throws(() => graphFromSQL(app, 'SELECT o.id FROM o LEFT JOIN c ON o.cid = c.id WHERE c.id IS NULL'),
+    e => e.sqlErr === true && /LEFT JOIN 右表的對照欄/.test(e.msg));
+  return '5 shapes exact in SQLite; unaliased name kept; LEFT JOIN key refused';
+});
+
+/* A table guessed from an earlier paste only has the columns that query used.
+   Expanding SELECT * with it dropped every other column of the real table. */
+test('regression: a guessed table never stands in for the real columns of SELECT *', () => {
+  const app = loadApp();
+  graphFromSQL(app, 'SELECT id, status FROM orders');
+  assert.equal(app.state.schema.orders.label, '推測');
+  assert.throws(() => graphFromSQL(app, "SELECT * FROM orders WHERE UPPER(status) = 'X'"), e => e.sqlErr === true && /CREATE TABLE/.test(e.msg));
+  app.document.getElementById('ddl').value = 'CREATE TABLE orders (id INT, status TEXT, amount INT);';
+  app.document.getElementById('btn-parse').listeners.click();
+  graphFromSQL(app, "SELECT * FROM orders WHERE UPPER(status) = 'X'");
+  assert.match(app.buildSQL(), /SELECT id,\s+status,\s+amount\s/);
+  /* the same holds for a.* in a re-imported JOIN: picking id and price off a guessed
+     table is a real column pick, not "the same columns", so it must stay */
+  const again = loadApp();
+  graphFromSQL(again, 'SELECT o.id, p.price FROM orders o JOIN prices p ON o.pid = p.id');
+  const first = again.buildSQL();
+  graphFromSQL(again, first);
+  assert.equal(again.buildSQL(), first);
+  assert.match(first, /SELECT id,\s+price\s+FROM joined/);
+  return 'guessed orders(id, status) refused for SELECT *; pasted orders(id, status, amount) expands fully; a.* pick kept';
+});
+
 test('review: switching COUNT to SUM never leaves SUM(*)', () => {
   const app = loadApp();
   const change = (node, dataset, value) => {
@@ -2318,9 +2937,14 @@ test('aggregate: unsupported CASE expressions and windowed DISTINCT fail clearly
     const generated = roundTrip(sql);
     assert.deepEqual(json(db.prepare(generated).all()), json(db.prepare(sql).all()), sql);
   }
+  /* b.amt, renamed amt_2 by the JOIN, used to be refused; it now resolves to amt_2 */
+  db.exec('CREATE TABLE a(id INTEGER, amt INTEGER); CREATE TABLE b(id INTEGER, amt INTEGER);'+
+    'INSERT INTO a VALUES (1,5),(2,0),(3,7); INSERT INTO b VALUES (1,10),(1,10),(3,20),(4,30);');
+  const joined = 'SELECT COUNT(DISTINCT b.amt) AS n FROM a JOIN b ON a.id = b.id WHERE a.amt > 0';
+  assert.match(roundTrip(joined), /COUNT\(DISTINCT amt_2\)/);
+  assert.deepEqual(json(db.prepare(roundTrip(joined)).all()), json(db.prepare(joined).all()));
   db.close();
   assert.match(graphError('SELECT CASE WHEN qty > 0 THEN amt END AS amt FROM t').msg, /同名/);
-  assert.match(graphError('SELECT COUNT(DISTINCT b.amt) AS n FROM a JOIN b ON a.id = b.id WHERE a.amt > 0').msg, /JOIN/);
   assert.match(graphError('SELECT 1 AS v, COUNT(DISTINCT amt) AS n FROM t').msg, /彙總後/);
   return 'window DISTINCT refused; 7 CASE-in-expression / aggregate shapes exact in SQLite';
 });
@@ -2680,7 +3304,7 @@ test('DEV-240: failed SQL imports leave the graph and quoting unchanged', () => 
   };
   paste('SELECT "CamelCol" FROM "MyTable"');
   const before = app.buildSQL(), canvas = JSON.stringify(app.state.nodes);
-  for (const sql of ['SELECT FROM', "SELECT 'unfinished", 'SELECT x, LAG(x) OVER (ORDER BY x) AS p FROM t']) {
+  for (const sql of ['SELECT FROM', "SELECT 'unfinished", 'SELECT x, FIRST_VALUE(x) OVER (ORDER BY x) AS p FROM t']) {
     paste(sql);
     assert.match(app.document.getElementById('parse-out').innerHTML, /class="perr"/);
     assert.equal(app.buildSQL(), before, sql);
@@ -3050,6 +3674,37 @@ test('AI SQL check: each trap fires on the wrong query and stays quiet on the ri
   return `${pairs.length} traps × fire / quiet; dialect- and evidence-aware`;
 });
 
+/* The flag's tooltip is made from the check's message, which is already HTML
+   with the user's names escaped. Escaping it again shows "&lt;" in the tooltip
+   instead of "<" (issue #6); not escaping it would let a name become a tag. */
+test('AI SQL check: the flag tooltip shows the name as typed, once escaped', () => {
+  const sql = 'SELECT * FROM (SELECT s.name, sc.score AS sc2 FROM students s LEFT JOIN scores sc ON s.student_id = sc.student_id) d WHERE d.sc2 >= 60';
+  /* what a browser does once with an attribute value */
+  const decode = s => s.replace(/&(lt|gt|quot|amp|#39);/g, (m, k) => ({lt:'<', gt:'>', quot:'"', amp:'&', '#39':"'"}[k]));
+  const names = ['score < 60 & up', '"><img src=x onerror=alert(1)>'];
+  for (const name of names) {
+    const app = loadApp();
+    app.state.edge = true; app.state.dialect = 'postgres';
+    app.state.schema = app.demoSchema();
+    const g = app.astToGraph(app.parseSQLText(sql));
+    installGraph(app, g, g.schema);
+    /* the alias renamed in the panel, where the paste-time name check does not run */
+    const sel = g.nodes.find(n => n.type === 'select'), filter = g.nodes.find(n => n.type === 'filter');
+    sel.outCols[sel.outCols.indexOf('sc2')] = name;
+    filter.col = name;
+    app.state.lint = app.lintGraph();
+    app.renderNodes();
+    const flagged = app.document.getElementById('surface').children
+      .map(el => /<span class="nlint[^"]*" title="([^"]*)">/.exec(el.innerHTML)).filter(Boolean);
+    assert.equal(flagged.length, 1, `one step flagged for ${name}`);
+    const title = flagged[0][1];
+    assert.doesNotMatch(title, /</, `no raw tag in the attribute for ${name}`);
+    assert.ok(decode(title).includes('右邊的 ' + name + '。'), `tooltip reads the name as typed: ${decode(title)}`);
+    assert.doesNotMatch(decode(title), /&(lt|gt|quot|amp);/, `no entity left after one decode: ${decode(title)}`);
+  }
+  return `${names.length} names read back as typed in the flag tooltip`;
+});
+
 /* Review of PR #1 (five findings). Each case reproduces the reported sequence. */
 
 /* COALESCE(city, '<unknown>') imported fine, but its saved snapshot was rejected
@@ -3343,6 +3998,153 @@ test('stage-4 review #7: ROUND and SUBSTR previews never show a value the databa
   assert.equal(rows[1][1], lite.b);
   assert.equal(rows[0][2], '（由資料庫計算）');
   return `ROUND(-2.5) = ${lite.a}, ROUND(-0.25, 1) = ${lite.b} like SQLite; SUBSTR from 0 left to the database`;
+});
+
+/* Code review on PR #7: when both tables have v, the JOIN renames b.v to v_2. A
+   window's PARTITION BY / ORDER BY b.v kept only "v", so it silently ordered by the
+   LEFT table's v and LAG returned another row's value. */
+test('code review: a table-qualified window key follows the JOIN rename', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE a(id INT, v INT); CREATE TABLE b(id INT, v INT); INSERT INTO a VALUES (1,100),(2,10),(3,50); INSERT INTO b VALUES (1,5),(2,20),(3,20);');
+  const rows = sql => json(db.prepare(sql + ' ORDER BY 1').all().map(r => Object.values(r)));
+  const shapes = [
+    'SELECT a.id, LAG(b.v) OVER (ORDER BY b.v, a.id) AS prev FROM a JOIN b ON a.id = b.id',
+    'SELECT a.id, ROW_NUMBER() OVER (PARTITION BY b.v ORDER BY a.v) AS rn FROM a JOIN b ON a.id = b.id',
+    'SELECT a.id, SUM(a.v) OVER (ORDER BY b.v DESC, a.id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS s FROM a JOIN b ON a.id = b.id',
+  ];
+  for (const sql of shapes) {
+    const app = loadApp();
+    app.state.dialect = 'postgres';
+    app.document.getElementById('ddl').value = 'CREATE TABLE a (id INT, v INT); CREATE TABLE b (id INT, v INT);';
+    app.document.getElementById('btn-parse').listeners.click();
+    graphFromSQL(app, sql);
+    const generated = app.buildSQL();
+    assert.match(generated, /OVER \((PARTITION BY v_2 ORDER BY v |ORDER BY v_2 )/, sql);
+    assert.deepEqual(rows(generated.replace(/;\s*$/, '')), rows(sql), sql);
+  }
+  return `${shapes.length} windows keyed on the renamed b.v match SQLite`;
+});
+
+/* Code review on PR #7: MySQL has no FULL JOIN, so it is written as LEFT JOIN plus
+   the right rows that matched nothing. FULL JOIN … ON 1 = 1 had no second half, so
+   an empty left table lost every right row. */
+test('code review: MySQL FULL JOIN without a condition keeps right rows when the left is empty', () => {
+  const sql = 'SELECT a.id, b.y FROM a FULL JOIN b ON 1 = 1';
+  const sorted = rows => json(rows).map(r => JSON.stringify(r)).sort();
+  const cases = [[[], [[1, 5], [2, 6]]], [[[1, 7]], [[1, 5], [2, 6]]], [[[1, 7], [2, 8]], []], [[], []]];
+  for (const [left, right] of cases) {
+    const db = new DatabaseSync(':memory:');
+    db.exec('CREATE TABLE a(id INT, x INT); CREATE TABLE b(k INT, y INT);');
+    left.forEach(r => db.prepare('INSERT INTO a VALUES (?, ?)').run(...r));
+    right.forEach(r => db.prepare('INSERT INTO b VALUES (?, ?)').run(...r));
+    const want = sorted(db.prepare(sql).all().map(r => Object.values(r)));
+    const app = loadApp();
+    app.state.dialect = 'mysql';
+    app.document.getElementById('ddl').value = 'CREATE TABLE a (id INT, x INT); CREATE TABLE b (k INT, y INT);';
+    app.document.getElementById('btn-parse').listeners.click();
+    const graph = graphFromSQL(app, sql);
+    for (const generated of [app.buildSQL(), app.buildCompactSQL()]) {
+      assert.match(generated, /NOT EXISTS \(SELECT 1 FROM a\)/);
+      assert.deepEqual(sorted(db.prepare(generated.replace(/`/g, '"')).all().map(r => Object.values(r))), want, generated);
+    }
+    installGraph(app, graph, {a: {cols: [{name: 'id'}, {name: 'x'}], rows: left}, b: {cols: [{name: 'k'}, {name: 'y'}], rows: right}});
+    assert.deepEqual(sorted(app.evalNode(graph.nodes.find(n => n.type === 'output')).rows), want);
+    db.close();
+  }
+  return `${cases.length} empty / non-empty combinations exact in CTE, compact and preview`;
+});
+
+/* Code review on PR #7: a subquery's ORDER BY (no LIMIT) folded into a GROUP BY or
+   DISTINCT block became the outer ORDER BY, on a column that is no longer there —
+   PostgreSQL rejects it (SQLite does not, so this checks the SQL itself). The sort
+   does not change which rows come out, and the CTE format never wrote it either. */
+test('code review: the compact format drops an ordering folded past GROUP BY or DISTINCT', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE t(id INT, v INT); INSERT INTO t VALUES (1,1),(2,1),(3,2),(4,3);');
+  const rows = sql => json(db.prepare(sql).all().map(r => Object.values(r))).map(r => JSON.stringify(r)).sort();
+  const app = loadApp();
+  app.state.dialect = 'postgres';
+  for (const sql of ['SELECT v, COUNT(*) n FROM (SELECT * FROM t ORDER BY id) x GROUP BY v', 'SELECT DISTINCT v FROM (SELECT * FROM t ORDER BY id) x']) {
+    graphFromSQL(app, sql);
+    const compact = app.buildCompactSQL();
+    assert.doesNotMatch(compact, /ORDER BY/, compact);
+    assert.deepEqual(rows(compact), rows(sql));
+  }
+  /* with a LIMIT the sort decides which rows are grouped, so it stays */
+  const limited = 'SELECT v, COUNT(*) n FROM (SELECT * FROM t ORDER BY id LIMIT 3) x GROUP BY v';
+  graphFromSQL(app, limited);
+  assert.match(app.buildCompactSQL(), /ORDER BY id ASC\s+LIMIT 3/);
+  assert.deepEqual(rows(app.buildCompactSQL()), rows(limited));
+  return 'GROUP BY and DISTINCT drop the stale ORDER BY; a sort with LIMIT is kept';
+});
+
+/* Code review on PR #7: the cleanup for psql output (rule lines, "(12 rows)", empty
+   rows) also ran on CSV, silently deleting the user's own records. It now applies
+   only to column lists; a CSV loses nothing but blank lines. */
+test('code review: a CSV keeps empty records and values that look like psql output', () => {
+  const app = loadApp();
+  const add = (name, text) => {
+    app.document.getElementById('csv-name').value = name;
+    app.document.getElementById('csv-text').value = text;
+    app.document.getElementById('btn-csv').listeners.click();
+    return app.state.schema[name].rows;
+  };
+  assert.deepEqual(json(add('c', 'a,b\n1,2\n,\n3,4\n---,x\n(12 rows),y\n')), [['1', '2'], [null, null], ['3', '4'], ['---', 'x'], ['(12 rows)', 'y']]);
+  assert.deepEqual(json(add('d', 'a\n1\n---\n(12 rows)\n\n   \n2\n')), [['1'], ['---'], ['(12 rows)'], ['2']]);
+  /* psql output pasted as a column list is still cleaned */
+  app.document.getElementById('ddl').value = ' table_name | column_name | data_type\n------------+-------------+-----------\n t1         | a           | integer\n(1 row)\n';
+  app.document.getElementById('btn-parse').listeners.click();
+  assert.deepEqual(json(app.state.schema.t1.cols.map(c => c.name)), ['a']);
+  return 'empty record and ---, (12 rows) kept in CSV; blank lines skipped; psql rule lines still dropped from column lists';
+});
+
+/* Code review on PR #7: a scalar subquery's value is renamed sub_value, but its own
+   ORDER BY x / ORDER BY 1 still named the old alias x, so the generated SQL failed
+   with "no such column". Mixed with a column it does not select (ORDER BY w, x), the
+   sort has to run before the select, under the source names. */
+test('code review: a scalar subquery may sort by its own alias or position', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE a(id INT); CREATE TABLE b(v INT, w INT); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (3,1),(9,0),(4,5),(7,5);');
+  const rows = sql => json(db.prepare(sql).all().map(r => Object.values(r)));
+  const shapes = [
+    'SELECT id, (SELECT v AS x FROM b ORDER BY x DESC LIMIT 1) AS s FROM a',
+    'SELECT id, (SELECT v AS x FROM b ORDER BY 1 DESC LIMIT 1) AS s FROM a',
+    'SELECT id, (SELECT v + 1 AS x FROM b ORDER BY x LIMIT 1) AS s FROM a',
+    'SELECT id, (SELECT v AS x FROM b ORDER BY w DESC, x LIMIT 1) AS s FROM a',
+    'SELECT id FROM a WHERE id < (SELECT w AS x FROM b ORDER BY x DESC LIMIT 1)',
+    'SELECT * FROM (SELECT v AS x FROM b ORDER BY w DESC, x LIMIT 2) t',
+  ];
+  for (const sql of shapes) {
+    const app = loadApp();
+    app.state.dialect = 'postgres';
+    graphFromSQL(app, sql);
+    for (const generated of [app.buildSQL(), app.buildCompactSQL()]) assert.deepEqual(rows(generated), rows(sql), generated);
+  }
+  return `${shapes.length} subqueries sorting by alias, position or both exact in CTE and compact`;
+});
+
+/* Found while checking the review above: the compact format sorts by the source
+   expression, but a bare name in ORDER BY means the OUTPUT column first. With
+   SELECT v AS w, w AS v … ORDER BY v it wrote ORDER BY w — the other column. */
+test('code review: compact ORDER BY is not captured by another column\'s alias', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE b(v INT, w INT, z INT); INSERT INTO b VALUES (3,1,0),(9,0,1),(4,5,2),(7,5,3);');
+  const rows = sql => json(db.prepare(sql).all().map(r => Object.values(r)));
+  const shapes = [
+    'SELECT v AS w, w AS v FROM b ORDER BY v DESC',
+    'SELECT v AS w, w AS v FROM b ORDER BY w DESC LIMIT 2',
+    'SELECT * FROM (SELECT v AS w, w AS v FROM b ORDER BY v DESC LIMIT 2) t',
+    /* z is not in the guessed table (nothing names it on b), so it is written as is */
+    'SELECT v AS w FROM (SELECT * FROM b ORDER BY w DESC LIMIT 3) t ORDER BY z',
+  ];
+  for (const sql of shapes) {
+    const app = loadApp();
+    app.state.dialect = 'postgres';
+    graphFromSQL(app, sql);
+    const compact = app.buildCompactSQL();
+    assert.deepEqual(rows(compact), rows(sql), compact);
+  }
+  return `${shapes.length} swapped or unseen sort columns exact in compact`;
 });
 
 let passed = 0;

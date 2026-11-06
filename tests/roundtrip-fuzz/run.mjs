@@ -90,8 +90,20 @@ agg_arith: i => `SELECT customer_id, ${pick(['SUM','AVG','MAX','MIN','COUNT'])}(
 group_expression: i => { const e = i%2 ? 'LOWER(status)' : `amount * ${pick([1,2,3])}`; return `SELECT ${e} AS g, ${pick(['COUNT(*)','SUM(qty)'])} AS n FROM orders GROUP BY ${e}`; },
 // COUNT(1) was written back as COUNT("1"), a column reference.
 count_literal: i => `SELECT ${i%2?'customer_id, ':''}COUNT(${pick(['1',"'x'"])}) AS n FROM orders${i%2?' GROUP BY customer_id':''}`,
-// LAG / NTILE were imported as ROW_NUMBER, frames and extra window keys were dropped with only a warning.
-unsupported_window: i => `SELECT id, ${pick(['LAG(amount) OVER (ORDER BY id)','NTILE(3) OVER (ORDER BY id)','SUM(amount) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)','ROW_NUMBER() OVER (ORDER BY qty, id)','SUM(amount * qty) OVER (PARTITION BY customer_id)'])} AS w FROM orders`,
+// LAG / NTILE were once imported as ROW_NUMBER, frames and extra window keys dropped with only a warning.
+// What still has no exact step must be refused.
+unsupported_window: i => `SELECT id, ${pick(['FIRST_VALUE(amount) OVER (ORDER BY id)','PERCENT_RANK() OVER (ORDER BY id)','SUM(amount) OVER (ORDER BY id RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)','ROW_NUMBER() OVER (ORDER BY qty NULLS LAST, id)','SUM(amount * qty) OVER (PARTITION BY customer_id)','LAG(amount, qty) OVER (ORDER BY id)'])} AS w FROM orders`,
+// LAG / LEAD, NTILE, ROWS / RANGE frames and extra window keys were refused (issue #5); each must now execute exactly.
+// Unique tie-breakers keep the order, and so the result, deterministic.
+window_more: i => `SELECT id, ${pick([
+  'LAG(amount) OVER (ORDER BY id)', `LEAD(amount, ${1+i%3}, 0) OVER (PARTITION BY customer_id ORDER BY id)`,
+  "LAG(status, 1, 'none') OVER (PARTITION BY customer_id ORDER BY qty DESC, id)", 'LEAD(note) OVER (ORDER BY status, id DESC)',
+  `NTILE(${2+i%4}) OVER (ORDER BY amount, id)`, 'NTILE(3) OVER (PARTITION BY status ORDER BY id DESC)',
+  `SUM(amount) OVER (ORDER BY id ROWS BETWEEN ${i%3} PRECEDING AND CURRENT ROW)`,
+  'AVG(qty) OVER (PARTITION BY customer_id ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)',
+  'COUNT(*) OVER (ORDER BY amount RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)',
+  'MAX(amount) OVER (ORDER BY qty, id ROWS 2 PRECEDING)', 'MIN(qty) OVER (ORDER BY id ROWS BETWEEN 2 FOLLOWING AND UNBOUNDED FOLLOWING)',
+  'ROW_NUMBER() OVER (ORDER BY qty, id)', 'RANK() OVER (ORDER BY status, qty DESC)'])} AS w FROM orders ORDER BY id`,
 // A function wrapped in another lost the inner layer (UPPER(TRIM(s)) became UPPER(s)); multi-level
 // arithmetic was refused; COALESCE(o.a, o.b) copied "o.b" into a CTE with no alias o. All exact now.
 expr_nested: i => `SELECT id, ${pick([
@@ -131,6 +143,45 @@ agg_case_expr: i => `SELECT customer_id, ${pick([
   'SUM(CASE WHEN qty > 1 AND amount > 10 THEN amount END)',
   "COALESCE(SUM(CASE status WHEN 'new' THEN qty END), 0)"])} AS v FROM orders GROUP BY customer_id${i%2?' ORDER BY customer_id':''}`,
 case_general_group: i => { const e = `CASE WHEN amount > ${pick([10,20])} OR qty > 2 THEN 'hi' ELSE 'lo' END`; return `SELECT ${e} AS b, COUNT(*) AS n FROM orders GROUP BY ${e}`; },
+// Scalar subqueries were refused (issue #5). Uncorrelated ones that return at most one row are a LEFT JOIN ON 1 = 1;
+// empty subqueries (no gold payment above 1000) must still give NULL, never drop the outer rows.
+scalar_sub: i => pick([
+  `SELECT id, amount FROM orders WHERE amount ${pick(['>','<','>='])} (SELECT AVG(amount) FROM orders${i%2?" WHERE status = 'paid'":''}) ORDER BY id`,
+  `SELECT id, amount - (SELECT ${pick(['MIN','MAX','AVG'])}(amount) FROM orders) AS d FROM orders ORDER BY id`,
+  'SELECT customer_id, SUM(amount) * 100.0 / (SELECT SUM(amount) FROM orders) AS share FROM orders GROUP BY customer_id ORDER BY customer_id',
+  "SELECT customer_id, COUNT(*) AS n FROM orders GROUP BY customer_id HAVING COUNT(*) >= (SELECT COUNT(*) FROM customers WHERE tier = 'gold') ORDER BY customer_id",
+  'SELECT id, (SELECT city FROM customers ORDER BY id DESC LIMIT 1) AS c FROM orders ORDER BY id',
+  `SELECT id FROM orders WHERE amount > (SELECT paid FROM payments WHERE paid > 1000 LIMIT 1) OR id < ${i%4} ORDER BY id`,
+  'SELECT id, COALESCE((SELECT MAX(paid) FROM payments WHERE order_id > 100), -1) AS p FROM orders ORDER BY id',
+  `SELECT customer_id, SUM(amount - (SELECT MIN(amount) FROM orders)) AS s FROM orders GROUP BY customer_id ORDER BY customer_id`,
+  `SELECT o.id, c.city FROM orders o CROSS JOIN customers c WHERE c.id = ${1+i%5} ORDER BY o.id`,
+  // The value is renamed sub_value; the subquery's own ORDER BY x / 1 / (order_id, x) must follow it.
+  `SELECT id, (SELECT paid AS x FROM payments ORDER BY ${pick(['x DESC','1 DESC','order_id DESC, x','x, id'])} LIMIT 1) AS c FROM orders ORDER BY id`]),
+// p.id (renamed id_2 by the JOIN) and c.id (the INNER JOIN key folded into the left one) used to point at the
+// left table's column once the table name was dropped — in WHERE, SELECT, ORDER BY and a later JOIN's ON.
+join_renamed: i => pick([
+  `SELECT o.id, p.id AS pid, p.paid FROM orders o JOIN payments p ON o.id = p.order_id WHERE p.id > ${i%5} ORDER BY o.id, p.id`,
+  `SELECT o.id, c.id AS cid FROM orders o JOIN customers c ON o.customer_id = c.id WHERE c.id <> ${1+i%4} ORDER BY o.id`,
+  'SELECT o.id, o2.amount AS other FROM orders o JOIN orders o2 ON o.customer_id = o2.customer_id WHERE o2.amount > o.amount ORDER BY o.id, o2.id',
+  `SELECT a.id, c.city FROM orders a JOIN orders b ON a.id = b.id JOIN customers c ON b.customer_id = c.id${i%2?" WHERE c.city <> 'Taipei'":''} ORDER BY a.id`,
+  `SELECT o.id, p.paid FROM orders o JOIN payments p ON o.id = p.order_id ORDER BY p.id ${i%2?'DESC':'ASC'}`,
+  // A window's PARTITION BY / ORDER BY p.id kept only "id" and ordered by the left table's id.
+  `SELECT o.id, p.id AS pid, ${pick(['LAG(p.paid) OVER (ORDER BY p.id DESC)','ROW_NUMBER() OVER (PARTITION BY o.id ORDER BY p.id DESC)',
+    'SUM(p.paid) OVER (ORDER BY o.amount, p.id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)'])} AS w FROM orders o JOIN payments p ON o.id = p.order_id ORDER BY o.id, p.id`]),
+// FULL OUTER JOIN was refused (issue #5). Unmatched rows on both sides survive; the right key stays as id_2.
+full_join: i => pick([
+  `SELECT o.id, c.id AS cid, c.city FROM orders o FULL OUTER JOIN customers c ON o.customer_id = c.id ORDER BY o.id, c.id`,
+  'SELECT COALESCE(o.customer_id, c.id) AS k, o.amount, c.tier FROM orders o FULL JOIN customers c ON o.customer_id = c.id ORDER BY k, o.amount',
+  `SELECT o.id, p.paid FROM orders o FULL JOIN payments p ON o.id = p.order_id WHERE ${pick(['o.id IS NULL','p.paid IS NULL','p.id > 2','o.amount >= 20'])} ORDER BY o.id, p.id`,
+  `SELECT o.id, p.id AS pid FROM orders o FULL JOIN payments p ON o.id = p.order_id AND o.amount ${pick(['<>','>','<='])} p.paid ORDER BY o.id, p.id`]),
+// Non-equi JOIN conditions (BETWEEN, <, <=, >, >=, <>) were refused (issue #5); NULL on either side never matches.
+nonequi_join: i => pick([
+  `SELECT o.id, p.id AS pid FROM orders o JOIN payments p ON o.amount ${pick(['<','<=','>','>=','<>'])} p.paid ORDER BY o.id, p.id`,
+  `SELECT a.id, b.id AS bid FROM date_sales a ${i%2?'LEFT ':''}JOIN date_sales b ON a.sale_date BETWEEN b.sale_date AND b.cutoff_date ORDER BY a.id, b.id`,
+  `SELECT o.id, p.id AS pid FROM orders o LEFT JOIN payments p ON o.id = p.order_id AND p.paid >= o.qty ORDER BY o.id, p.id`,
+  `SELECT o.id, c.id AS cid FROM customers c RIGHT JOIN orders o ON o.customer_id ${pick(['<','>='])} c.id ORDER BY o.id, c.id`]),
+// The LEFT JOIN key folded into the left one differs on unmatched rows (NULL vs the left value): must be refused.
+unsupported_left_key: i => `SELECT o.id FROM orders o LEFT JOIN customers c ON o.customer_id = c.id WHERE c.id IS ${i%2?'NOT ':''}NULL`,
 // A column that is neither grouped nor aggregated inside such an expression cannot be rebuilt and must be refused.
 unsupported_post_stray: i => `SELECT customer_id, COUNT(*) + ${pick(['qty','amount'])} AS n FROM orders GROUP BY customer_id`,
 unsupported_aggregate_collision: i => `SELECT SUM(CASE WHEN qty > ${i%3} THEN amount END)${i%2?' AS n':''}, SUM(CASE WHEN qty = 0 THEN amount END)${i%2?' AS n':''} FROM orders`,
@@ -153,13 +204,14 @@ function diff(a,b) {
 const norm = sql => sql.replace(/\s+/g,' ').trim().replace(/;$/,'');
 const counts = {total:0,identical_result:0,different_result:0,regenerated_sql_fails:0,parse_unsupported:0,textual_identical:0};
 const unsupported = {}, classes = new Map(), inputs = new Set();
-const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_') || ['agg_arith','group_expression','count_literal','expr_nested','agg_expr','decimal_division','agg_post','having_only','where_expr','where_star_expr','having_expr','case_general','agg_case_expr','case_general_group'].includes(k)));
+const mustExecute = new Set(Object.keys(families).filter(k=>k.startsWith('semi_') || k.startsWith('filter_') || k.startsWith('count_distinct') || k.startsWith('aggregate_order') || k === 'case_column' || k.startsWith('agg_case_') || ['agg_arith','group_expression','count_literal','expr_nested','agg_expr','decimal_division','agg_post','having_only','where_expr','where_star_expr','having_expr','case_general','agg_case_expr','case_general_group','window_more','scalar_sub','join_renamed','full_join','nonequi_join'].includes(k)));
 const mustRefuse = {
   unsupported_aggregate_order:/ORDER BY.*SELECT/,
   unsupported_case_group:/GROUP BY.*CASE/,
   unsupported_aggregate_collision:/彙總.*同名/,
   unsupported_window:/視窗/,
   unsupported_post_stray:/不在 GROUP BY/,
+  unsupported_left_key:/對照欄/,
 };
 for (const [category, make] of Object.entries(families)) for (let i=0;i<16;i++) {
   const base=make(i);
@@ -189,6 +241,136 @@ for (const [category, make] of Object.entries(families)) for (let i=0;i<16;i++) 
   const item={sql,regenerated,diff:failure?`original rows ${stable(original.rows.slice(0,4))}; regenerated: ${failure}`:diff(original,actual)};
   if (!classes.has(key)||sql.length<classes.get(key).sql.length) classes.set(key,item);
 }
+// The compact format folds steps into fewer SELECTs (issue #3). Folding must never change a result:
+// every input that round-trips is run again through the compact SQL.
+let compactSame = 0, compactShorter = 0;
+const compactBroken = [];
+for (const sql of inputs) {
+  let graphOK = true;
+  try { graphFromSQL(api, sql); } catch (error) { if (!error?.sqlErr) throw error; graphOK = false; }
+  if (!graphOK) continue;
+  const ordered = /\bORDER\s+BY\b/i.test(sql), unnamed = /COUNT\(DISTINCT amount\), COUNT/.test(sql);
+  const cte = api.buildSQL(), compact = api.buildCompactSQL();
+  let actual, failure;
+  try { actual = query(compact, ordered, unnamed); } catch (error) { failure = error.message; }
+  const original = query(sql, ordered, unnamed);
+  if (!failure && stable(original) === stable(actual)) { compactSame++; if (compact.length < cte.length) compactShorter++; continue; }
+  compactBroken.push({sql, compact, why: failure || diff(original, actual)});
+}
+console.log(`COMPACT same=${compactSame} shorter=${compactShorter} broken=${compactBroken.length}`);
+compactBroken.sort((a, b) => a.sql.length - b.sql.length).slice(0, 5)
+  .forEach(x => console.log(`COMPACT_BROKEN ${x.sql}\n  compact: ${x.compact.replace(/\s+/g, ' ')}\n  why: ${x.why}`));
+if (compactBroken.length) throw new Error(`compact format broke ${compactBroken.length} results`);
+// SQLite cannot run BigQuery pipe syntax, so each pipe operator is turned back into the nested SELECT it
+// stands for (WHERE, EXTEND, SELECT, AGGREGATE, ORDER BY + LIMIT, AS + JOIN + SELECT, UNION, AS + WHERE)
+// and the result must match the original. This checks the mapping from steps to pipe operators.
+function splitDepth0(s, sep) {
+  const parts = []; let depth = 0, cur = '', q = null;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (q) { cur += c; if (c === q) q = null; continue; }
+    if (c === "'" || c === '`' || c === '"') { q = c; cur += c; continue; }
+    if (c === '(') depth++;
+    if (c === ')') depth--;
+    if (depth === 0 && s.startsWith(sep, i)) { parts.push(cur); cur = ''; i += sep.length - 1; continue; }
+    cur += c;
+  }
+  parts.push(cur);
+  return parts.map(p => p.trim());
+}
+/* BigQuery's CONCAT is NULL when any argument is NULL, like ||; SQLite's concat() skips NULLs */
+function concatToPipes(s) {
+  let out = '', i = 0;
+  while (i < s.length) {
+    if (!/^CONCAT\(/.test(s.slice(i))) { out += s[i++]; continue; }
+    let depth = 0, j = i + 6;
+    for (; j < s.length; j++) { if (s[j] === '(') depth++; if (s[j] === ')' && --depth === 0) break; }
+    out += '(' + splitDepth0(concatToPipes(s.slice(i + 7, j)), ',').join(' || ') + ')';
+    i = j + 1;
+  }
+  return out;
+}
+function pipeToSQL(text) {
+  text = concatToPipes(text.replace(/^\/\*[\s\S]*?\*\/\n/, '').replace(/;\s*$/, '').replace(/\s*\n\s*/g, ' '));
+  /* inner pipelines first: ( FROM … |> … ) and (FROM t) */
+  const inner = s => {
+    let out = '', i = 0;
+    while (i < s.length) {
+      const m = /^\(\s*FROM /.exec(s.slice(i));
+      if (!m) { out += s[i++]; continue; }
+      let depth = 0, j = i;
+      for (; j < s.length; j++) { if (s[j] === '(') depth++; if (s[j] === ')' && --depth === 0) break; }
+      out += '(' + pipeToSQL(s.slice(i + 1, j)) + ')';
+      i = j + 1;
+    }
+    return out;
+  };
+  let withSQL = '';
+  if (/^WITH /.test(text)) {
+    const body = text.slice(5);
+    const entries = [];
+    let rest = body, m;
+    while ((m = /^([A-Za-z_]\w*) AS \(/.exec(rest))) {
+      let depth = 0, j = m[0].length - 1;
+      for (; j < rest.length; j++) { if (rest[j] === '(') depth++; if (rest[j] === ')' && --depth === 0) break; }
+      entries.push(m[1] + ' AS (' + pipeToSQL(rest.slice(m[0].length, j)) + ')');
+      rest = rest.slice(j + 1).replace(/^\s*,\s*/, '').trim();
+    }
+    withSQL = 'WITH ' + entries.join(', ') + ' ';
+    text = rest;
+  }
+  const ops = splitDepth0(inner(text), '|>');
+  let qy = 'SELECT * FROM ' + ops[0].replace(/^FROM /, ''), alias = 'p', join = null, ordered = false;
+  for (const op of ops.slice(1)) {
+    const wrap = () => '(' + qy + ') AS ' + alias;
+    let m;
+    if ((m = /^AS (\w+)$/.exec(op))) { alias = m[1]; continue; }
+    if ((m = /^((?:INNER|LEFT|FULL|CROSS) JOIN .*)$/.exec(op))) { join = wrap() + ' ' + m[1]; alias = 'p'; continue; }
+    if ((m = /^WHERE (.*)$/.exec(op))) qy = 'SELECT * FROM ' + wrap() + ' WHERE ' + m[1];
+    else if ((m = /^EXTEND (.*)$/.exec(op))) qy = 'SELECT *, ' + m[1] + ' FROM ' + wrap();
+    else if ((m = /^SELECT (.*)$/.exec(op))) qy = 'SELECT ' + m[1] + ' FROM ' + (join || wrap());
+    else if ((m = /^AGGREGATE (.*)$/.exec(op))) {
+      const parts = splitDepth0(m[1], 'GROUP BY ');
+      const aggs = parts[0].replace(/\s+$/, ''), keys = parts[1];
+      qy = 'SELECT ' + [keys, aggs].filter(Boolean).join(', ') + ' FROM ' + wrap() + (keys ? ' GROUP BY ' + keys : '');
+    }
+    else if ((m = /^ORDER BY (.*)$/.exec(op))) { qy = 'SELECT * FROM ' + wrap() + ' ORDER BY ' + m[1]; alias = 'p'; ordered = true; continue; }
+    else if ((m = /^LIMIT (.*)$/.exec(op))) qy = ordered ? qy + ' LIMIT ' + m[1] : 'SELECT * FROM ' + wrap() + ' LIMIT ' + m[1];
+    else if ((m = /^UNION (ALL|DISTINCT) (.*)$/.exec(op))) qy = 'SELECT * FROM ' + wrap() + ' UNION' + (m[1] === 'ALL' ? ' ALL' : '') + ' SELECT * FROM ' + m[2] + ' AS u2';
+    else throw new Error('pipe operator not understood: ' + op);
+    join = null; alias = 'p'; ordered = false;
+  }
+  return withSQL + qy;
+}
+let pipeSame = 0;
+const pipeBroken = [];
+for (const sql of inputs) {
+  try { graphFromSQL(api, sql); } catch (error) { if (!error?.sqlErr) throw error; continue; }
+  const ordered = /\bORDER\s+BY\b/i.test(sql), unnamed = /COUNT\(DISTINCT amount\), COUNT/.test(sql);
+  const pipe = api.buildPipeSQL();
+  let actual, failure, translated = '';
+  try { translated = pipeToSQL(pipe); actual = query(translated, ordered, unnamed); } catch (error) { failure = error.message; }
+  const original = query(sql, ordered, unnamed);
+  if (!failure && stable(original) === stable(actual)) { pipeSame++; continue; }
+  pipeBroken.push({sql, pipe, translated, why: failure || diff(original, actual)});
+}
+console.log(`PIPE same=${pipeSame} broken=${pipeBroken.length}`);
+pipeBroken.sort((a, b) => a.sql.length - b.sql.length).slice(0, 4)
+  .forEach(x => console.log(`PIPE_BROKEN ${x.sql}\n  pipe: ${x.pipe.replace(/\s+/g, ' ')}\n  as SQL: ${x.translated}\n  why: ${x.why}`));
+if (pipeBroken.length) throw new Error(`pipe format broke ${pipeBroken.length} results`);
+// MySQL has no FULL JOIN; its LEFT JOIN UNION ALL rewrite must give the same rows too.
+api.state.dialect = 'mysql';
+let mysqlFull = 0;
+for (const sql of [...inputs].filter(s=>/FULL/.test(s))) {
+  graphFromSQL(api, sql);
+  const regenerated = api.buildSQL(), ordered = /\bORDER\s+BY\b/i.test(sql);
+  if (!/UNION ALL/.test(regenerated)) throw new Error(`MySQL FULL JOIN not rewritten: ${regenerated}`);
+  const original = query(sql, ordered), actual = query(regenerated, ordered);
+  if (stable(original) !== stable(actual)) throw new Error(`MySQL FULL JOIN rewrite differs for ${sql}: ${diff(original, actual)}`);
+  mysqlFull++;
+}
+api.state.dialect = 'postgres';
+console.log('MYSQL_FULL '+mysqlFull);
 // Recheck simpler candidate inputs instead of merely calling the shortest random case minimal.
 const reduced = {
   'alias/execution': {sql:'SELECT id x FROM orders', location:'sql-blocks.html:4222'},
