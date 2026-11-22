@@ -1,0 +1,24 @@
+# 開 PR 時就跑測試，合併前就看得到綠勾或紅叉（部署前的測試在 pages.yml，只在推到 main 時跑）。
+name: tests
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run tests
+        run: node tests/run.mjs
+
+      - name: Round-trip fuzz
+        run: node tests/roundtrip-fuzz/run.mjs
